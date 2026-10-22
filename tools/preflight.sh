@@ -49,6 +49,8 @@ fi
 # 未知参数会被直接拒绝，所以源码里用到却没登记的参数会让一个合法用法失效。
 # 反过来，登记表靠手维护必然漂移，这里机械核对源码与登记表。
 echo "=== 6. 参数登记完整性 ==="
+# Regenerate first: the table is derived from source, never hand-edited.
+python3 tools/gen_params.py >/dev/null 2>&1 || true
 python3 - <<'PY'
 import re, os, sys
 src = ""

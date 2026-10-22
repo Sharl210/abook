@@ -542,6 +542,22 @@ impl ListFilter {
                 return false;
             }
         }
+        // `--q` was accepted but never applied: `list --q GATE` returned the
+        // whole library, which is the same class of bug as ignoring a flag.
+        // Match any field value or the body, case-insensitively.
+        if let Some(q) = a.get("q") {
+            let needle = q.to_lowercase();
+            if !needle.is_empty() {
+                let hit_field = rec
+                    .fields
+                    .iter()
+                    .any(|(_, v)| v.to_lowercase().contains(&needle));
+                let hit_body = rec.body.to_lowercase().contains(&needle);
+                if !hit_field && !hit_body {
+                    return false;
+                }
+            }
+        }
         true
     }
 }

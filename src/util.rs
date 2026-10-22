@@ -79,16 +79,17 @@ pub fn integrity<T>(m: impl Into<String>) -> R<T> {
 /// `known()` can binary-search it; a stale entry means a legitimate parameter
 /// gets rejected, so this list is exercised by selftest.
 pub const KNOWN_PARAMS: &[&str] = &[
-    "after", "and", "authority", "body", "body-file", "branch", "by", "card",
-    "concepts", "confidence", "content", "context", "depth", "dest", "dir",
-    "distance", "edits", "entities", "evidence", "field", "file", "for",
-    "format", "from", "id", "ids", "in", "into", "json-depth", "keep", "keys",
-    "kind", "level", "lib", "match", "maturity", "max", "min-score", "mode",
-    "name", "new", "next", "not-for", "old", "out", "page", "path", "per",
-    "per-page", "project", "purpose", "q", "query", "read-when", "reason",
-    "related", "root", "scope", "session", "since", "slug", "source",
-    "status", "stdin", "summary", "tag", "target", "task", "text", "tier",
-    "title", "to", "token", "url", "value", "with", "within",
+    "after", "and", "at", "authority", "body", "body-file", "branch", "by",
+    "card", "concepts", "confidence", "content", "context", "depth", "dest",
+    "dir", "distance", "edits", "entities", "evidence", "field", "file",
+    "for", "format", "from", "id", "ids", "in", "into", "json-depth", "keep",
+    "keys", "kind", "level", "lib", "match", "maturity", "max", "min-score",
+    "mode", "name", "new", "next", "not-for", "old", "out", "page", "path",
+    "per", "per-page", "project", "purpose", "q", "query", "read-when",
+    "reason", "related", "root", "scope", "session", "since", "slug",
+    "source", "status", "stdin", "summary", "supersedes", "tag", "target",
+    "task", "text", "tier", "title", "to", "token", "uncertainty", "url",
+    "value", "with", "within",
 ];
 
 const BOOLS: &[&str] = &[

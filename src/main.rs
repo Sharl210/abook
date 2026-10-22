@@ -98,7 +98,7 @@ fn help_text() -> String {
   rename <记录> <新名> [--title]   改名或改标题
   move <记录> <分支>        换分支
   copy <记录> [--to canonical|candidate]   复制
-  merge <记录A> <记录B> ... [--title T] [--remove-sources]   合并
+  merge <记录A> <记录B> ... [--title T] [--remove-sources]   合并成新记录（源记录标记 SUPERSEDED，仍可检索）
   split <记录> --at <文本>  在指定位置拆成两条
   promote <候选> [--branch B]    候选 → 正式（需 --approve）
   demote <正式>             正式 → 候选（需 --approve）
@@ -155,6 +155,8 @@ fn help_text() -> String {
   move       --dry-run
   copy       --to --approve --dry-run
   merge      --title --remove-sources --approve --dry-run
+             合并结果是一条新记录；--remove-sources 把源记录标成 SUPERSEDED
+             （仍留在库里可检索，不等于删除）
   split      --at --dry-run
   delete     --hard --approve --dry-run
   restore    --approve --dry-run
