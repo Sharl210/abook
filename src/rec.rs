@@ -88,6 +88,11 @@ pub struct Record {
     pub body: String,
     pub promotion: Option<String>,
     pub raw: String,
+    /// Every deviation the tolerant parser had to absorb for this file.
+    /// Empty means the file was in canonical form.
+    pub devs: Vec<crate::parse::Deviation>,
+    /// Set when the file had no header tag and the header was inferred.
+    pub header_inferred: bool,
 }
 
 /// Parse `KEY=value` pairs from one header line, tolerating `;` inside values
@@ -195,68 +200,47 @@ impl Record {
             .unwrap_or_default()
     }
 
-    /// Parse a record file.
+    /// Parse a record file through the tolerant parser.
+    ///
+    /// This never hard-matches: aliases, missing tags, full-width punctuation,
+    /// packed lines and duplicate keys are all absorbed and recorded.
     pub fn parse(path: &Path, lib: Lib) -> R<Record> {
         let raw = read_str(path)?;
-        let mut rec = Record {
+        Record::parse_str(&raw, path, lib)
+    }
+
+    /// Parse already-loaded text (used by tests and by `selftest`).
+    pub fn parse_str(raw: &str, path: &Path, lib: Lib) -> R<Record> {
+        let filename = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let parsed = crate::parse::parse(raw, Some(lib));
+        if parsed.has_error() {
+            let msgs: Vec<String> = parsed
+                .errors()
+                .iter()
+                .map(|d| d.show())
+                .collect();
+            return integrity(format!(
+                "无法解析 {}: {}",
+                if filename.is_empty() { "<文本>" } else { &filename },
+                msgs.join(" | ")
+            ));
+        }
+        // The tag spelling wins when it disagrees with the caller's assumption.
+        let lib = parsed.lib_hint.unwrap_or(lib);
+        let header_inferred = !parsed.had_header_tag;
+        Ok(Record {
             path: path.to_path_buf(),
             lib,
-            fields: Vec::new(),
-            body: String::new(),
-            promotion: None,
-            raw: raw.clone(),
-        };
-        let mut in_header = false;
-        let mut in_body = false;
-        let mut in_promo = false;
-        let mut found = false;
-        for line in raw.lines() {
-            let t = line.trim();
-            if t == format!("[{}]", lib.tag()) || t == "[CANDIDATE_MEMORY]" || t == "[CANONICAL_MEMORY]"
-            {
-                in_header = true;
-                found = true;
-                continue;
-            }
-            if t == format!("[/{}]", lib.tag()) || t == "[/CANDIDATE_MEMORY]" || t == "[/CANONICAL_MEMORY]"
-            {
-                in_header = false;
-                continue;
-            }
-            if t == "[MEMORY_BODY]" {
-                in_body = true;
-                continue;
-            }
-            if t == "[/MEMORY_BODY]" {
-                in_body = false;
-                continue;
-            }
-            if t == "[PROMOTION]" {
-                in_promo = true;
-                continue;
-            }
-            if t == "[/PROMOTION]" {
-                in_promo = false;
-                continue;
-            }
-            if in_header {
-                if !t.is_empty() {
-                    parse_kv_line(line, &mut rec.fields);
-                }
-            } else if in_body {
-                rec.body.push_str(line);
-                rec.body.push('\n');
-            } else if in_promo {
-                let pr = rec.promotion.get_or_insert_with(String::new);
-                pr.push_str(line);
-                pr.push('\n');
-            }
-        }
-        if !found {
-            return integrity(format!("不是有效记录(缺少 [{}]): {}", lib.tag(), path.display()));
-        }
-        rec.body = rec.body.trim_matches('\n').to_string();
-        Ok(rec)
+            fields: parsed.fields.clone(),
+            body: parsed.body.clone(),
+            promotion: parsed.promotion.clone(),
+            raw: raw.to_string(),
+            devs: parsed.devs.clone(),
+            header_inferred,
+        })
     }
 
     /// Serialise back to the on-disk format.
@@ -465,4 +449,63 @@ pub fn load_lib(root: &Path, lib: Lib) -> Vec<Record> {
         }
     }
     v
+}
+
+/// Field-level listing filter used by `list`.
+#[derive(Clone, Debug, Default)]
+pub struct ListFilter {
+    pub kind: String,
+    pub maturity: String,
+    pub status: String,
+    pub project: String,
+    pub lib: String,
+    pub has_dev: bool,
+}
+
+impl ListFilter {
+    pub fn from_args(a: &crate::util::Args) -> ListFilter {
+        ListFilter {
+            kind: a.get("kind").unwrap_or("").to_uppercase(),
+            maturity: a.get("maturity").unwrap_or("").to_uppercase(),
+            status: a.get("status").unwrap_or("").to_uppercase(),
+            project: a.get("project").unwrap_or("").to_string(),
+            lib: a.get("lib").unwrap_or("").to_string(),
+            has_dev: a.has("deviations"),
+        }
+    }
+
+    pub fn accept(&self, rec: &Record, a: &crate::util::Args) -> bool {
+        if !self.lib.is_empty() {
+            let want = self.lib.starts_with('c') && !self.lib.starts_with("cand");
+            if want != (rec.lib == Lib::Canonical) {
+                return false;
+            }
+        }
+        if !self.kind.is_empty() && !rec.kind().eq_ignore_ascii_case(&self.kind) {
+            return false;
+        }
+        if !self.maturity.is_empty() && !rec.get("MATURITY").eq_ignore_ascii_case(&self.maturity) {
+            return false;
+        }
+        if !self.status.is_empty() {
+            let st = rec.status();
+            if !st.eq_ignore_ascii_case(&self.status) {
+                return false;
+            }
+        } else if rec.status() == "DELETED" && !a.has("include-deleted") {
+            return false;
+        }
+        if !self.project.is_empty() && !rec.get("PROJECT").eq_ignore_ascii_case(&self.project) {
+            return false;
+        }
+        if self.has_dev && rec.devs.is_empty() {
+            return false;
+        }
+        if let Some(k) = a.get("title") {
+            if !rec.title().to_lowercase().contains(&k.to_lowercase()) {
+                return false;
+            }
+        }
+        true
+    }
 }

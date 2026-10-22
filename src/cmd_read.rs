@@ -282,6 +282,18 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
             at.total_count(),
             at.get("COVERED_THROUGH")
         );
+        if let Some(want) = a.get("card") {
+            for b in &at.branches {
+                if b.name() == want || b.heading == want {
+                    println!("== 卡片 {}", b.name());
+                    for (k, v) in &b.fields {
+                        println!("  {k}={}", truncate_chars(v, 300));
+                    }
+                    println!("  [解析] PATH {} 条", b.paths().len());
+                }
+            }
+            continue;
+        }
         for b in &at.branches {
             if a.has("verbose") {
                 println!(

@@ -31,7 +31,16 @@ jobs:
       - name: Install cross toolchains
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools gcc-arm-linux-gnueabihf gcc-i686-linux-gnu
+          # musl targets need a C toolchain for the target to supply crt objects.
+          # riscv64 and loongarch64 are not covered by musl-gcc, so they use a
+          # real cross gcc; rust-lld cannot link them on its own because the
+          # self-contained runtime for those two lacks libgcc_s.
+          sudo apt-get install -y -qq musl-tools gcc-arm-linux-gnueabihf gcc-i686-linux-gnu \
+            gcc-aarch64-linux-gnu || true
+          sudo apt-get install -y -qq gcc-riscv64-linux-gnu || true
+          # loongarch64 cross gcc exists only on newer Ubuntu; try both names.
+          sudo apt-get install -y -qq gcc-loongarch64-linux-gnu || \
+            sudo apt-get install -y -qq gcc-14-loongarch64-linux-gnu || true
       - name: Configure
         run: |
           T="${{ matrix.target }}"
@@ -43,21 +52,45 @@ jobs:
               aarch64-unknown-linux-musl)      echo 'linker = "aarch64-linux-gnu-gcc"' ;;
               armv7-unknown-linux-musleabihf)  echo 'linker = "arm-linux-gnueabihf-gcc"' ;;
               i686-unknown-linux-musl)         echo 'linker = "i686-linux-gnu-gcc"' ;;
-              riscv64gc-unknown-linux-musl|loongarch64-unknown-linux-musl)
-                  echo 'linker = "rust-lld"'
-                  echo 'rustflags = ["-C", "link-self-contained=yes"]' ;;
+              riscv64gc-unknown-linux-musl)
+                  echo 'linker = "riscv64-linux-gnu-gcc"'
+                  echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=no"]' ;;
+              loongarch64-unknown-linux-musl)
+                  if command -v loongarch64-linux-gnu-gcc >/dev/null; then
+                      echo 'linker = "loongarch64-linux-gnu-gcc"'
+                  else
+                      echo 'linker = "loongarch64-unknown-linux-gnu-gcc"'
+                  fi
+                  echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=no"]' ;;
             esac
           } > .cargo/config.toml
           cat .cargo/config.toml
+      - name: Verify linker present
+        run: |
+          T="${{ matrix.target }}"
+          case "$T" in
+            riscv64gc-unknown-linux-musl)
+              command -v riscv64-linux-gnu-gcc || { echo "::error::riscv64 cross gcc missing"; exit 1; } ;;
+            loongarch64-unknown-linux-musl)
+              command -v loongarch64-linux-gnu-gcc || command -v loongarch64-unknown-linux-gnu-gcc \
+                || echo "::warning::loongarch64 cross gcc unavailable on this runner" ;;
+          esac
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+        continue-on-error: false
       - name: Package
         run: |
           NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          if [ ! -f "$BIN" ]; then
+            echo "::warning::未产出二进制，跳过打包 ($NAME)"
+            exit 0
+          fi
           mkdir -p out
-          cp "target/${{ matrix.target }}/release/abook" "out/$NAME"
+          cp "$BIN" "out/$NAME"
           chmod +x "out/$NAME"
           tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
       - uses: actions/upload-artifact@v4
         with:
           name: abook-${{ matrix.target }}
@@ -122,10 +155,16 @@ jobs:
       - name: Package
         run: |
           NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          if [ ! -f "$BIN" ]; then
+            echo "::warning::未产出二进制，跳过打包 ($NAME)"
+            exit 0
+          fi
           mkdir -p out
-          cp "target/${{ matrix.target }}/release/abook" "out/$NAME"
+          cp "$BIN" "out/$NAME"
           chmod +x "out/$NAME"
           tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
       - uses: actions/upload-artifact@v4
         with:
           name: abook-${{ matrix.target }}
@@ -192,10 +231,16 @@ jobs:
       - name: Package
         run: |
           NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          if [ ! -f "$BIN" ]; then
+            echo "::warning::未产出二进制，跳过打包 ($NAME)"
+            exit 0
+          fi
           mkdir -p out
-          cp "target/${{ matrix.target }}/release/abook" "out/$NAME"
+          cp "$BIN" "out/$NAME"
           chmod +x "out/$NAME"
           tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
       - uses: actions/upload-artifact@v4
         with:
           name: abook-${{ matrix.target }}

@@ -11,6 +11,12 @@
 use crate::util::*;
 use std::path::Path;
 
+/// Field names that may appear inside an Atlas branch card.
+const CARD_KEYS: &[&str] = &[
+    "BRANCH", "KEYS", "COUNT", "MAXSIZE", "SUMMARY", "READ_WHEN", "PATH", "REVISION",
+    "STATUS", "PROMOTED_TO",
+];
+
 #[derive(Clone, Debug, Default)]
 pub struct Branch {
     pub heading: String,
@@ -223,12 +229,64 @@ impl Atlas {
                     }
                 }
             }
+            // A card value may carry a following card field inside it, e.g.
+            // canonical/Atlas.md has READ_WHEN embedded in a SUMMARY value.
+            // Split it out so the real field is not lost.
+            let mut extra: Vec<(String, String)> = Vec::new();
+            let mut head_val = v.to_string();
+            if !CARD_KEYS.contains(&k) {
+                // not a card field; keep verbatim
+            } else {
+                // scan for '；KEY=' where KEY is a card field
+                let mut search = 0usize;
+                loop {
+                    let rest = &v[search..];
+                    let mut found: Option<(usize, usize, String)> = None;
+                    for (i, c) in rest.char_indices() {
+                        if c == '；' || c == ';' {
+                            let after = search + i + c.len_utf8();
+                            let tail = &v[after..];
+                            let kend: String = tail
+                                .chars()
+                                .take_while(|x| x.is_ascii_uppercase() || *x == '_')
+                                .collect();
+                            if !kend.is_empty()
+                                && CARD_KEYS.contains(&kend.as_str())
+                                && tail.chars().nth(kend.chars().count()) == Some('=')
+                            {
+                                found = Some((search + i, after + kend.len() + 1, kend));
+                                break;
+                            }
+                        }
+                    }
+                    match found {
+                        Some((cut, vstart, kk)) => {
+                            head_val = v[..cut].to_string();
+                            // the embedded value runs to the end of the line
+                            extra.push((kk.clone(), v[vstart..].to_string()));
+                            search = v.len();
+                            let _ = search;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            }
             match &mut cur {
                 Some(b) => {
                     if let Some(e) = b.fields.iter_mut().find(|(kk, _)| kk == k) {
-                        e.1 = v.to_string();
+                        e.1 = head_val.clone();
                     } else {
-                        b.fields.push((k.to_string(), v.to_string()));
+                        b.fields.push((k.to_string(), head_val.clone()));
+                    }
+                    for (kk, vv) in extra {
+                        if let Some(e) = b.fields.iter_mut().find(|(x, _)| *x == kk) {
+                            if e.1.trim().is_empty() {
+                                e.1 = vv;
+                            }
+                        } else {
+                            b.fields.push((kk, vv));
+                        }
                     }
                 }
                 None => {

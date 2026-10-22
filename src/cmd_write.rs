@@ -33,6 +33,8 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         body: body.trim_end().to_string(),
         promotion: None,
         raw: String::new(),
+        devs: Vec::new(),
+        header_inferred: false,
     };
     let format = if lib == Lib::Canonical {
         "CANONICAL_MEMORY_V2"
@@ -92,7 +94,11 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         "SUMMARY",
         &{
             let p = opt(a, "summary");
-            if p.is_empty() { truncate_chars(body.trim(), 160) } else { p }
+            if p.is_empty() {
+                derive_summary(&body)
+            } else {
+                p
+            }
         },
     );
     let read_when = opt(a, "read-when");
@@ -300,6 +306,8 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
         body: cand.body.clone(),
         promotion: None,
         raw: String::new(),
+        devs: Vec::new(),
+        header_inferred: false,
     };
     canon.set("FORMAT", "CANONICAL_MEMORY_V2");
     canon.set("ID", &id);

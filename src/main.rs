@@ -6,10 +6,21 @@
 
 mod atlas;
 mod book;
+mod parse;
+mod rx;
+mod search;
+mod semantic;
+mod paging;
+mod schema;
+mod selftest;
 mod cmd_admin;
+mod cmd_edit;
+mod cmd_audit;
+mod cmd_view;
 mod cmd_read;
 mod cmd_vault;
 mod cmd_write;
+mod cmd_write_sync;
 mod query;
 mod rec;
 mod sha256;
@@ -298,7 +309,7 @@ fn dispatch(a: &Args) -> R<i32> {
         "state" => cmd_read::cmd_state(a),
         "stats" => cmd_read::cmd_stats(a),
         "recall" | "find" => cmd_read::cmd_recall(a),
-        "search" => cmd_read::cmd_search(a),
+        "index-search" => cmd_read::cmd_search(a),
         "show" | "cat" => cmd_read::cmd_show(a),
         "atlas" | "map" => cmd_read::cmd_atlas(a),
         "index" => cmd_read::cmd_index(a),
@@ -375,6 +386,30 @@ fn dispatch(a: &Args) -> R<i32> {
             println!("{}", p.display());
             Ok(0)
         }
+        "audit" => cmd_audit::cmd_audit(a),
+        "check" => cmd_audit::cmd_check(a),
+        "repair" | "fix" => cmd_audit::cmd_repair(a),
+        "get" => cmd_view::cmd_get(a),
+        "list" | "ls" => cmd_view::cmd_list(a),
+        "history" | "log" => cmd_view::cmd_history(a),
+        "diff" => cmd_view::cmd_diff(a),
+        "export" => cmd_view::cmd_export(a),
+        "tree" => cmd_view::cmd_tree(a),
+        "search" | "find" => cmd_view::cmd_search(a),
+        "grep" => cmd_view::cmd_grep(a),
+        "budget" => cmd_view::cmd_budget(a),
+        "set" => cmd_edit::cmd_set(a),
+        "unset" => cmd_edit::cmd_unset(a),
+        "append" => cmd_edit::cmd_append(a),
+        "prepend" => cmd_edit::cmd_prepend(a),
+        "patch" => cmd_edit::cmd_patch(a),
+        "rename" => cmd_edit::cmd_rename(a),
+        "move" => cmd_edit::cmd_move(a),
+        "copy" | "cp" => cmd_edit::cmd_copy(a),
+        "demote" => cmd_edit::cmd_demote(a),
+        "merge" => cmd_edit::cmd_merge(a),
+        "split" => cmd_edit::cmd_split(a),
+        "selftest" => selftest::cmd_selftest(a),
         "detect" | "where" => cmd_detect(a),
         "install" | "self-install" => cmd_install(a),
         other => usage(format!("未知命令: {other}（运行 abook help）")),

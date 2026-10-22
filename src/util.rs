@@ -75,26 +75,22 @@ pub fn integrity<T>(m: impl Into<String>) -> R<T> {
 
 /// Boolean switches that never consume the following token.
 const BOOLS: &[&str] = &[
-    "json",
-    "dry-run",
-    "approve",
-    "hard",
-    "fix",
-    "quiet",
-    "raw",
-    "all",
-    "include-promoted",
-    "force",
-    "compact",
-    "verify",
-    "no-index",
-    "no-atlas",
-    "help",
-    "verbose",
-    "summary-only",
-    "no-commit",
-    "prune",
-    "yes",
+    // A flag listed here never consumes the following token. Anything used as
+    // `a.has(...)` MUST be here, otherwise a bare flag would swallow the next
+    // positional argument — which is how `--semantic 查询词` used to lose its
+    // query entirely.
+    // output / behaviour
+    "json", "quiet", "raw", "compact", "verbose", "help",
+    // authorisation and safety
+    "approve", "yes", "force", "hard", "dry-run", "apply",
+    // scope switches
+    "all", "include-promoted", "include-deleted", "hide-promoted",
+    "no-expand", "no-index", "no-atlas", "no-commit",
+    "summary-only", "purpose-only", "deviations", "fields",
+    "remove-sources", "rebuild", "fix", "verify", "prune",
+    // search modes
+    "regex", "re", "fuzzy", "approx", "literal", "exact",
+    "semantic", "sem", "ask", "case", "deep", "expand", "raw-lines", "lines", "whole-line",
 ];
 
 #[derive(Debug, Default)]
@@ -267,12 +263,36 @@ pub fn stamps() -> Stamps {
 
 /// Parse `YYYY-MM-DDTHH:MM:SSZ` or `YYYYMMDDTHHMMSS` into epoch seconds (UTC).
 pub fn parse_stamp(s: &str) -> Option<i64> {
-    let t = s.trim().trim_end_matches('Z');
-    let (date, time) = if let Some((d, t)) = t.split_once('T') {
+    // Accepts the three spellings that occur in real records:
+    //   2026-10-01T20:11:23+08:00[Asia/Shanghai]
+    //   2026-09-27 13:15:47 +08:00
+    //   20260927T131547
+    let raw = s.trim();
+    // strip a trailing [Zone] annotation
+    let t0 = match raw.split_once('[') {
+        Some((head, _)) => head.trim(),
+        None => raw,
+    };
+    let t0 = t0.trim_end_matches('Z');
+    let (date, time) = if let Some((d, t)) = t0.split_once('T') {
         (d, t)
+    } else if let Some((d, t)) = t0.split_once(' ') {
+        (d, t.trim())
     } else {
         return None;
     };
+    // drop a numeric UTC offset that stuck to the time
+    let time = {
+        let mut cut = time.len();
+        for (i, c) in time.char_indices() {
+            if (c == '+' || c == '-') && i > 0 {
+                cut = i;
+                break;
+            }
+        }
+        &time[..cut]
+    };
+    let time = time.trim();
     let (y, mo, d) = if date.contains('-') {
         let p: Vec<&str> = date.split('-').collect();
         if p.len() != 3 {
@@ -506,4 +526,27 @@ pub fn split_list(s: &str) -> Vec<String> {
         .map(|x| x.trim().to_string())
         .filter(|x| !x.is_empty())
         .collect()
+}
+
+/// The summary the tool derives from a body when the caller supplies none.
+/// Kept as one function so edits can tell "still the derived value" from
+/// "the author wrote this".
+pub fn derive_summary(body: &str) -> String {
+    truncate_chars(body.trim(), 160)
+}
+
+/// Re-derive body-dependent fields, but only where they still hold the
+/// derived value. An authored SUMMARY or SIZE is never overwritten.
+pub fn rederive_after_body_change(rec: &mut crate::rec::Record, old_body: &str) {
+    let new_body = rec.body.clone();
+    if rec.get("SUMMARY") == derive_summary(old_body) {
+        let v = derive_summary(&new_body);
+        rec.set("SUMMARY", &v);
+    }
+    // SIZE follows the same rule.
+    let old_size = crate::schema::size_for(old_body.len());
+    if rec.get("SIZE") == old_size {
+        let v = crate::schema::size_for(new_body.len());
+        rec.set("SIZE", v);
+    }
 }
