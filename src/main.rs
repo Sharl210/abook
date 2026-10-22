@@ -615,10 +615,58 @@ fn main() {
     std::process::exit(code);
 }
 
+
+/// Levenshtein distance, used only to suggest a corrected parameter name.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 fn dispatch(a: &Args) -> R<i32> {
     if a.has("help") || a.cmd == "help" || a.cmd == "--help" {
         print!("{}", help_text());
         return Ok(0);
+    }
+    // Reject unknown parameters up front. Ignoring them was actively harmful:
+    // a mistyped `--limt 5` returned the entire library and still looked fine.
+    // `--help` is exempt so per-command help keeps working.
+    let mut unknown: Vec<String> = a
+        .kv
+        .keys()
+        .filter(|k| !Args::known(k))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        let near = |bad: &str| -> Option<String> {
+            let mut best: Option<(usize, &str)> = None;
+            for k in Args::all_known() {
+                let d = edit_distance(bad, k);
+                if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                    best = Some((d, k));
+                }
+            }
+            best.filter(|(d, _)| *d <= 2).map(|(_, k)| k.to_string())
+        };
+        let mut msg = format!("无法识别的参数: {}", unknown.join("、"));
+        for u in &unknown {
+            if let Some(n) = near(u) {
+                msg.push_str(&format!("\n  --{u} 是否想写 --{n}？"));
+            }
+        }
+        msg.push_str("\n运行 `abook help` 查看全部命令与参数。");
+        return usage(msg);
     }
     match a.cmd.as_str() {
         "version" | "-V" | "--version" => {

@@ -427,6 +427,74 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- a mistyped parameter must be rejected, not ignored
+    // Returning the whole library for `--limt 5` looked like success, which is
+    // worse than an error: the caller believes it paged.
+    {
+        let mut good = 0;
+        let total = 5;
+        // a real name is accepted
+        if crate::util::Args::known("per-page") {
+            good += 1;
+        }
+        // a typo is not
+        if !crate::util::Args::known("limt") {
+            good += 1;
+        }
+        // every known name is listed exactly once (a stale list would reject
+        // a legitimate parameter)
+        let listed: Vec<&str> = crate::util::Args::all_known().collect();
+        let uniq: std::collections::BTreeSet<&str> = listed.iter().copied().collect();
+        if listed.len() == uniq.len() {
+            good += 1;
+        }
+        // the alias table actually redirects the common spellings
+        let argv: Vec<String> = ["list", "--limit", "3"].iter().map(|s| s.to_string()).collect();
+        if let Ok(a) = crate::util::Args::parse(&argv) {
+            if a.num("per-page") == Some(3) {
+                good += 1;
+            }
+        }
+        let argv2: Vec<String> = ["list", "--size", "7"].iter().map(|s| s.to_string()).collect();
+        if let Ok(a) = crate::util::Args::parse(&argv2) {
+            if a.num("per-page") == Some(7) {
+                good += 1;
+            }
+        }
+        if good == total {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  参数校验：拼错即报错，--limit/--size 归一到分页".to_string());
+            }
+        } else {
+            fail += 1;
+            // Report which sub-check failed, otherwise the message is useless.
+            let mut which: Vec<&str> = Vec::new();
+            if !crate::util::Args::known("per-page") {
+                which.push("per-page 未被识别");
+            }
+            if crate::util::Args::known("limt") {
+                which.push("拼错的名字被当成合法");
+            }
+            if listed.len() != uniq.len() {
+                which.push("已知参数表有重复登记");
+            }
+            let a1 = crate::util::Args::parse(&argv).ok();
+            if a1.as_ref().and_then(|a| a.num("per-page")) != Some(3) {
+                which.push("--limit 未归一");
+            }
+            let a2 = crate::util::Args::parse(&argv2).ok();
+            if a2.as_ref().and_then(|a| a.num("per-page")) != Some(7) {
+                which.push("--size 未归一");
+            }
+            msgs.push(format!(
+                "FAIL  参数校验：{} 项中只有 {good} 项正确 [{}]",
+                total,
+                which.join("，")
+            ));
+        }
+    }
+
     // ---- platform table completeness
     // Every triple advertised by `detect` must also be built by CI. The list
     // below is the CI matrix; a mismatch means an install would 404.

@@ -74,6 +74,21 @@ pub fn integrity<T>(m: impl Into<String>) -> R<T> {
 // ---------------------------------------------------------------- args
 
 /// Boolean switches that never consume the following token.
+
+/// Sorted list of every value-taking parameter name in the tool. Kept sorted so
+/// `known()` can binary-search it; a stale entry means a legitimate parameter
+/// gets rejected, so this list is exercised by selftest.
+pub const KNOWN_PARAMS: &[&str] = &[
+    "after", "authority", "branch", "by", "concepts", "confidence", "content",
+    "depth", "dest", "dir", "edits", "entities", "evidence", "field",
+    "file", "for", "format", "from", "id", "ids", "into", "json-depth", "keep",
+    "keys", "kind", "lib", "match", "maturity", "max", "mode", "name", "next",
+    "not-for", "page", "path", "per-page", "project", "query", "read-when",
+    "reason", "related", "root", "scope", "session", "since", "source",
+    "status", "summary", "tag", "target", "task", "tier", "title", "to",
+    "token", "url", "value", "with", "within",
+];
+
 const BOOLS: &[&str] = &[
     // A flag listed here never consumes the following token. Anything used as
     // `a.has(...)` MUST be here, otherwise a bare flag would swallow the next
@@ -101,6 +116,19 @@ pub struct Args {
 }
 
 impl Args {
+    /// Fold the parameter spellings an assistant is likely to reach for onto
+    /// the ones this tool actually reads. Silently ignoring `--limit` while
+    /// returning the whole library is the worst possible outcome: the caller
+    /// believes it paginated and gets 507 rows. Aliases remove the guesswork.
+    fn alias(k: &str) -> &str {
+        match k {
+            "limit" | "size" | "per_page" | "perpage" | "count" | "n" => "per-page",
+            "offset" => "page",
+            "p" => "page",
+            other => other,
+        }
+    }
+
     pub fn parse(argv: &[String]) -> R<Args> {
         let mut a = Args::default();
         let mut i = 0;
@@ -116,6 +144,7 @@ impl Args {
                     Some((k, v)) => (k.to_string(), Some(v.to_string())),
                     None => (rest.to_string(), None),
                 };
+                let k = Self::alias(&k).to_string();
                 if BOOLS.contains(&k.as_str()) {
                     let v = inline.unwrap_or_else(|| "true".to_string());
                     a.kv.entry(k).or_default().push(v);
@@ -143,6 +172,18 @@ impl Args {
             i += 1;
         }
         Ok(a)
+    }
+
+    /// Every parameter name the tool understands anywhere. A name outside this
+    /// set is almost always a typo, and a typo used to be ignored silently --
+    /// `--limt 5` returned the whole library and looked like success.
+    pub fn known(k: &str) -> bool {
+        KNOWN_PARAMS.binary_search(&k).is_ok() || BOOLS.contains(&k)
+    }
+
+    /// All recognised parameter names, for typo suggestions.
+    pub fn all_known() -> impl Iterator<Item = &'static str> {
+        KNOWN_PARAMS.iter().copied().chain(BOOLS.iter().copied())
     }
 
     pub fn has(&self, k: &str) -> bool {
