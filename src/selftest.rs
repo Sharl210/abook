@@ -343,6 +343,62 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- GitHub release JSON parsing must tolerate formatting
+    // A real defect: matching `"name":"x"` literally failed against GitHub's
+    // pretty-printed `"name": "x"`, and the failure looked like "asset not
+    // found". Parse three shapes so the assumption cannot come back.
+    {
+        // (json, wanted name, must it be found?, expected id when found)
+        let cases = [
+            // pretty-printed, exactly what GitHub returns today
+            (r#"{ "url": "u", "id": 111, "name": "abook-aarch64-linux-android" }"#,
+             "abook-aarch64-linux-android", true, Some(111u64)),
+            // minified
+            (r#"{"id":222,"name":"abook-x86_64-unknown-linux-musl"}"#,
+             "abook-x86_64-unknown-linux-musl", true, Some(222)),
+            // an unrelated asset must not match
+            (r#"{ "id": 333, "name": "abook-aarch64-apple-darwin" }"#,
+             "abook-i686-linux-android", false, None),
+        ];
+        let mut good = 0;
+        for (json, want, should, expect_id) in cases.iter() {
+            let got = crate::asset_id_for(json, want);
+            let ok = if *should { got == *expect_id } else { got.is_none() };
+            if ok {
+                good += 1;
+            }
+        }
+        if good == 3 {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  release JSON 解析：紧凑/美化/无关三种形态都正确".to_string());
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!("FAIL  release JSON 解析：3 例中只有 {good} 例正确"));
+        }
+    }
+
+    // ---- downloaded bytes must be recognised as executables
+    {
+        let elfin = [0x7fu8, b'E', b'L', b'F', 2, 1, 1, 0];
+        let mz = [b'M' as u8, b'Z' as u8, 0, 0];
+        let html = b"<!DOCTYPE html><html>Not Found</html>";
+        let ok = crate::looks_like_binary(&elfin, "linux")
+            && crate::looks_like_binary(&mz, "windows")
+            && !crate::looks_like_binary(html, "linux")
+            && !crate::looks_like_binary(b"Not Found", "windows");
+        if ok {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  下载产物校验：ELF/MZ 通过，HTML 与短文本拒绝".to_string());
+            }
+        } else {
+            fail += 1;
+            msgs.push("FAIL  下载产物校验未按魔数判断".to_string());
+        }
+    }
+
     // ---- platform table completeness
     // Every triple advertised by `detect` must also be built by CI. The list
     // below is the CI matrix; a mismatch means an install would 404.

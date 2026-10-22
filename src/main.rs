@@ -255,6 +255,85 @@ fn cmd_detect(a: &Args) -> R<i32> {
     }
 }
 
+/// Verify that downloaded bytes really are an executable for this platform.
+/// An HTTP 200 is not proof: captive portals, proxies and GitHub's own 404 page
+/// all return HTML with a 200/404 status. Checking magic bytes is the only
+/// content-level guarantee available without a checksum.
+fn looks_like_binary(bytes: &[u8], os: &str) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    if os == "windows" {
+        return bytes.starts_with(b"MZ");
+    }
+    // ELF for linux/android, Mach-O for macOS (64/32-bit, either endianness)
+    bytes.starts_with(&[0x7f, b'E', b'L', b'F'])
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
+}
+
+/// Extract an asset id for `want` from a GitHub release JSON document.
+/// The document is flat-ish (asset objects hold only scalars), so locating the
+/// enclosing `{...}` for each `"name":"<want>"` is sufficient -- no full JSON
+/// parser needed, which keeps the crate dependency-free.
+fn asset_id_for(json: &str, want: &str) -> Option<u64> {
+    // Do not hard-code the whitespace around the colon: GitHub emits
+    // `"name": "..."` today but a minified or pretty-printed document may drop
+    // or widen the space. Locate `"name"` then skip whatever separates it from
+    // the value, so the match survives formatting differences.
+    let mut from = 0usize;
+    while let Some(rel) = json[from..].find("\"name\"") {
+        let at = from + rel;
+        let after = at + 6;
+        // skip spaces, then an optional colon, then more spaces
+        let rest = &json[after..];
+        let trimmed = rest.trim_start();
+        let trimmed = trimmed.strip_prefix(':').map(|x| x.trim_start()).unwrap_or(trimmed);
+        if !trimmed.starts_with('"') {
+            from = after;
+            continue;
+        }
+        let inner = &trimmed[1..];
+        let Some(close_q) = inner.find('"') else { from = after; continue };
+        if &inner[..close_q] != want {
+            from = after;
+            continue;
+        }
+        // walk left to the object start
+        let open = json[..at].rfind('{')?;
+        // walk right to its matching close
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, c) in json[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let obj = &json[open..close? + 1];
+        // `"id"` needs the same whitespace tolerance as `"name"`.
+        if let Some(p) = obj.find("\"id\"") {
+            let after_id = &obj[p + 4..];
+            let tail = after_id.trim_start();
+            let tail = tail.strip_prefix(':').map(|x| x.trim_start()).unwrap_or(tail);
+            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(v) = digits.parse::<u64>() {
+                return Some(v);
+            }
+        }
+        from = after;
+    }
+    None
+}
+
 fn cmd_install(a: &Args) -> R<i32> {
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
@@ -264,72 +343,205 @@ fn cmd_install(a: &Args) -> R<i32> {
     };
     let art = artifact_name(target);
     let exe = if os == "windows" { "abook.exe" } else { "abook" };
-    let base = a
+
+    // Where to look, in order. An explicit --url wins so the operator can point
+    // at a mirror or a local file server; the public release URL works when the
+    // repo is public; the API endpoint is the only way to reach a *private*
+    // repo's asset, and it needs a token.
+    let repo = std::env::var("ABOOK_REPO").unwrap_or_else(|_| "Sharl210/abook".to_string());
+    let explicit = a
         .get("url")
         .map(|s| s.to_string())
-        .or_else(|| std::env::var("ABOOK_BASE_URL").ok())
-        .unwrap_or_else(|| {
-            "https://github.com/Sharl210/abook/releases/latest/download".to_string()
-        });
-    let url = format!("{base}/{art}");
+        .or_else(|| std::env::var("ABOOK_BASE_URL").ok());
+    let token = a
+        .get("token")
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+        .or_else(|| std::env::var("GH_TOKEN").ok())
+        .or_else(|| std::env::var("ABOOK_TOKEN").ok());
+
+    let mut bases: Vec<String> = Vec::new();
+    if let Some(b) = &explicit {
+        bases.push(b.trim_end_matches('/').to_string());
+    }
+    bases.push(format!("https://github.com/{repo}/releases/latest/download"));
+
     if a.has("dry-run") || a.has("json") {
         println!(
-            "{{\"os\":{},\"arch\":{},\"target\":{},\"url\":{},\"exe\":{}}}",
+            "{{\"os\":{},\"arch\":{},\"target\":{},\"artifact\":{},\"exe\":{},\"bases\":[{}],\"has_token\":{}}}",
             jstr(os),
             jstr(arch),
             jstr(target),
-            jstr(&url),
-            jstr(exe)
+            jstr(&art),
+            jstr(exe),
+            bases.iter().map(|b| jstr(b)).collect::<Vec<_>>().join(","),
+            token.is_some()
         );
         return Ok(0);
     }
+
     println!("平台 {os}/{arch} → {target}");
-    println!("下载 {url}");
-    // find a downloader
-    let dl = if let Ok(o) = std::process::Command::new("curl").arg("--version").output() {
-        if o.status.success() {
-            Some(vec!["curl", "-fL", "-o"])
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let dl = match dl {
-        Some(d) => d,
-        None => {
-            match std::process::Command::new("wget").arg("--version").output() {
-                Ok(o) if o.status.success() => vec!["wget", "-O"],
-                _ => {
-                    return blocked(
-                        "找不到 curl 或 wget，无法下载。请手动下载对应架构产物并放入 PATH。",
-                    )
-                }
-            }
-        }
-    };
     let dest = home_dir().join(".local").join("bin").join(exe);
-    ensure_dir(&dest.parent().map(|p| p.to_path_buf()).unwrap_or(home_dir()))?;
-    let st = std::process::Command::new(dl[0])
-        .args(&dl[1..])
-        .arg(&dest)
-        .arg(&url)
-        .status();
-    match st {
-        Ok(s) if s.success() => {}
-        Ok(s) => return EE::Io(format!("下载失败，退出码 {}", s.code().unwrap_or(-1))).into_err(),
-        Err(e) => return EE::Io(format!("无法执行下载器: {e}")).into_err(),
+    let dir = dest.parent().map(|p| p.to_path_buf()).unwrap_or_else(home_dir);
+    ensure_dir(&dir)?;
+    let part = dir.join(format!("{exe}.part"));
+
+    let have_curl = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have_curl {
+        return blocked("本机没有 curl，无法下载。请手动下载对应架构产物并放入 PATH。");
     }
+
+    // Fetch into `part`, then inspect the bytes before trusting the result.
+    let fetch = |url: &str, headers: &[(&str, &str)]| -> bool {
+        let mut c = std::process::Command::new("curl");
+        c.args(["-fsSL", "--retry", "3", "--retry-delay", "2", "-o"])
+            .arg(&part)
+            .arg(url);
+        for (k, v) in headers {
+            c.arg("-H").arg(format!("{k}: {v}"));
+        }
+        c.status().map(|s| s.success()).unwrap_or(false)
+    };
+
+    // GitHub wants the scheme prefix, not a bare token. Sending the raw value
+    // makes every authenticated request 404 -- which looks exactly like "the
+    // asset does not exist" and sent me chasing the wrong thing once.
+    let bearer = token.as_ref().map(|t| format!("Bearer {}", t.trim()));
+
+    let mut ok = false;
+    let mut used = String::new();
+
+    // Attempt 1..n: plain base URLs.
+    for base in &bases {
+        let url = format!("{base}/{art}");
+        println!("尝试 {url}");
+        // For the public github.com endpoint a token in the header is fine too,
+        // but it does not authorise private assets, hence the API fallback.
+        let mut hdrs: Vec<(&str, &str)> = Vec::new();
+        if let Some(b) = &bearer {
+            hdrs.push(("Authorization", b.as_str()));
+        }
+        if fetch(&url, &hdrs) {
+            if let Ok(b) = std::fs::read(&part) {
+                if looks_like_binary(&b, os) {
+                    ok = true;
+                    used = url;
+                    break;
+                }
+                println!("  返回的不是可执行文件（{} 字节），跳过", b.len());
+            }
+        } else {
+            println!("  不可用");
+        }
+    }
+
+    // Attempt last: GitHub API asset endpoint -- the only path that works for a
+    // private repository, because github.com/releases/download does not honour
+    // an Authorization header.
+    if !ok {
+        if let Some(b) = &bearer {
+            let t = b;
+            println!("尝试 GitHub API（私有仓库路径）");
+            let api = format!("https://api.github.com/repos/{repo}/releases/latest");
+            let meta = std::process::Command::new("curl")
+                .args(["-fsSL", "-H"])
+                .arg(format!("Authorization: {t}"))
+                .arg("-H")
+                .arg("Accept: application/vnd.github+json")
+                .arg(&api)
+                .output();
+            match meta {
+                Ok(o) if o.status.success() => {
+                    let txt = String::from_utf8_lossy(&o.stdout).to_string();
+                    match asset_id_for(&txt, &art) {
+                        Some(id) => {
+                            let url = format!(
+                                "https://api.github.com/repos/{repo}/releases/assets/{id}"
+                            );
+                            println!("  asset {id}");
+                            if fetch(&url, &[("Authorization", t.as_str()), ("Accept", "application/octet-stream")]) {
+                                if let Ok(b) = std::fs::read(&part) {
+                                    if looks_like_binary(&b, os) {
+                                        ok = true;
+                                        used = url;
+                                    }
+                                }
+                            }
+                        }
+                        None => println!("  该 release 里没有 {art}"),
+                    }
+                }
+                _ => println!("  查询 release 失败（令牌无效或无权访问？）"),
+            }
+        } else {
+            println!("未提供令牌，跳过私有仓库路径（--token 或 GITHUB_TOKEN）");
+        }
+    }
+
+    if !ok {
+        let _ = std::fs::remove_file(&part);
+        return blocked(format!(
+            "所有下载路径都失败。\n  目标产物: {art}\n  试过: {}\n可行做法:\n  1) 若是私有仓库，设置 GITHUB_TOKEN 后重试\n  2) 用 --url 指向你自己的镜像或本地目录\n  3) 手动下载 {art} 放入 {}",
+            bases.join("、"),
+            dir.display()
+        ));
+    }
+
+    // Atomic-ish publish: only replace the live binary once bytes verified.
+    if dest.exists() {
+        let _ = std::fs::remove_file(&dest);
+    }
+    std::fs::rename(&part, &dest).map_err(|e| EE::Io(format!("无法写入 {}: {e}", dest.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
     }
-    println!("已安装 {}", dest.display());
-    println!();
-    println!("把下面这行加入 shell 配置后重开终端：");
-    println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
-    println!("验证: abook version");
+    println!("已安装 {} （来源 {used}）", dest.display());
+
+    // Self-check with the freshly installed binary rather than assuming success.
+    // A release can be stale: an older build sits there with fewer commands and
+    // nothing in the download path notices. Running the installed binary's own
+    // selftest surfaces that immediately instead of days later.
+    match std::process::Command::new(&dest).arg("version").output() {
+        Ok(o) if o.status.success() => {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            println!("版本: {v}");
+        }
+        _ => {
+            println!("警告: 装好的文件跑不起来，可能架构不匹配");
+            return Ok(5);
+        }
+    }
+    match std::process::Command::new(&dest).arg("selftest").output() {
+        Ok(o) if o.status.success() => {
+            let last = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            println!("自检: {last}");
+        }
+        Ok(_) => println!("警告: 装好的二进制自检未通过，release 可能有问题"),
+        Err(_) => println!("警告: 装好的二进制没有 selftest，release 可能是旧版本"),
+    }
+
+    let on_path = std::env::var("PATH")
+        .map(|p| {
+            p.split(':')
+                .any(|d| std::path::Path::new(d).join(exe).exists())
+        })
+        .unwrap_or(false);
+    if !on_path {
+        println!();
+        println!("把下面这行加入 shell 配置后重开终端：");
+        println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
+    }
     Ok(0)
 }
 

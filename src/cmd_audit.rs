@@ -103,7 +103,15 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
     println!("  仅自动纠偏    {fixed_only}   （能被容错吸收、已留痕）");
     println!("  仅告警        {warn_only}   （能用，但召回质量下降）");
     println!("  含 ERROR      {with_err}   （必须修）");
-    debug_assert_eq!(clean + fixed_only + warn_only + with_err, total);
+    // Enforced at runtime, not just in debug builds: a summary whose parts do
+    // not add up to the total is actively misleading, and it shipped once.
+    if clean + fixed_only + warn_only + with_err != total {
+        eprintln!(
+            "内部错误: 分桶合计 {} != 记录总数 {total}",
+            clean + fixed_only + warn_only + with_err
+        );
+        return Ok(6);
+    }
     println!();
     if rule_counts.is_empty() {
         println!("没有任何规则被触发：真实库全部处于规范形态。");

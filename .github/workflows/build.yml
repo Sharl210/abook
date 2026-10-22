@@ -13,6 +13,7 @@ jobs:
   # ---------------------------------------------------------------- Linux
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -116,10 +117,12 @@ jobs:
         with:
           name: abook-${{ matrix.target }}
           path: out/*
+          retention-days: 1
 
   # ---------------------------------------------------------------- Android
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -192,10 +195,12 @@ jobs:
         with:
           name: abook-${{ matrix.target }}
           path: out/*
+          retention-days: 1
 
   # ---------------------------------------------------------------- Windows
   windows:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -244,10 +249,12 @@ jobs:
         with:
           name: abook-${{ matrix.target }}
           path: out/*
+          retention-days: 1
 
   # ---------------------------------------------------------------- macOS
   macos:
     runs-on: macos-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -278,12 +285,14 @@ jobs:
         with:
           name: abook-${{ matrix.target }}
           path: out/*
+          retention-days: 1
 
   # ---------------------------------------------------------------- Release
   release:
     needs: [linux, android, windows, macos]
     if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -313,5 +322,9 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
           name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest build' }}
           files: dist/*
+          # Without this a rebuild leaves the OLD asset in place, and a user who
+          # installs gets a stale binary (this actually happened: the published
+          # build had 22 fewer commands than the source).
+          overwrite_files: true
           generate_release_notes: true
           make_latest: true

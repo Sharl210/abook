@@ -12,8 +12,12 @@
 
 set -eu
 
-REPO="Sharl210/abook"
+REPO="${ABOOK_REPO:-Sharl210/abook}"
 BASE="${ABOOK_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
+# Private repositories cannot be downloaded from github.com/releases/download at
+# all -- that endpoint ignores an Authorization header and answers 404. The API
+# asset endpoint is the only working path, and it needs a token.
+TOKEN="${ABOOK_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
@@ -97,18 +101,90 @@ BIN_DIR=$(pick_dir)
 mkdir -p "$BIN_DIR" 2>/dev/null || die "无法创建目录 $BIN_DIR"
 
 # ---------------------------------------------------------------- 下载
-tmp=$(mktemp "${TMPDIR:-/tmp}/abook.XXXXXX" 2>/dev/null || echo "/tmp/abook.$$")
+# Never assume /tmp: on Android it is often unwritable and mktemp then fails
+# silently or falls back to a path that cannot be created either.
+tmpdir=""
+for d in "$BIN_DIR" "${TMPDIR:-}" "${HOME:-}" "/data/local/tmp" "/tmp"; do
+  [ -n "$d" ] || continue
+  if [ -d "$d" ] && [ -w "$d" ]; then tmpdir="$d"; break; fi
+done
+[ -n "$tmpdir" ] || die "找不到可写临时目录"
+tmp="$tmpdir/.abook-dl.$$"
 cleanup() { rm -f "$tmp" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
+# Probe whether the bytes we got are really an executable. An HTTP 200 is not
+# proof: a captive portal or an HTML error page also arrives with a status.
+is_binary() {
+  [ -s "$1" ] || return 1
+  head -c 4 "$1" | od -An -tx1 | tr -d ' \n' | grep -qiE '^(7f454c46|4d5a|cffaedfe|feedfacf|cafebabe)$'
+}
+
 say "下载到 $tmp"
+ok=0
 if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 5 --retry-all-errors --retry-delay 3 -o "$tmp" "$BASE/$name" \
-    || die "下载失败。请检查网络，或用 ABOOK_BASE_URL 指定其它来源。"
+  if curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$tmp" "$BASE/$name" 2>/dev/null \
+     && is_binary "$tmp"; then
+    ok=1
+  fi
 elif command -v wget >/dev/null 2>&1; then
-  wget -O "$tmp" "$BASE/$name" || die "下载失败"
+  if wget -q -O "$tmp" "$BASE/$name" 2>/dev/null && is_binary "$tmp"; then ok=1; fi
 else
   die "找不到 curl 或 wget"
+fi
+
+# Private repositories: github.com/releases/download answers 404 no matter what
+# header you send, so fall back to the API asset endpoint which does honour it.
+if [ "$ok" -ne 1 ] && [ -n "$TOKEN" ]; then
+  say "直接下载不可用，改用 API（私有仓库路径）"
+  if command -v curl >/dev/null 2>&1; then
+    # Extract the asset id whose "name" equals $name. The whitespace around the
+    # colon varies between minified and pretty-printed JSON, so match with ` *`
+    # instead of assuming a single space. `|| true` matters: under `set -e` a
+    # non-matching grep would abort the whole script with no explanation.
+    rel=$(curl -fsSL \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) || rel=""
+    # The release JSON is pretty-printed: `"id"` and `"name"` sit on
+    # different lines, so they cannot be matched together in one line. Within
+    # each asset object `id` always precedes `name`, so scan line by line and
+    # emit the id remembered just before the wanted name.
+    aid=$(printf '%s' "$rel" | awk -v want="$name" '
+      {
+        if (match($0, /"id": *[0-9]+/)) {
+          seg = substr($0, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", seg)
+          cur = seg
+        }
+        if (match($0, /"name": *"[^"]*"/)) {
+          seg = substr($0, RSTART, RLENGTH)
+          sub(/.*"name": *"/, "", seg)
+          sub(/"$/, "", seg)
+          if (seg == want) { print cur; exit }
+        }
+      }') || aid=""
+    if [ -n "$aid" ]; then
+      if curl -fsSL --retry 3 -o "$tmp" \
+           -H "Authorization: Bearer $TOKEN" \
+           -H "Accept: application/octet-stream" \
+           "https://api.github.com/repos/$REPO/releases/assets/$aid" 2>/dev/null \
+         && is_binary "$tmp"; then
+        ok=1
+      fi
+    fi
+  fi
+fi
+
+if [ "$ok" -ne 1 ]; then
+  rm -f "$tmp"
+  die "下载失败或产物不是可执行文件。
+  目标产物: $name
+  试过来源: $BASE
+做法:
+  1) 私有仓库需设置 ABOOK_TOKEN（或 GITHUB_TOKEN）
+  2) 或用 ABOOK_BASE_URL 指向你自己的镜像
+  3) 或手动下载 $name 放进 $BIN_DIR"
 fi
 
 dest="$BIN_DIR/$name"
