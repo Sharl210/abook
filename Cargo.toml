@@ -1,0 +1,19 @@
+[package]
+name = "abook"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.70"
+description = "AgentsBook memory book CLI: single-binary, zero-dependency memory store operations"
+license = "MIT"
+repository = "https://github.com/Sharl210/abook"
+
+[[bin]]
+name = "abook"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

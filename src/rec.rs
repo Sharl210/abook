@@ -1,0 +1,428 @@
+//! Record parsing/serialisation for the AgentsBook V2 experiment format.
+//!
+//! Layout:
+//!   [CANDIDATE_MEMORY] | [CANONICAL_MEMORY]
+//!   KEY=value            (may be packed as  KEY=a;KEY2=b)
+//!   [/...]
+//!   [MEMORY_BODY]
+//!   ...
+//!   [/MEMORY_BODY]
+//!   [PROMOTION]  (optional, candidate only)
+//!   [/PROMOTION]
+
+use crate::sha256;
+use crate::util::*;
+use std::path::{Path, PathBuf};
+
+pub const CAND_KEYS: &[&str] = &[
+    "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
+    "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
+    "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
+    "SOURCE", "SEQUENCE",
+];
+
+pub const CANON_KEYS: &[&str] = &[
+    "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
+    "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
+    "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
+    "SOURCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "SEQUENCE",
+];
+
+pub const KNOWN_KEYS: &[&str] = &[
+    "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
+    "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
+    "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
+    "SOURCE", "SEQUENCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "PROMOTED_TO",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lib {
+    Canonical,
+    Candidate,
+}
+
+impl Lib {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Lib::Canonical => "CANONICAL_MEMORY",
+            Lib::Candidate => "CANDIDATE_MEMORY",
+        }
+    }
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Lib::Canonical => "C",
+            Lib::Candidate => "N",
+        }
+    }
+    pub fn dir(self) -> &'static str {
+        match self {
+            Lib::Canonical => "canonical/records",
+            Lib::Candidate => "candidate/records",
+        }
+    }
+    pub fn atlas(self) -> &'static str {
+        match self {
+            Lib::Canonical => "canonical/Atlas.md",
+            Lib::Candidate => "candidate/Atlas.md",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Lib::Canonical => "canonical",
+            Lib::Candidate => "candidate",
+        }
+    }
+    pub fn order(self) -> &'static [&'static str] {
+        match self {
+            Lib::Canonical => CANON_KEYS,
+            Lib::Candidate => CAND_KEYS,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Record {
+    pub path: PathBuf,
+    pub lib: Lib,
+    pub fields: Vec<(String, String)>,
+    pub body: String,
+    pub promotion: Option<String>,
+    pub raw: String,
+}
+
+/// Parse `KEY=value` pairs from one header line, tolerating `;` inside values
+/// and several pairs packed on the same line.
+pub fn parse_kv_line(line: &str, out: &mut Vec<(String, String)>) {
+    let bytes: Vec<char> = line.chars().collect();
+    let n = bytes.len();
+    // find candidate start positions: [A-Z][A-Z0-9_]* '='
+    let mut marks: Vec<(usize, usize, String)> = Vec::new(); // (start, eq_pos, key)
+    let mut i = 0;
+    while i < n {
+        let at_boundary = i == 0 || bytes[i - 1] == ';';
+        if at_boundary && bytes[i].is_ascii_uppercase() {
+            let start = i;
+            let mut j = i;
+            while j < n && (bytes[j].is_ascii_uppercase() || bytes[j].is_ascii_digit() || bytes[j] == '_')
+            {
+                j += 1;
+            }
+            if j < n && bytes[j] == '=' {
+                let key: String = bytes[start..j].iter().collect();
+                if KNOWN_KEYS.contains(&key.as_str()) {
+                    marks.push((start, j, key));
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    if marks.is_empty() {
+        // continuation of the previous value
+        if let Some(last) = out.last_mut() {
+            if !last.1.is_empty() {
+                last.1.push('\n');
+            }
+            last.1.push_str(line.trim_end());
+        } else {
+            out.push(("_UNPARSED".into(), line.trim_end().to_string()));
+        }
+        return;
+    }
+    for (idx, (start, eq, key)) in marks.iter().enumerate() {
+        let end = if idx + 1 < marks.len() {
+            marks[idx + 1].0
+        } else {
+            n
+        };
+        let mut val: String = bytes[eq + 1..end].iter().collect();
+        // strip the separator that belonged to the next pair
+        if idx + 1 < marks.len() {
+            if val.ends_with(';') {
+                val.pop();
+            }
+        }
+        let _ = start;
+        out.push((key.clone(), val.trim_end().to_string()));
+    }
+}
+
+impl Record {
+    pub fn get(&self, k: &str) -> String {
+        self.fields
+            .iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+    pub fn has(&self, k: &str) -> bool {
+        self.fields.iter().any(|(kk, _)| kk == k)
+    }
+    pub fn set(&mut self, k: &str, v: &str) {
+        if let Some(e) = self.fields.iter_mut().find(|(kk, _)| kk == k) {
+            e.1 = v.to_string();
+        } else {
+            self.fields.push((k.to_string(), v.to_string()));
+        }
+    }
+    pub fn id(&self) -> String {
+        let v = self.get("ID");
+        if v.contains(';') {
+            v.split(';').next().unwrap_or("").trim().to_string()
+        } else {
+            v
+        }
+    }
+    pub fn title(&self) -> String {
+        self.get("TITLE")
+    }
+    pub fn kind(&self) -> String {
+        self.get("KIND")
+    }
+    pub fn status(&self) -> String {
+        let s = self.get("STATUS");
+        if s.is_empty() {
+            "ACTIVE".into()
+        } else {
+            s
+        }
+    }
+    pub fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Parse a record file.
+    pub fn parse(path: &Path, lib: Lib) -> R<Record> {
+        let raw = read_str(path)?;
+        let mut rec = Record {
+            path: path.to_path_buf(),
+            lib,
+            fields: Vec::new(),
+            body: String::new(),
+            promotion: None,
+            raw: raw.clone(),
+        };
+        let mut in_header = false;
+        let mut in_body = false;
+        let mut in_promo = false;
+        let mut found = false;
+        for line in raw.lines() {
+            let t = line.trim();
+            if t == format!("[{}]", lib.tag()) || t == "[CANDIDATE_MEMORY]" || t == "[CANONICAL_MEMORY]"
+            {
+                in_header = true;
+                found = true;
+                continue;
+            }
+            if t == format!("[/{}]", lib.tag()) || t == "[/CANDIDATE_MEMORY]" || t == "[/CANONICAL_MEMORY]"
+            {
+                in_header = false;
+                continue;
+            }
+            if t == "[MEMORY_BODY]" {
+                in_body = true;
+                continue;
+            }
+            if t == "[/MEMORY_BODY]" {
+                in_body = false;
+                continue;
+            }
+            if t == "[PROMOTION]" {
+                in_promo = true;
+                continue;
+            }
+            if t == "[/PROMOTION]" {
+                in_promo = false;
+                continue;
+            }
+            if in_header {
+                if !t.is_empty() {
+                    parse_kv_line(line, &mut rec.fields);
+                }
+            } else if in_body {
+                rec.body.push_str(line);
+                rec.body.push('\n');
+            } else if in_promo {
+                let pr = rec.promotion.get_or_insert_with(String::new);
+                pr.push_str(line);
+                pr.push('\n');
+            }
+        }
+        if !found {
+            return integrity(format!("不是有效记录(缺少 [{}]): {}", lib.tag(), path.display()));
+        }
+        rec.body = rec.body.trim_matches('\n').to_string();
+        Ok(rec)
+    }
+
+    /// Serialise back to the on-disk format.
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("[{}]\n", self.lib.tag()));
+        // emit in canonical key order, then any unknown keys in stored order
+        let order = self.lib.order();
+        for k in order {
+            if let Some((_, v)) = self.fields.iter().find(|(kk, _)| kk == k) {
+                if v.is_empty() && !matches!(*k, "PREVIOUS_ID" | "SUPERSEDES") {
+                    // keep empty placeholders only for relations that the
+                    // format always shows
+                    if !matches!(*k, "PROJECT" | "TASK" | "SESSION") {
+                        s.push_str(&format!("{k}={v}\n"));
+                        continue;
+                    }
+                }
+                s.push_str(&format!("{k}={v}\n"));
+            }
+        }
+        for (k, v) in &self.fields {
+            if !order.contains(&k.as_str()) {
+                s.push_str(&format!("{k}={v}\n"));
+            }
+        }
+        s.push_str(&format!("[/{}]\n", self.lib.tag()));
+        s.push_str("[MEMORY_BODY]\n");
+        s.push_str(&self.body);
+        if !self.body.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str("[/MEMORY_BODY]\n");
+        if let Some(p) = &self.promotion {
+            s.push_str("[PROMOTION]\n");
+            s.push_str(p.trim_matches('\n'));
+            s.push('\n');
+            s.push_str("[/PROMOTION]\n");
+        }
+        s
+    }
+
+    /// Filename stem from `RECORD_ID_SCHEME`: <prefix>-<stamp>-<hash8 of body>.
+    pub fn new_id(lib: Lib, stamp: &str, body: &str) -> String {
+        let h = sha256::digest_prefix(body.trim().as_bytes(), 8);
+        format!("{}-{}-{}", lib.prefix(), stamp, h)
+    }
+
+    /// Legacy sequential names look like `AB2-N-001.md`.
+    pub fn is_legacy_name(name: &str) -> bool {
+        let stem = name.trim_end_matches(".md");
+        stem.starts_with("AB2-") || (stem.len() <= 12 && !stem.contains("-2"))
+    }
+
+    pub fn is_scheme_name(name: &str) -> bool {
+        let stem = match name.strip_suffix(".md") {
+            Some(s) => s,
+            None => return false,
+        };
+        let parts: Vec<&str> = stem.split('-').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let ok_prefix = parts[0] == "C" || parts[0] == "N";
+        let st = parts[1];
+        let ok_stamp = st.len() == 15
+            && st.as_bytes()[8] == b'T'
+            && st[..8].bytes().all(|b| b.is_ascii_digit())
+            && st[9..].bytes().all(|b| b.is_ascii_digit());
+        let ok_hash = parts[2].len() == 8 && parts[2].bytes().all(|b| b.is_ascii_hexdigit());
+        ok_prefix && ok_stamp && ok_hash
+    }
+
+    /// Header completeness problems for `lint`.
+    pub fn lint(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let required: &[&str] = &[
+            "FORMAT", "ID", "KIND", "MATURITY", "AUTHORITY", "TITLE", "SUMMARY", "READ_WHEN",
+            "NOT_FOR", "KEYS",
+        ];
+        for k in required {
+            if self.get(k).trim().is_empty() {
+                out.push(format!("缺字段 {k}"));
+            }
+        }
+        if self.body.trim().is_empty() {
+            out.push("正文为空".into());
+        }
+        if !Self::is_scheme_name(&self.file_name()) {
+            out.push(format!("文件名不符合命名方案: {}", self.file_name()));
+        }
+        if self.lib == Lib::Canonical && self.get("STATUS").is_empty() {
+            out.push("正式记录缺 STATUS".into());
+        }
+        out
+    }
+}
+
+/// Resolve a user-supplied record selector to a path.
+/// Accepts: full path, library-relative path, filename, record ID.
+pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
+    let p = PathBuf::from(sel);
+    if p.is_absolute() && p.exists() {
+        let lib = if p.to_string_lossy().contains("candidate") {
+            Lib::Candidate
+        } else {
+            Lib::Canonical
+        };
+        return Ok((p, lib));
+    }
+    let cand = root.join(sel);
+    if cand.exists() {
+        let lib = if sel.contains("candidate") {
+            Lib::Candidate
+        } else {
+            Lib::Canonical
+        };
+        return Ok((cand, lib));
+    }
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let dir = root.join(lib.dir());
+        let by_name = dir.join(sel);
+        if by_name.exists() {
+            return Ok((by_name, lib));
+        }
+        let with_md = dir.join(format!("{sel}.md"));
+        if with_md.exists() {
+            return Ok((with_md, lib));
+        }
+        // ID match: filename stem contains the id, or header ID matches
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let pth = e.path();
+                if !pth.extension().map(|x| x == "md").unwrap_or(false) {
+                    continue;
+                }
+                let stem = pth
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem == sel || stem.ends_with(&format!("-{sel}")) {
+                    return Ok((pth, lib));
+                }
+                if let Ok(txt) = std::fs::read_to_string(&pth) {
+                    let head: String = txt.lines().take(6).collect::<Vec<_>>().join("\n");
+                    if head.contains(&format!("ID={sel}"))
+                        || head.contains(&format!(";{sel};"))
+                        || head.contains(&format!("={sel};"))
+                    {
+                        return Ok((pth, lib));
+                    }
+                }
+            }
+        }
+    }
+    notfound(format!("未找到记录: {sel}"))
+}
+
+/// Load every record of a library, sorted by filename.
+pub fn load_lib(root: &Path, lib: Lib) -> Vec<Record> {
+    let dir = root.join(lib.dir());
+    let mut v = Vec::new();
+    for p in list_md(&dir) {
+        if let Ok(r) = Record::parse(&p, lib) {
+            v.push(r);
+        }
+    }
+    v
+}
