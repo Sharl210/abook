@@ -1,8 +1,11 @@
 name: build
 
+# Build only what needs building. Triggering a 15-target matrix on every push
+# exhausted the free tier's TWO concurrent slots and left runs queued for hours
+# behind zombie jobs. Normal commits therefore do not build; a tag or an
+# explicit manual dispatch does.
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
