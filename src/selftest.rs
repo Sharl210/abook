@@ -495,6 +495,55 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- header values: read multi-line, write single-line
+    // Two records in the real library carry an 18-line SUMMARY, and one ID line
+    // embeds PROJECT/TASK/SESSION after semicolons. Reading must tolerate both;
+    // writing must never produce them, or every line-based reader breaks.
+    {
+        let mut good = 0;
+        let total = 3;
+
+        // reading: continuation lines belong to the preceding field
+        let multi = "[CANDIDATE_MEMORY]\nTITLE=t\nSUMMARY=line one\nline two\nline three\nREAD_WHEN=w\n[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\nbody\n[/MEMORY_BODY]\n";
+        let pp = std::path::Path::new("x.md");
+        if let Ok(r) = crate::rec::Record::parse_str(multi, pp, crate::rec::Lib::Candidate) {
+            if r.get("SUMMARY").contains("line two") && r.get("READ_WHEN") == "w" {
+                good += 1;
+            }
+        }
+
+        // reading: embedded fields in one line are split out
+        let embedded = "[CANDIDATE_MEMORY]\nID=C-1;PROJECT=pj;TASK=tk;SESSION=ss\nKIND=DECISION\n[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\nbody\n[/MEMORY_BODY]\n";
+        if let Ok(r2) = crate::rec::Record::parse_str(embedded, std::path::Path::new("y.md"), crate::rec::Lib::Candidate) {
+            if r2.get("ID") == "C-1" && r2.get("PROJECT") == "pj" && r2.get("TASK") == "tk" {
+                good += 1;
+            }
+        }
+
+        // writing: go through Record::set, not through the helper. Testing the
+        // helper alone would pass even if set() never called it.
+        let mut rw = crate::rec::Record::parse_str(
+            "[CANDIDATE_MEMORY]\nTITLE=t\n[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\nb\n[/MEMORY_BODY]\n",
+            std::path::Path::new("z.md"),
+            crate::rec::Lib::Candidate,
+        )
+        .unwrap();
+        rw.set("SUMMARY", "line one\nline two\n\tline three");
+        if rw.get("SUMMARY") == "line one line two line three" {
+            good += 1;
+        }
+
+        if good == total {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  头部字段：跨行可读、嵌入字段可拆、写入强制单行".to_string());
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!("FAIL  头部字段：{total} 项中只有 {good} 项正确"));
+        }
+    }
+
     // ---- platform table completeness
     // Every triple advertised by `detect` must also be built by CI. The list
     // below is the CI matrix; a mismatch means an install would 404.

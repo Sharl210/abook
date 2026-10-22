@@ -153,6 +153,26 @@ pub fn parse_kv_line(line: &str, out: &mut Vec<(String, String)>) {
     }
 }
 
+
+/// Collapse every run of whitespace (including newlines) into a single space so
+/// a value fits on one line. Leading and trailing whitespace is dropped.
+pub fn fold_to_one_line(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut pending_space = false;
+    for ch in v.trim().chars() {
+        if ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ' {
+            pending_space = true;
+        } else {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
 impl Record {
     pub fn get(&self, k: &str) -> String {
         self.fields
@@ -164,11 +184,17 @@ impl Record {
     pub fn has(&self, k: &str) -> bool {
         self.fields.iter().any(|(kk, _)| kk == k)
     }
+    /// Set a header field. Field values occupy exactly one line: a newline
+    /// inside a value silently breaks every reader that walks the file line by
+    /// line, including this tool. A multi-line body copied into SUMMARY did
+    /// exactly that, so newlines are folded into single spaces here -- the one
+    /// place every writer goes through.
     pub fn set(&mut self, k: &str, v: &str) {
+        let v = fold_to_one_line(v);
         if let Some(e) = self.fields.iter_mut().find(|(kk, _)| kk == k) {
-            e.1 = v.to_string();
+            e.1 = v;
         } else {
-            self.fields.push((k.to_string(), v.to_string()));
+            self.fields.push((k.to_string(), v));
         }
     }
     pub fn id(&self) -> String {

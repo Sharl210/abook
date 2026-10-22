@@ -79,14 +79,16 @@ pub fn integrity<T>(m: impl Into<String>) -> R<T> {
 /// `known()` can binary-search it; a stale entry means a legitimate parameter
 /// gets rejected, so this list is exercised by selftest.
 pub const KNOWN_PARAMS: &[&str] = &[
-    "after", "authority", "branch", "by", "concepts", "confidence", "content",
-    "depth", "dest", "dir", "edits", "entities", "evidence", "field",
-    "file", "for", "format", "from", "id", "ids", "into", "json-depth", "keep",
-    "keys", "kind", "lib", "match", "maturity", "max", "mode", "name", "next",
-    "not-for", "page", "path", "per-page", "project", "query", "read-when",
-    "reason", "related", "root", "scope", "session", "since", "source",
-    "status", "summary", "tag", "target", "task", "tier", "title", "to",
-    "token", "url", "value", "with", "within",
+    "after", "and", "authority", "body", "body-file", "branch", "by", "card",
+    "concepts", "confidence", "content", "context", "depth", "dest", "dir",
+    "distance", "edits", "entities", "evidence", "field", "file", "for",
+    "format", "from", "id", "ids", "in", "into", "json-depth", "keep", "keys",
+    "kind", "level", "lib", "match", "maturity", "max", "min-score", "mode",
+    "name", "new", "next", "not-for", "old", "out", "page", "path", "per",
+    "per-page", "project", "purpose", "q", "query", "read-when", "reason",
+    "related", "root", "scope", "session", "since", "slug", "source",
+    "status", "stdin", "summary", "tag", "target", "task", "text", "tier",
+    "title", "to", "token", "url", "value", "with", "within",
 ];
 
 const BOOLS: &[&str] = &[
@@ -573,7 +575,8 @@ pub fn split_list(s: &str) -> Vec<String> {
 /// Kept as one function so edits can tell "still the derived value" from
 /// "the author wrote this".
 pub fn derive_summary(body: &str) -> String {
-    truncate_chars(body.trim(), 160)
+    // A body may span many lines; SUMMARY must stay on one.
+    truncate_chars(&crate::rec::fold_to_one_line(body), 160)
 }
 
 /// Re-derive body-dependent fields, but only where they still hold the

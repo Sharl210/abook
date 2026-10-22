@@ -45,6 +45,38 @@ else
   bad "读库失败"
 fi
 
+# ---------------------------------------------------------------- 6. 参数登记完整性
+# 未知参数会被直接拒绝，所以源码里用到却没登记的参数会让一个合法用法失效。
+# 反过来，登记表靠手维护必然漂移，这里机械核对源码与登记表。
+echo "=== 6. 参数登记完整性 ==="
+python3 - <<'PY'
+import re, os, sys
+src = ""
+for f in sorted(os.listdir('src')):
+    if f.endswith('.rs'):
+        src += open('src/' + f).read()
+# `a.` is not always Args: `at.get("COVERED_THROUGH")` reads an Atlas field.
+# CLI parameter names are lowercase or hyphenated, so drop names containing an
+# uppercase letter to exclude those struct-field reads.
+used = {k for k in re.findall(r'a\.(?:get|num|req|has|all)\("([^"]+)"\)', src)
+        if not any(ch.isupper() for ch in k)}
+know = set(re.findall(r'"([^"]+)"',
+         re.search(r'pub const KNOWN_PARAMS: &\[&str\] = &\[(.*?)\];', src, re.S).group(1)))
+boolr = set(re.findall(r'"([^"]+)"',
+          re.search(r'const BOOLS: &\[&str\] = &\[(.*?)\];', src, re.S).group(1)))
+alias = {'limit','size','per_page','perpage','count','n','offset','p'}
+missing = sorted(used - know - boolr - alias)
+if missing:
+    print("  ✗ 源码用到但未登记: " + ", ".join(missing))
+    print("    未登记的参数会被拒绝，合法用法会失效")
+    sys.exit(1)
+print(f"  ✓ 参数登记完整（登记 {len(know)} 个取值参数 + {len(boolr)} 个开关）")
+PY
+
+if [ $? -ne 0 ]; then
+  bad "参数登记不完整"
+fi
+
 printf '\n'
 if [ "$fail" -eq 0 ]; then
   printf '预检全部通过\n'

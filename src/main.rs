@@ -140,6 +140,54 @@ fn help_text() -> String {
 ═══ 退出码 ═══
   0 成功  2 用法  3 未找到  4 需批准/受阻  5 完整性问题  6 IO
 
+═══ 每个命令接受哪些参数 ═══
+写错参数名会被直接拒绝（不会静默忽略）。下面按命令列出可用的值参数；
+加 --json 一般都能拿到机器可读输出。
+
+  write      --title --read-when --not-for --body-file --lib --approve --dry-run --force
+  update     --title --body --body-file --approve --dry-run
+  set        --value --dry-run
+  unset      --text --file --body
+  append     --text --file --dry-run
+  prepend    --dry-run
+  patch      --old --new --field --in --all --dry-run
+  rename     --title --dry-run
+  move       --dry-run
+  copy       --to --approve --dry-run
+  merge      --title --remove-sources --approve --dry-run
+  split      --at --dry-run
+  delete     --hard --approve --dry-run
+  restore    --approve --dry-run
+  promote    --branch --approve --force --dry-run
+  demote     --approve --dry-run
+
+  show       --field --fields --page --per-page --deviations --json
+  list       --lib --kind --status --maturity --tag --q --page --per-page
+  recall     --q --limit --all --body --raw --include-promoted --json
+  export     --lib --format --out --include-deleted
+  index      --limit
+  atlas      --card
+  history    --limit
+  recent     --limit
+  budget     --json
+
+  search     --field --lib --max --case
+             --regex|--re|--literal|--exact   精确/模式匹配
+             --fuzzy|--approx --distance N    模糊（编辑距离）
+             --whole-line                     整行匹配
+             --semantic|--sem --level 1..5    分级语义
+             --deep --min-score N --context N 深度/阈值/上下文行
+             --and --no-expand --lines --raw-lines --hide-promoted --include-deleted
+  grep       --context
+
+  vault      子命令：list get put del ledger export import rekey
+  detect  install  version  selftest  help
+
+═══ 参数拼写容错 ═══
+  --limit / --size 会被当成 --per-page；--offset 当成 --page。
+  其余拼错的名字会立刻报错并给出最接近的正确写法，不会静默当没看见。
+
+
 ═══ 分级搜索怎么选 ═══
   L1 2ms   确定记得原词          → search 词
   L2 20ms  记不准 / 要模式匹配    → search 词 --fuzzy / --regex
