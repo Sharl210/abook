@@ -209,7 +209,17 @@ fn extract_pairs(line: &str) -> Option<Vec<(String, String)>> {
                 }
             }
             None => {
-                out.push((k, line[vstart..].trim().to_string()));
+                // A trailing `;` with nothing after it is a dangling separator,
+                // not part of the value. Half-width `;` never separates fields
+                // unless a valid key follows, so stripping is safe here; the
+                // caller records the change as a deviation.
+                let raw_tail = &line[vstart..];
+                let trimmed = raw_tail.trim();
+                let val = match trimmed.strip_suffix(';') {
+                    Some(head) => head.trim_end().to_string(),
+                    None => trimmed.to_string(),
+                };
+                out.push((k, val));
                 break;
             }
         }
@@ -521,10 +531,29 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
     }
 
     // ---- header range
-    let hstart = match header_open {
+    // A few records put KEY=value lines *above* the header tag. Starting at
+    // `header_open + 1` silently dropped them (a record's own ID would read as
+    // empty), so walk backwards over any leading key lines and absorb them.
+    let mut hstart = match header_open {
         Some(i) => i + 1,
         None => 0,
     };
+    if let Some(open) = header_open {
+        let mut first_key = open;
+        while first_key > 0 && extract_pairs(lines[first_key - 1]).is_some() {
+            first_key -= 1;
+        }
+        if first_key < open {
+            devs.push(Deviation {
+                rule: "T010",
+                sev: Sev::Fixed,
+                line: first_key + 1,
+                original: format!("头部标签之前有 {} 个字段行", open - first_key),
+                action: "并入头部解析".into(),
+            });
+            hstart = first_key;
+        }
+    }
     // when the close tag is missing, the header ends where the body starts, or
     // at the first line that is clearly prose.
     let mut hend = match header_close {
@@ -629,13 +658,13 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
 
     // ---- body: from body_open to the LAST body_close (a literal close tag
     // inside prose must not truncate the record)
-    let bstart = match body_open {
+    let mut bstart = match body_open {
         Some(i) => i + 1,
         None => hend.min(lines.len()),
     };
     // Use the FIRST closing tag after the body opened. Using the last one
     // would swallow a literal `[MEMORY_BODY]` that appears inside prose.
-    let bend = match body_close {
+    let mut bend = match body_close {
         Some(i) if i >= bstart => i,
         _ => {
             if body_open.is_some() {
@@ -651,7 +680,20 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
         }
     };
     if body_open.is_none() && !lines.is_empty() {
-        // no body tag: everything after the header is body
+        // No body tag at all. Everything after the header would be body, but
+        // that range also contains the header close tag and any promotion
+        // block -- treating it verbatim made such a record's "body" literally
+        // read `[/CANDIDATE_MEMORY]`. Trim structural tags and the promotion
+        // block out of the inferred range instead.
+        if let Some(close) = header_close {
+            if bstart <= close {
+                bstart = close + 1;
+            }
+        }
+        // The promotion block is a separate section, never body.
+        if let Some(p) = promo_open.filter(|p| *p >= bstart) {
+            bend = p;
+        }
         if bstart < lines.len() && !out.body_inferred {
             devs.push(Deviation {
                 rule: "T006",

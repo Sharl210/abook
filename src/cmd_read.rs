@@ -202,6 +202,47 @@ pub fn cmd_show(a: &Args) -> R<i32> {
         );
         return Ok(0);
     }
+    // `--field` is the natural thing for a caller to reach for when it only
+    // wants one value (a script asking for ID, or an AI checking STATUS).
+    // It used to be silently ignored, which quietly returned the whole record
+    // and made any downstream parse wrong.
+    if let Some(want) = a.get("field") {
+        if !want.trim().is_empty() {
+            let names: Vec<&str> = want.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect();
+            let mut out = 0usize;
+            for name in &names {
+                if name.eq_ignore_ascii_case("body") || name.eq_ignore_ascii_case("__body__") {
+                    print!("{}", rec.body);
+                    if !rec.body.ends_with('\n') {
+                        println!();
+                    }
+                    out += 1;
+                    continue;
+                }
+                // exact key first, then case-insensitive, so callers who write
+                // `--field title` still get TITLE instead of an empty line.
+                let hit = rec
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .or_else(|| rec.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)));
+                match hit {
+                    Some((_, v)) => {
+                        println!("{v}");
+                        out += 1;
+                    }
+                    None => {
+                        eprintln!("警告: 记录没有字段 {name}");
+                    }
+                }
+            }
+            if out == 0 {
+                return Ok(4);
+            }
+            return Ok(0);
+        }
+    }
+
     println!("{}  [{}]", rel(&root, &path), lib.name());
     for (k, v) in &rec.fields {
         let vv = if v.chars().count() > 200 && !a.has("verbose") {
@@ -461,7 +502,25 @@ pub fn cmd_reconcile(a: &Args) -> R<i32> {
             }
             problems += ghost.len();
         }
-        if missing.is_empty() && ghost.is_empty() {
+        // The map can list the same record twice (it happens: canonical 2,
+        // candidate 11). That inflates the map count past the directory count,
+        // so it must be reported rather than hidden behind "reconcile ok".
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut dupes: Vec<String> = Vec::new();
+        for m in &in_map {
+            let base = m.rsplit('/').next().unwrap_or(m).to_string();
+            if !seen.insert(base.clone()) && !dupes.contains(&base) {
+                dupes.push(base);
+            }
+        }
+        if !dupes.is_empty() {
+            println!("   地图重复条目 {} 条:", dupes.len());
+            for d in dupes.iter().take(10) {
+                println!("     = {d}");
+            }
+            problems += dupes.len();
+        }
+        if missing.is_empty() && ghost.is_empty() && dupes.is_empty() && in_map.len() == disk.len() {
             println!("   对账一致");
         }
     }
