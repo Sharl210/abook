@@ -294,6 +294,55 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- lint and audit must agree
+    // `lint` and `audit` are two front-ends over the same records. If they
+    // report different totals the user cannot tell which to trust. The check
+    // must compare the two *front-ends*, not the validator against itself --
+    // an earlier version did the latter and passed even when lint was broken.
+    {
+        let root = crate::resolve_root(&crate::util::Args::default());
+        if root.exists() {
+            let mut total = 0usize;
+            let mut audit_clean = 0usize;
+            let mut lint_bad = 0usize;
+            for lib in [crate::rec::Lib::Canonical, crate::rec::Lib::Candidate] {
+                for rec in crate::rec::load_lib(&root, lib) {
+                    total += 1;
+                    // what `audit` counts as clean
+                    let rep = crate::schema::validate(
+                        &rec.as_parsed(),
+                        rec.lib,
+                        Some(&rec.file_name()),
+                    );
+                    if rep.clean() {
+                        audit_clean += 1;
+                    }
+                    // what `lint` prints per record
+                    if !rec.lint().is_empty() {
+                        lint_bad += 1;
+                    }
+                }
+            }
+            if total == 0 {
+                fail += 1;
+                msgs.push("FAIL  lint/audit 一致性：库为空，无法验证".to_string());
+            } else if audit_clean + lint_bad != total {
+                fail += 1;
+                msgs.push(format!(
+                    "FAIL  lint/audit 不一致：audit 规范 {audit_clean} + lint 有问题 {lint_bad} = {}，但总数 {total}",
+                    audit_clean + lint_bad
+                ));
+            } else {
+                pass += 1;
+                if verbose {
+                    msgs.push(format!(
+                        "PASS  lint/audit 一致：{total} 条中 {audit_clean} 规范 / {lint_bad} 有问题"
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- platform table completeness
     // Every triple advertised by `detect` must also be built by CI. The list
     // below is the CI matrix; a mismatch means an install would 404.

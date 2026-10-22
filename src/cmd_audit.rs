@@ -21,6 +21,10 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
     let mut clean = 0usize;
     let mut with_dev = 0usize;
     let mut with_err = 0usize;
+    // The four buckets below must partition `total`; a reader who adds them up
+    // must reach the record count, otherwise the summary is misleading.
+    let mut fixed_only = 0usize;
+    let mut warn_only = 0usize;
     let mut samples: Vec<String> = Vec::new();
 
     for lib in &libs {
@@ -41,9 +45,12 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
             }
             if rep.has_error() {
                 with_err += 1;
-            }
-            if rep.clean() {
+            } else if rep.clean() {
                 clean += 1;
+            } else if rep.warn_count() == 0 && rep.fixed_count() > 0 {
+                fixed_only += 1;
+            } else {
+                warn_only += 1;
             }
             for d in &rec.devs {
                 let e = rule_counts.entry(format!("{} dev", d.rule)).or_insert((0, 0, 0));
@@ -93,8 +100,10 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
 
     println!("审计 {total} 条记录");
     println!("  完全规范      {clean}");
-    println!("  触发纠偏      {with_dev}");
-    println!("  含 ERROR      {with_err}");
+    println!("  仅自动纠偏    {fixed_only}   （能被容错吸收、已留痕）");
+    println!("  仅告警        {warn_only}   （能用，但召回质量下降）");
+    println!("  含 ERROR      {with_err}   （必须修）");
+    debug_assert_eq!(clean + fixed_only + warn_only + with_err, total);
     println!();
     if rule_counts.is_empty() {
         println!("没有任何规则被触发：真实库全部处于规范形态。");

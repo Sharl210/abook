@@ -315,25 +315,35 @@ impl Record {
     }
 
     /// Header completeness problems for `lint`.
+    /// Reconstruct a `Parsed` view so the shared validator can be reused.
+    /// `lint` must not keep its own rule list: doing so previously made it
+    /// disagree with `audit` (it demanded KEYS, which is explicitly derivable
+    /// and therefore only a warning).
+    pub fn as_parsed(&self) -> crate::parse::Parsed {
+        crate::parse::Parsed {
+            lib_hint: Some(self.lib),
+            fields: self.fields.clone(),
+            body: self.body.clone(),
+            promotion: self.promotion.clone(),
+            devs: self.devs.clone(),
+            had_header_tag: !self.header_inferred,
+            body_inferred: false,
+        }
+    }
+
+    /// Thin wrapper over the shared validator, so `lint` and `audit` can never
+    /// report different rule sets for the same record.
     pub fn lint(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let required: &[&str] = &[
-            "FORMAT", "ID", "KIND", "MATURITY", "AUTHORITY", "TITLE", "SUMMARY", "READ_WHEN",
-            "NOT_FOR", "KEYS",
-        ];
-        for k in required {
-            if self.get(k).trim().is_empty() {
-                out.push(format!("缺字段 {k}"));
-            }
-        }
-        if self.body.trim().is_empty() {
-            out.push("正文为空".into());
-        }
-        if !Self::is_scheme_name(&self.file_name()) {
-            out.push(format!("文件名不符合命名方案: {}", self.file_name()));
-        }
-        if self.lib == Lib::Canonical && self.get("STATUS").is_empty() {
-            out.push("正式记录缺 STATUS".into());
+        let rep = crate::schema::validate(&self.as_parsed(), self.lib, Some(&self.file_name()));
+        let mut out: Vec<String> = rep
+            .issues
+            .iter()
+            .map(|i| format!("[{}] {} {} :: {}", i.sev.label(), i.rule, i.field, i.message))
+            .collect();
+        // Deviations are part of the record's health too. Omitting them made
+        // `lint` report fewer bad records than `audit` for the same library.
+        for d in &self.devs {
+            out.push(format!("[{}] {} 行{} {} → {}", d.sev.label(), d.rule, d.line, d.original, d.action));
         }
         out
     }
