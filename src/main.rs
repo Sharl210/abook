@@ -218,12 +218,27 @@ fn cmd_detect(a: &Args) -> R<i32> {
     } else {
         String::new()
     };
+    // "Found on PATH" is not the same as "installed". A build directory or a
+    // throw-away workspace is on PATH only for the shell that set it up, so
+    // counting it as ready reports success that evaporates next session.
+    let classify = install_location_kind;
+    let stable: Vec<String> = found
+        .iter()
+        .filter(|f| classify(f) == "stable")
+        .cloned()
+        .collect();
+    let transient: Vec<String> = found
+        .iter()
+        .filter(|f| classify(f) == "transient")
+        .cloned()
+        .collect();
     let on_path = !found.is_empty();
-    let ready = on_path;
+    // ready means: a durable copy exists AND the bare name resolves to it.
+    let ready = !stable.is_empty();
     if a.has("json") {
         println!(
             "{{\"os\":{},\"arch\":{},\"target\":{},\"exe\":{},\"on_path\":{},\
-\"ready\":{},\"found\":[{ }],\"self\":{},\"root\":{}}}",
+\"ready\":{},\"found\":[{ }],\"stable\":[{ }],\"transient\":[{ }],\"self\":{},\"root\":{}}}",
             jstr(os),
             jstr(arch),
             jstr(target),
@@ -231,6 +246,8 @@ fn cmd_detect(a: &Args) -> R<i32> {
             on_path,
             ready,
             found.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
+            stable.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
+            transient.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
             jstr(&self_path),
             jstr(&resolve_root(a).to_string_lossy())
         );
@@ -241,18 +258,43 @@ fn cmd_detect(a: &Args) -> R<i32> {
     println!("已装路径    {}", if self_path.is_empty() { "-" } else { &self_path });
     println!("记忆根      {}", resolve_root(a).display());
     if ready {
-        println!("PATH 自检   通过（裸名 abook 可直接调用）");
-        for f in &found {
-            println!("            {f}");
+        println!("PATH 自检   通过（裸名 {exe} 可直接调用，且位置长期有效）");
+        for f in &stable {
+            println!("            稳定 {f}");
+        }
+        for f in &transient {
+            println!("            临时 {f}（不在 PATH 的长期配置里，换会话可能消失）");
         }
         println!("结论        就绪");
         Ok(0)
+    } else if !transient.is_empty() {
+        println!("PATH 自检   只有临时副本，没有一个长期有效的位置");
+        for f in &transient {
+            println!("            临时 {f}");
+        }
+        println!("结论        需要正式安装（当前只在本次会话的 PATH 里）");
+        println!("下一步      abook install");
+        Ok(4)
     } else {
         println!("PATH 自检   未通过：PATH 里找不到名为 {exe} 的可执行文件");
         println!("结论        需要初始化");
         println!("下一步      abook install");
         Ok(4)
     }
+}
+
+/// Classify where a copy of the tool lives. A build directory or an ephemeral
+/// workspace satisfies "on PATH" today and is gone tomorrow, so treating it as
+/// installed would report readiness that does not survive the session.
+pub fn install_location_kind(p: &str) -> &'static str {
+    let transient = ["/target/release", "/target/debug", "/.dsh/workspaces/", "/.cargo/"];
+    if transient.iter().any(|m| p.contains(m)) {
+        return "transient";
+    }
+    if p.contains("/.local/bin/") || p.contains("/usr/bin/") || p.contains("/bin/") {
+        return "stable";
+    }
+    "other"
 }
 
 /// Verify that downloaded bytes really are an executable for this platform.

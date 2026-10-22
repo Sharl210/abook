@@ -399,6 +399,34 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- "installed" must not be satisfied by a throw-away location
+    {
+        let cases = [
+            ("/home/u/.local/bin/abook", "stable"),
+            ("/usr/bin/abook", "stable"),
+            ("/data/x/.dsh/workspaces/incoming/abook/target/release/abook", "transient"),
+            ("/src/abook/target/debug/abook", "transient"),
+        ];
+        let mut good = 0;
+        for (path, want) in cases.iter() {
+            if crate::install_location_kind(path) == *want {
+                good += 1;
+            }
+        }
+        if good == cases.len() {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  安装位置判定：构建目录/工作区不算已安装".to_string());
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  安装位置判定：{} 例中只有 {good} 例正确",
+                cases.len()
+            ));
+        }
+    }
+
     // ---- platform table completeness
     // Every triple advertised by `detect` must also be built by CI. The list
     // below is the CI matrix; a mismatch means an install would 404.
