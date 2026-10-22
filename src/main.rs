@@ -67,7 +67,8 @@ fn help_text() -> String {
   refresh [canonical|candidate|both]   按磁盘重建地图并推进收录时刻
   normalize [canonical|candidate|both] [--dry-run]  旧命名升级为新命名方案
   commit --slug S --body-file F        追加一条变更记录
-  install [--url URL]        架构自检 + 下载对应二进制 + 加入 PATH
+  detect [--json]            平台识别 + PATH 自检（判断是否已就绪）
+  install [--url URL]        下载对应架构二进制并放入 PATH
   version                    打印版本
   help                       本帮助
 
@@ -80,6 +81,91 @@ fn help_text() -> String {
   0 成功  2 用法  3 未找到  4 需批准/受阻  5 完整性问题  6 IO
 "#
     )
+}
+
+/// Architecture detection plus PATH self-check. Answers the one question the
+/// calling model needs before anything else: is the tool installed and
+/// reachable by bare name, and if not, which artifact does this device need?
+fn cmd_detect(a: &Args) -> R<i32> {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let target = match (os, arch) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("linux", "arm") => "armv7-unknown-linux-musleabihf",
+        ("linux", "x86") => "i686-unknown-linux-musl",
+        ("linux", "riscv64") => "riscv64gc-unknown-linux-musl",
+        ("linux", "loongarch64") => "loongarch64-unknown-linux-musl",
+        ("android", "aarch64") => "aarch64-linux-android",
+        ("android", "arm") => "armv7-linux-androideabi",
+        ("android", "x86_64") => "x86_64-linux-android",
+        ("android", "x86") => "i686-linux-android",
+        ("windows", "x86_64") => "x86_64-pc-windows-gnu",
+        ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
+        ("windows", "x86") => "i686-pc-windows-gnu",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        _ => "",
+    };
+    let exe = if os == "windows" { "abook.exe" } else { "abook" };
+    // PATH self-check: look for a bare-named binary in every PATH entry.
+    let mut found: Vec<String> = Vec::new();
+    let sep = if os == "windows" { ';' } else { ':' };
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(sep) {
+            if dir.is_empty() {
+                continue;
+            }
+            let cand = std::path::Path::new(dir).join(exe);
+            if cand.is_file() {
+                found.push(cand.to_string_lossy().to_string());
+            }
+        }
+    }
+    // current_exe() is unreliable on Android (it can resolve to the dynamic
+    // linker), so trust the PATH scan first and fall back to argv[0].
+    let self_path = if let Some(first) = found.first() {
+        first.clone()
+    } else if let Some(a0) = std::env::args().next() {
+        a0
+    } else {
+        String::new()
+    };
+    let on_path = !found.is_empty();
+    let ready = on_path;
+    if a.has("json") {
+        println!(
+            "{{\"os\":{},\"arch\":{},\"target\":{},\"exe\":{},\"on_path\":{},\
+\"ready\":{},\"found\":[{ }],\"self\":{},\"root\":{}}}",
+            jstr(os),
+            jstr(arch),
+            jstr(target),
+            jstr(exe),
+            on_path,
+            ready,
+            found.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
+            jstr(&self_path),
+            jstr(&resolve_root(a).to_string_lossy())
+        );
+        return Ok(if ready { 0 } else { 4 });
+    }
+    println!("平台        {os}/{arch}");
+    println!("需要产物    abook-{target}{}", if exe.ends_with(".exe") { ".exe" } else { "" });
+    println!("已装路径    {}", if self_path.is_empty() { "-" } else { &self_path });
+    println!("记忆根      {}", resolve_root(a).display());
+    if ready {
+        println!("PATH 自检   通过（裸名 abook 可直接调用）");
+        for f in &found {
+            println!("            {f}");
+        }
+        println!("结论        就绪");
+        Ok(0)
+    } else {
+        println!("PATH 自检   未通过：PATH 里找不到名为 {exe} 的可执行文件");
+        println!("结论        需要初始化");
+        println!("下一步      abook install");
+        Ok(4)
+    }
 }
 
 fn cmd_install(a: &Args) -> R<i32> {
@@ -95,7 +181,7 @@ fn cmd_install(a: &Args) -> R<i32> {
         ("android", "x86_64") => "x86_64-linux-android",
         ("android", "x86") => "i686-linux-android",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
         ("windows", "x86") => "i686-pc-windows-msvc",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", "x86_64") => "x86_64-apple-darwin",
@@ -289,6 +375,7 @@ fn dispatch(a: &Args) -> R<i32> {
             println!("{}", p.display());
             Ok(0)
         }
+        "detect" | "where" => cmd_detect(a),
         "install" | "self-install" => cmd_install(a),
         other => usage(format!("未知命令: {other}（运行 abook help）")),
     }

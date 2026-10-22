@@ -280,6 +280,11 @@ pub fn recall(
     // promoted candidates are not part of normal auto-recall
     let mut pool: Vec<(Lib, Record)> = Vec::new();
     for (lib, rec) in all {
+        // Deleted records leave the current view; they stay on disk so the
+        // deletion can be reverted, and are reachable only via `show`.
+        if rec.status() == "DELETED" {
+            continue;
+        }
         if lib == Lib::Candidate && !include_promoted {
             if rec.promotion.is_some() || rec.get("PROMOTED_TO").len() > 0 {
                 continue;
@@ -419,8 +424,16 @@ pub fn read_state(root: &Path) -> State {
         root: root.to_string_lossy().to_string(),
         ..Default::default()
     };
-    st.canonical = list_md(&root.join(Lib::Canonical.dir())).len();
-    st.candidate = list_md(&root.join(Lib::Candidate.dir())).len();
+    // Count only records in the current view: a soft-deleted record is still
+    // on disk (so it can be restored) but is no longer part of the library.
+    let live = |lib: Lib| -> usize {
+        load_lib(root, lib)
+            .iter()
+            .filter(|r| r.status() != "DELETED")
+            .count()
+    };
+    st.canonical = live(Lib::Canonical);
+    st.candidate = live(Lib::Candidate);
     if let Ok(a) = Atlas::load(&root.join(Lib::Canonical.atlas())) {
         st.canonical_atlas_count = a.total_count();
         st.covered_canonical = a.get("COVERED_THROUGH");

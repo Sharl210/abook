@@ -412,6 +412,46 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
             }
         }
     }
+    // Title match: users and models name a record by its heading far more
+    // often than by filename. Exact title first, then unique prefix.
+    for lib in [Lib::Candidate, Lib::Canonical] {
+        let dir = root.join(lib.dir());
+        let mut exact: Vec<PathBuf> = Vec::new();
+        let mut prefix: Vec<PathBuf> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let pth = e.path();
+                if !pth.extension().map(|x| x == "md").unwrap_or(false) {
+                    continue;
+                }
+                if let Ok(rec) = Record::parse(&pth, lib) {
+                    let t = rec.title();
+                    if t == sel {
+                        exact.push(pth.clone());
+                    } else if !t.is_empty() && t.starts_with(sel) {
+                        prefix.push(pth.clone());
+                    }
+                }
+            }
+        }
+        if exact.len() == 1 {
+            return Ok((exact.pop().unwrap(), lib));
+        }
+        if exact.is_empty() && prefix.len() == 1 {
+            return Ok((prefix.pop().unwrap(), lib));
+        }
+        if exact.len() > 1 || prefix.len() > 1 {
+            let names: Vec<String> = exact
+                .iter()
+                .chain(prefix.iter())
+                .filter_map(|p| p.file_name().map(|x| x.to_string_lossy().to_string()))
+                .collect();
+            return Err(EE::Usage(format!(
+                "标题「{sel}」匹配到多条，请用文件名或 ID 指定：{}",
+                names.join(", ")
+            )));
+        }
+    }
     notfound(format!("未找到记录: {sel}"))
 }
 

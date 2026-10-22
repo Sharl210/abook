@@ -181,6 +181,11 @@ pub fn init_book(root: &Path) -> R<Vec<String>> {
             made.push(lib.atlas().to_string());
         }
     }
+    // The ledger is a normal vault entry, so a fresh vault has none yet.
+    if crate::vault::read_entry(root, crate::vault::LEDGER_ID).is_err() {
+        crate::vault::sync_ledger(root)?;
+        made.push("vault/名册".into());
+    }
     Ok(made)
 }
 

@@ -286,8 +286,9 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
     }
     if !a.has("approve") {
         return blocked(format!(
-            "晋升需要用户对具体条目的明确批准。若要晋升「{}」，加 --approve。",
-            cand.title()
+            "晋升需要用户对具体条目的明确批准。记录已找到：「{}」({})。确认后加 --approve。",
+            cand.title(),
+            rel(&root, &cpath)
         ));
     }
     let st = stamps();
