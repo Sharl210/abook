@@ -22,7 +22,7 @@ jobs:
           - target: armv7-unknown-linux-musleabihf
           - target: i686-unknown-linux-musl
           - target: riscv64gc-unknown-linux-musl
-          - target: loongarch64-unknown-linux-musl
+          - target: loongarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,16 +31,41 @@ jobs:
       - name: Install cross toolchains
         run: |
           sudo apt-get update -qq
-          # musl targets need a C toolchain for the target to supply crt objects.
-          # riscv64 and loongarch64 are not covered by musl-gcc, so they use a
-          # real cross gcc; rust-lld cannot link them on its own because the
-          # self-contained runtime for those two lacks libgcc_s.
           sudo apt-get install -y -qq musl-tools gcc-arm-linux-gnueabihf gcc-i686-linux-gnu \
             gcc-aarch64-linux-gnu || true
-          sudo apt-get install -y -qq gcc-riscv64-linux-gnu || true
-          # loongarch64 cross gcc exists only on newer Ubuntu; try both names.
-          sudo apt-get install -y -qq gcc-loongarch64-linux-gnu || \
-            sudo apt-get install -y -qq gcc-14-loongarch64-linux-gnu || true
+          # riscv64 and loongarch64 are not packaged in the Ubuntu archive at
+          # all (verified: "Unable to locate package gcc-loongarch64-linux-gnu"),
+          # and rust-lld cannot link them because the self-contained runtime
+          # lacks libgcc_s. musl.cc publishes complete cross toolchains that
+          # include their own sysroot, so they are fetched directly.
+          T="${{ matrix.target }}"
+          case "$T" in
+            riscv64gc-unknown-linux-musl)
+              # musl.cc publishes a verified riscv64 musl cross toolchain
+              # (108MB, HTTP 200). It ships its own sysroot.
+              curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
+                -o /tmp/cross.tgz "https://musl.cc/riscv64-linux-musl-cross.tgz"
+              mkdir -p "$HOME/cross"
+              tar xzf /tmp/cross.tgz -C "$HOME/cross" --strip-components=1
+              echo "$HOME/cross/bin" >> "$GITHUB_PATH"
+              ;;
+            loongarch64-unknown-linux-gnu)
+              # No musl toolchain for loongarch64 exists anywhere (musl.cc 404,
+              # Ubuntu archive has no gcc-loongarch64). Loongson publishes the
+              # official cross toolchain; the oldest glibc flavour is 2.40,
+              # which is what real Loongnix/Debian-loong64 systems ship.
+              curl -fSL --retry 6 --retry-all-errors --retry-delay 5 \
+                -o /tmp/la.tar.xz \
+                "https://github.com/loongson/build-tools/releases/download/2024.08.08/x86_64-cross-tools-loongarch64-binutils_2.43-gcc_14.2.0-glibc_2.40.tar.xz" \
+                || curl -fSL --retry 6 --retry-all-errors \
+                     -o /tmp/la.tar.xz \
+                     "https://github.com/loongson/build-tools/releases/download/2025.02.21/x86_64-cross-tools-loongarch64-binutils_2.44-gcc_14.2.0-glibc_2.41.tar.xz"
+              mkdir -p "$HOME/la"
+              tar xJf /tmp/la.tar.xz -C "$HOME/la" --strip-components=1
+              find "$HOME/la" -maxdepth 3 -name 'loongarch64*-gcc' -type f | head -3
+              echo "$HOME/la/bin" >> "$GITHUB_PATH"
+              ;;
+          esac
       - name: Configure
         run: |
           T="${{ matrix.target }}"
@@ -53,15 +78,11 @@ jobs:
               armv7-unknown-linux-musleabihf)  echo 'linker = "arm-linux-gnueabihf-gcc"' ;;
               i686-unknown-linux-musl)         echo 'linker = "i686-linux-gnu-gcc"' ;;
               riscv64gc-unknown-linux-musl)
-                  echo 'linker = "riscv64-linux-gnu-gcc"'
-                  echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=no"]' ;;
-              loongarch64-unknown-linux-musl)
-                  if command -v loongarch64-linux-gnu-gcc >/dev/null; then
-                      echo 'linker = "loongarch64-linux-gnu-gcc"'
-                  else
-                      echo 'linker = "loongarch64-unknown-linux-gnu-gcc"'
-                  fi
-                  echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=no"]' ;;
+                  echo 'linker = "riscv64-linux-musl-gcc"'
+                  echo 'rustflags = ["-C", "link-self-contained=no"]' ;;
+              loongarch64-unknown-linux-gnu)
+                  echo 'linker = "loongarch64-unknown-linux-gnu-gcc"'
+                  echo 'rustflags = ["-C", "target-feature=+crt-static"]' ;;
             esac
           } > .cargo/config.toml
           cat .cargo/config.toml
@@ -70,10 +91,10 @@ jobs:
           T="${{ matrix.target }}"
           case "$T" in
             riscv64gc-unknown-linux-musl)
-              command -v riscv64-linux-gnu-gcc || { echo "::error::riscv64 cross gcc missing"; exit 1; } ;;
-            loongarch64-unknown-linux-musl)
-              command -v loongarch64-linux-gnu-gcc || command -v loongarch64-unknown-linux-gnu-gcc \
-                || echo "::warning::loongarch64 cross gcc unavailable on this runner" ;;
+              command -v riscv64-linux-musl-gcc || { echo "::error::riscv64 musl cross gcc missing"; exit 1; } ;;
+            loongarch64-unknown-linux-gnu)
+              command -v loongarch64-unknown-linux-gnu-gcc \
+                || { echo "::error::loongarch64 cross gcc missing"; exit 1; } ;;
           esac
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -124,7 +145,9 @@ jobs:
         run: |
           NDK_VERSION="27c"
           echo "Installing NDK r${NDK_VERSION}"
-          curl -sSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}-linux.zip"
+          curl -fSL --retry 8 --retry-all-errors --retry-delay 6 \
+            --http1.1 -o /tmp/ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}-linux.zip"
           unzip -q /tmp/ndk.zip -d "$HOME"
           echo "NDK=$HOME/android-ndk-r${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Configure
