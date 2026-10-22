@@ -153,26 +153,46 @@ fn help_text() -> String {
 /// Architecture detection plus PATH self-check. Answers the one question the
 /// calling model needs before anything else: is the tool installed and
 /// reachable by bare name, and if not, which artifact does this device need?
-fn cmd_detect(a: &Args) -> R<i32> {
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
-    let target = match (os, arch) {
+
+/// The single source of truth for platform -> release artifact name.
+/// `detect` and `install` both call this so they can never drift apart, and
+/// the names here must match `.github/workflows/build.yml` exactly.
+fn target_triple(os: &str, arch: &str) -> Option<&'static str> {
+    Some(match (os, arch) {
+        ("android", "aarch64") => "aarch64-linux-android",
+        ("android", "arm") => "armv7-linux-androideabi",
+        ("android", "x86_64") => "x86_64-linux-android",
+        ("android", "x86") => "i686-linux-android",
         ("linux", "x86_64") => "x86_64-unknown-linux-musl",
         ("linux", "aarch64") => "aarch64-unknown-linux-musl",
         ("linux", "arm") => "armv7-unknown-linux-musleabihf",
         ("linux", "x86") => "i686-unknown-linux-musl",
         ("linux", "riscv64") => "riscv64gc-unknown-linux-musl",
         ("linux", "loongarch64") => "loongarch64-unknown-linux-gnu",
-        ("android", "aarch64") => "aarch64-linux-android",
-        ("android", "arm") => "armv7-linux-androideabi",
-        ("android", "x86_64") => "x86_64-linux-android",
-        ("android", "x86") => "i686-linux-android",
         ("windows", "x86_64") => "x86_64-pc-windows-gnu",
-        ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
         ("windows", "x86") => "i686-pc-windows-gnu",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
         ("macos", "x86_64") => "x86_64-apple-darwin",
-        _ => "",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        _ => return None,
+    })
+}
+
+/// Release artifact file name for a target. Windows keeps the `.exe` suffix.
+fn artifact_name(target: &str) -> String {
+    if target.contains("windows") {
+        format!("abook-{target}.exe")
+    } else {
+        format!("abook-{target}")
+    }
+}
+
+fn cmd_detect(a: &Args) -> R<i32> {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let target = match target_triple(os, arch) {
+        Some(t) => t,
+        None => return usage(format!("不支持的平台: {os}/{arch}")),
     };
     let exe = if os == "windows" { "abook.exe" } else { "abook" };
     // PATH self-check: look for a bare-named binary in every PATH entry.
@@ -238,22 +258,11 @@ fn cmd_detect(a: &Args) -> R<i32> {
 fn cmd_install(a: &Args) -> R<i32> {
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
-    let target = match (os, arch) {
-        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
-        ("linux", "arm") => "armv7-unknown-linux-musleabihf",
-        ("linux", "x86") => "i686-unknown-linux-musl",
-        ("android", "aarch64") => "aarch64-linux-android",
-        ("android", "arm") => "armv7-linux-androideabi",
-        ("android", "x86_64") => "x86_64-linux-android",
-        ("android", "x86") => "i686-linux-android",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-gnullvm",
-        ("windows", "x86") => "i686-pc-windows-msvc",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        _ => return usage(format!("不支持的平台: {os}/{arch}")),
+    let target = match target_triple(os, arch) {
+        Some(t) => t,
+        None => return usage(format!("不支持的平台: {os}/{arch}")),
     };
+    let art = artifact_name(target);
     let exe = if os == "windows" { "abook.exe" } else { "abook" };
     let base = a
         .get("url")
@@ -262,7 +271,7 @@ fn cmd_install(a: &Args) -> R<i32> {
         .unwrap_or_else(|| {
             "https://github.com/Sharl210/abook/releases/latest/download".to_string()
         });
-    let url = format!("{base}/abook-{target}");
+    let url = format!("{base}/{art}");
     if a.has("dry-run") || a.has("json") {
         println!(
             "{{\"os\":{},\"arch\":{},\"target\":{},\"url\":{},\"exe\":{}}}",

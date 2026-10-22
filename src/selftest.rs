@@ -294,6 +294,62 @@ pub fn run(verbose: bool) -> (usize, usize, Vec<String>) {
         }
     }
 
+    // ---- platform table completeness
+    // Every triple advertised by `detect` must also be built by CI. The list
+    // below is the CI matrix; a mismatch means an install would 404.
+    const CI_TARGETS: &[&str] = &[
+        "aarch64-linux-android",
+        "armv7-linux-androideabi",
+        "x86_64-linux-android",
+        "i686-linux-android",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf",
+        "i686-unknown-linux-musl",
+        "riscv64gc-unknown-linux-musl",
+        "loongarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnu",
+        "i686-pc-windows-gnu",
+        "aarch64-pc-windows-gnullvm",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    ];
+    const PLATFORMS: &[(&str, &str)] = &[
+        ("android", "aarch64"),
+        ("android", "arm"),
+        ("android", "x86_64"),
+        ("android", "x86"),
+        ("linux", "x86_64"),
+        ("linux", "aarch64"),
+        ("linux", "arm"),
+        ("linux", "x86"),
+        ("linux", "riscv64"),
+        ("linux", "loongarch64"),
+        ("windows", "x86_64"),
+        ("windows", "x86"),
+        ("windows", "aarch64"),
+        ("macos", "x86_64"),
+        ("macos", "aarch64"),
+    ];
+    for (os, arch) in PLATFORMS {
+        match crate::target_triple(os, arch) {
+            Some(t) if CI_TARGETS.contains(&t) => {
+                pass += 1;
+                if verbose {
+                    msgs.push(format!("PASS  平台 {os}/{arch} → {t}"));
+                }
+            }
+            Some(t) => {
+                fail += 1;
+                msgs.push(format!("FAIL  平台 {os}/{arch} → {t} 不在 CI 矩阵里，安装会 404"));
+            }
+            None => {
+                fail += 1;
+                msgs.push(format!("FAIL  平台 {os}/{arch} 无法识别"));
+            }
+        }
+    }
+
     (pass, fail, msgs)
 }
 

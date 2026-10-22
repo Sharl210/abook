@@ -202,15 +202,16 @@ jobs:
         include:
           - target: x86_64-pc-windows-gnu
           - target: i686-pc-windows-gnu
+          - target: aarch64-pc-windows-gnullvm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install mingw
+      - name: Install toolchains
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 clang lld llvm
       - name: Configure
         run: |
           T="${{ matrix.target }}"
@@ -220,16 +221,25 @@ jobs:
             case "$T" in
               x86_64-pc-windows-gnu) echo 'linker = "x86_64-w64-mingw32-gcc"' ;;
               i686-pc-windows-gnu)   echo 'linker = "i686-w64-mingw32-gcc"' ;;
+              # aarch64 windows has no mingw gcc in the Ubuntu archive; the
+              # gnullvm target is designed for clang/lld instead.
+              aarch64-pc-windows-gnullvm)
+                  echo 'linker = "clang"'
+                  echo 'rustflags = ["-C", "linker-flavor=gnu-lld-cc", "-C", "target-feature=+crt-static"]' ;;
             esac
           } > .cargo/config.toml
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         run: |
           NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook.exe"
+          if [ ! -f "$BIN" ]; then
+            echo "::warning::未产出二进制，跳过打包 ($NAME)"
+            exit 0
+          fi
           mkdir -p out
-          cp "target/${{ matrix.target }}/release/abook.exe" "out/$NAME.exe"
+          cp "$BIN" "out/$NAME.exe"
           cd out && zip -q "$NAME.zip" "$NAME.exe"
+          echo "打包完成: $NAME.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: abook-${{ matrix.target }}
@@ -294,3 +304,75 @@ jobs:
           files: dist/*
           generate_release_notes: true
           make_latest: true
+
+  # ---------------------------------------------------------------- Release
+  # Collects every successful platform build into one release so that
+  # `abook install` and the bootstrap one-liner have a stable download URL:
+  #   https://github.com/<owner>/<repo>/releases/latest/download/abook-<target>
+  release:
+    needs: [linux, android, windows, macos]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: false
+
+      - name: Flatten and enumerate
+        run: |
+          mkdir -p out
+          # Each artifact dir contains either the raw binary or a tar.gz.
+          find dist -type f \( -name 'abook-*' -o -name 'abook-*.exe' \) | while read -r f; do
+            base=$(basename "$f")
+            case "$base" in
+              *.tar.gz) continue ;;
+            esac
+            cp "$f" "out/$base"
+            chmod +x "out/$base" 2>/dev/null || true
+          done
+          echo "产物清单:"; ls -la out/ || true
+          COUNT=$(ls out 2>/dev/null | wc -l)
+          echo "共 $COUNT 个二进制"
+          echo "COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Skip release when nothing built
+        if: env.COUNT == '0'
+        run: |
+          echo "::warning::没有可用产物，跳过发布"
+          exit 0
+
+      - name: Publish rolling release
+        if: env.COUNT != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: abook latest
+          body: |
+            abook 自动构建产物。每个文件对应一个目标三元组，可直接下载后放入 PATH。
+
+            | 文件 | 平台 |
+            |---|---|
+            | abook-aarch64-linux-android | Android arm64-v8a（手机主力） |
+            | abook-armv7-linux-androideabi | Android armeabi-v7a |
+            | abook-x86_64-linux-android | Android x86_64（模拟器） |
+            | abook-i686-linux-android | Android x86 |
+            | abook-aarch64-unknown-linux-musl | Linux arm64 |
+            | abook-x86_64-unknown-linux-musl | Linux x86_64 |
+            | abook-armv7-unknown-linux-musleabihf | Linux armv7 |
+            | abook-i686-unknown-linux-musl | Linux x86 |
+            | abook-riscv64gc-unknown-linux-musl | Linux riscv64 |
+            | abook-loongarch64-unknown-linux-gnu | Linux LoongArch64 |
+            | abook-x86_64-pc-windows-gnu.exe | Windows x64 |
+            | abook-i686-pc-windows-gnu.exe | Windows x86 |
+            | abook-aarch64-pc-windows-gnullvm.exe | Windows arm64 |
+            | abook-x86_64-apple-darwin | macOS Intel |
+            | abook-aarch64-apple-darwin | macOS Apple Silicon |
+          files: out/*
+          fail_on_unmatched_files: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
