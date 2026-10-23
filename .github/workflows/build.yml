@@ -523,7 +523,7 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.windows != '[]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -533,8 +533,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # A mingw cross gcc is ~200MB of packages. On a slow mirror the download
+      # is the whole cost of this step, and re-downloading it on every run is
+      # how this target failed: one 15-minute attempt was not enough, and the
+      # retry then ran into the step's own 20-minute budget. The archives are
+      # therefore cached, so a repeat run installs with no network at all.
+      - name: Restore apt package cache
+        if: matrix.target == 'x86_64-pc-windows-gnu' || matrix.target == 'i686-pc-windows-gnu'
+        uses: actions/cache@v4
+        with:
+          # A directory inside the workspace, not /var/cache/apt/archives:
+          # apt runs under sudo so the .debs it writes there are root-owned,
+          # and the cache action runs as the runner user, which cannot read
+          # them. Dir::Cache::archives below points apt at this one instead.
+          path: ${{ github.workspace }}/.aptcache
+          key: apt-${{ runner.os }}-${{ matrix.target }}-v1
       - name: Install toolchains
-        timeout-minutes: 20
+        timeout-minutes: 45
         run: |
           # Every windows matrix entry used to install the union of everything:
           # both mingw gccs plus clang, lld and llvm (~700MB). On a slow mirror
@@ -557,20 +572,40 @@ jobs:
             exit 0
           fi
           export DEBIAN_FRONTEND=noninteractive
+          # Keep the .debs somewhere the runner user owns, so the cache step
+          # can both save and restore them.
+          APTC="$GITHUB_WORKSPACE/.aptcache"
+          mkdir -p "$APTC/partial"
+          APTOPT="-o Dir::Cache::archives=$APTC"
           timeout 300 sudo -E apt-get update -qq \
             || { echo "::error::apt-get update failed"; exit 1; }
-          # Slow is not broken: retry once before calling it a failure, and
-          # let apt retry stalled connections itself.
+          # Split the network half from the install half. `--download-only`
+          # resolves the dependency tree and fetches every .deb into
+          # /var/cache/apt/archives; the install that follows then needs no
+          # network, so it cannot be killed by a slow mirror. The meta package
+          # `gcc-mingw-w64-x86-64` alone is a few hundred bytes -- the 200MB is
+          # in its dependencies, which is exactly what --download-only pulls.
           for try in 1 2; do
-            if timeout 900 sudo -E apt-get install -y -qq --no-install-recommends \
+            if timeout 1500 sudo -E apt-get install -y -qq --no-install-recommends \
+                 $APTOPT --download-only \
                  -o Acquire::Retries=5 -o Acquire::http::Timeout=60 $PKGS; then
-              echo "installed: $PKGS"
-              exit 0
+              echo "第 $try 次下载完成"
+              break
             fi
-            echo "第 $try 次安装 $PKGS 失败，重试"
+            if [ "$try" = 2 ]; then
+              echo "::error::下载 $PKGS 失败（$T），两次尝试都没完成"
+              exit 1
+            fi
+            echo "第 $try 次下载 $PKGS 未完成，重试"
           done
-          echo "::error::apt-get install failed for $T ($PKGS)"
-          exit 1
+          sudo -E apt-get install -y -qq --no-install-recommends $APTOPT $PKGS \
+            || { echo "::error::本地缓存安装失败（$PKGS）"; exit 1; }
+          echo "installed: $PKGS"
+          "${PKGS%%-*}" 2>/dev/null || true
+          case "$T" in
+            x86_64-pc-windows-gnu) x86_64-w64-mingw32-gcc --version | head -1 ;;
+            i686-pc-windows-gnu)   i686-w64-mingw32-gcc --version | head -1 ;;
+          esac
       - name: Install llvm-mingw
         if: matrix.target == 'aarch64-pc-windows-gnullvm'
         run: |
