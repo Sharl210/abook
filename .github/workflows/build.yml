@@ -316,21 +316,28 @@ jobs:
           # twice while apt itself had installed fine.
           case "$T" in
             *-unknown-linux-musl|*-unknown-linux-musleabihf)
-                # rust-lld is NOT on PATH in a rustup toolchain; it lives in
-                # <sysroot>/lib/rustlib/<host>/bin/. Asking rustc for the
-                # sysroot keeps this correct regardless of how the toolchain
-                # was installed.
+                # rust-lld is a MULTIPLEXER: it looks at argv[0] and dispatches
+                # to ld.lld / ld64.lld / lld-link / wasm-ld. Called under its
+                # own name it refuses to do anything ("lld is a generic driver.
+                # Invoke ld.lld (Unix), ... instead"), which is what failed the
+                # first attempt at this. Invoked through a symlink literally
+                # named ld.lld it reports "LLD 21.1.8 (compatible with GNU
+                # linkers)" and works as a normal ELF linker.
+                #
+                # It also is not on PATH in a rustup toolchain; it lives in
+                # <sysroot>/lib/rustlib/<host>/bin/. Ask rustc for the sysroot
+                # so this stays correct however the toolchain was installed.
                 RLDD="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/rust-lld"
-                if [ -x "$RLDD" ]; then
-                  LINKER="$RLDD"
-                else
-                  # Older/newer layouts, or a distro rustc that puts it on PATH.
-                  LINKER=$(command -v rust-lld || true)
+                [ -x "$RLDD" ] || RLDD=$(command -v rust-lld || true)
+                [ -n "$RLDD" ] || RLDD=$(find "$(rustc --print sysroot)" -name rust-lld -type f 2>/dev/null | head -1)
+                if [ -z "$RLDD" ]; then
+                  echo "::error::no rust-lld in the toolchain (target $T)"
+                  exit 1
                 fi
-                if [ -z "$LINKER" ]; then
-                  FOUND=$(find "$(rustc --print sysroot)" -name rust-lld -type f 2>/dev/null | head -1)
-                  LINKER="$FOUND"
-                fi ;;
+                mkdir -p "$HOME/lldbin"
+                ln -sf "$RLDD" "$HOME/lldbin/ld.lld"
+                LINKER="$HOME/lldbin/ld.lld"
+                echo "rust-lld: $RLDD -> $LINKER" ;;
             riscv64gc-unknown-linux-gnu)
                 # The unpacked toolchain first; PATH-installed second.
                 LINKER=$(ls "$HOME"/rcross/sys/usr/bin/riscv64-linux-gnu-gcc[-0-9]* 2>/dev/null | head -1)
