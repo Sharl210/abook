@@ -523,7 +523,7 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.windows != '[]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -533,87 +533,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # A mingw cross gcc is ~200MB of packages. On a slow mirror the download
-      # is the whole cost of this step, and re-downloading it on every run is
-      # how this target failed: one 15-minute attempt was not enough, and the
-      # retry then ran into the step's own 20-minute budget. The archives are
-      # therefore cached, so a repeat run installs with no network at all.
-      - name: Restore apt package cache
-        if: matrix.target == 'x86_64-pc-windows-gnu' || matrix.target == 'i686-pc-windows-gnu'
-        uses: actions/cache@v4
-        with:
-          # A directory inside the workspace, not /var/cache/apt/archives:
-          # apt runs under sudo so the .debs it writes there are root-owned,
-          # and the cache action runs as the runner user, which cannot read
-          # them. Dir::Cache::archives below points apt at this one instead.
-          path: ${{ github.workspace }}/.aptcache
-          key: apt-${{ runner.os }}-${{ matrix.target }}-v1
-      - name: Install toolchains
-        timeout-minutes: 45
-        run: |
-          # Every windows matrix entry used to install the union of everything:
-          # both mingw gccs plus clang, lld and llvm (~700MB). On a slow mirror
-          # that step sat for 32 minutes with no budget, so the 40-minute job
-          # timeout was the thing that eventually fired and it said only
-          # "exceeded maximum execution time".
-          #
-          # aarch64-pc-windows-gnullvm needs NONE of it: llvm-mingw (the next
-          # step) ships its own clang driver, lld and the aarch64 sysroot, and
-          # the Configure step points rustc at that driver. Installing the
-          # Ubuntu toolchain for it was 700MB of download for nothing.
-          T="${{ matrix.target }}"
-          case "$T" in
-            x86_64-pc-windows-gnu) PKGS="gcc-mingw-w64-x86-64" ;;
-            i686-pc-windows-gnu)   PKGS="gcc-mingw-w64-i686" ;;
-            *)                     PKGS="" ;;
-          esac
-          if [ -z "$PKGS" ]; then
-            echo "no apt toolchain needed for $T"
-            exit 0
-          fi
-          export DEBIAN_FRONTEND=noninteractive
-          # Keep the .debs somewhere the runner user owns, so the cache step
-          # can both save and restore them.
-          APTC="$GITHUB_WORKSPACE/.aptcache"
-          mkdir -p "$APTC/partial"
-          APTOPT="-o Dir::Cache::archives=$APTC"
-          timeout 300 sudo -E apt-get update -qq \
-            || { echo "::error::apt-get update failed"; exit 1; }
-          # Split the network half from the install half. `--download-only`
-          # resolves the dependency tree and fetches every .deb into
-          # /var/cache/apt/archives; the install that follows then needs no
-          # network, so it cannot be killed by a slow mirror. The meta package
-          # `gcc-mingw-w64-x86-64` alone is a few hundred bytes -- the 200MB is
-          # in its dependencies, which is exactly what --download-only pulls.
-          # Two attempts of 20 minutes each fit inside this step's 45-minute
-          # budget. They did not always: the per-attempt timeout used to be 25
-          # minutes, so the retry could never finish and the step died on its
-          # own timeout instead of on a download error -- the same class of
-          # mistake (a budget smaller than the work it covers) that started
-          # this whole list.
-          for try in 1 2; do
-            if timeout 1200 sudo -E apt-get install -y -qq --no-install-recommends \
-                 $APTOPT --download-only \
-                 -o Acquire::Retries=5 -o Acquire::http::Timeout=60 $PKGS; then
-              echo "第 $try 次下载完成"
-              break
-            fi
-            if [ "$try" = 2 ]; then
-              echo "::error::下载 $PKGS 失败（$T），两次尝试都没完成"
-              exit 1
-            fi
-            echo "第 $try 次下载 $PKGS 未完成，重试"
-          done
-          sudo -E apt-get install -y -qq --no-install-recommends $APTOPT $PKGS \
-            || { echo "::error::本地缓存安装失败（$PKGS）"; exit 1; }
-          echo "installed: $PKGS"
-          "${PKGS%%-*}" 2>/dev/null || true
-          case "$T" in
-            x86_64-pc-windows-gnu) x86_64-w64-mingw32-gcc --version | head -1 ;;
-            i686-pc-windows-gnu)   i686-w64-mingw32-gcc --version | head -1 ;;
-          esac
+      # The two mingw-gnu targets used to come from the Ubuntu archive, and
+      # that is the only reason this job ever failed: `gcc-mingw-w64-x86-64`
+      # drags in ~200MB of .debs, and the azure mirror served them at 40 kB/s
+      # on the runs that broke. Two 20-minute download attempts do not cover
+      # 200MB at that speed (it needs 50+ minutes), so no timeout budget fixes
+      # it -- the step just dies on its own limit and reports "timed out".
+      #
+      # llvm-mingw is a single tarball fetched straight from GitHub, which was
+      # fast enough that the aarch64 target built in minutes. It also ships
+      # clang drivers AND complete sysroots for x86_64, i686 and aarch64, so
+      # one download now serves all three targets and the slow mirror is out
+      # of the path entirely.
       - name: Install llvm-mingw
-        if: matrix.target == 'aarch64-pc-windows-gnullvm'
+        timeout-minutes: 25
         run: |
           # llvm-mingw is an x86_64 host toolchain, which matches the runner.
           V=20261020
@@ -627,11 +560,17 @@ jobs:
           echo "$RUNNER_TEMP/lm/bin" >> "$GITHUB_PATH"
           # Verify what the build actually depends on instead of trusting the
           # tarball: the sysroot archives and the driver itself.
-          LSYS="$RUNNER_TEMP/lm/aarch64-w64-mingw32"
+          case "${{ matrix.target }}" in
+            x86_64-pc-windows-gnu)      MP=x86_64-w64-mingw32 ;;
+            i686-pc-windows-gnu)        MP=i686-w64-mingw32 ;;
+            aarch64-pc-windows-gnullvm) MP=aarch64-w64-mingw32 ;;
+            *) echo "::error::unknown windows target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          LSYS="$RUNNER_TEMP/lm/$MP"
           for f in lib/libmingw32.a lib/libmingwex.a lib/crt2.o; do
-            test -f "$LSYS/$f" || { echo "::error::llvm-mingw sysroot missing $f"; exit 1; }
+            test -f "$LSYS/$f" || { echo "::error::llvm-mingw sysroot missing $f (target $MP)"; exit 1; }
           done
-          test -x "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" || { echo "::error::driver missing"; exit 1; }
+          test -x "$RUNNER_TEMP/lm/bin/$MP-clang" || { echo "::error::driver $MP-clang missing"; exit 1; }
           # This step now replaces the Ubuntu clang/lld/llvm install for this
           # target, so the bundled copies have to actually be there. Checking
           # here turns a missing piece into a named error instead of a link
@@ -639,7 +578,7 @@ jobs:
           for f in bin/ld.lld bin/llvm-ar bin/llvm-rc; do
             test -e "$RUNNER_TEMP/lm/$f" || { echo "::error::llvm-mingw missing $f"; exit 1; }
           done
-          "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" --version | head -1
+          "$RUNNER_TEMP/lm/bin/$MP-clang" --version | head -1
           "$RUNNER_TEMP/lm/bin/ld.lld" --version | head -1
       - name: Configure
         run: |
@@ -647,23 +586,18 @@ jobs:
           mkdir -p .cargo
           {
             echo "[target.$T]"
+            # All three targets link through llvm-mingw's own clang driver.
+            # Its argv[0] selects the triple, so no --target/-fuse-ld flags are
+            # needed and the host clang never gets a chance to link for the
+            # host. Do NOT set -C linker-flavor: the gnullvm target already
+            # defaults to a lld-flavoured gnu driver, and forcing `gnu-lld-cc`
+            # explicitly is rejected by stable rustc ("the linker flavor
+            # `gnu-lld-cc` is unstable"), which killed this job the first time
+            # it ever tried to build.
             case "$T" in
-              x86_64-pc-windows-gnu) echo 'linker = "x86_64-w64-mingw32-gcc"' ;;
-              i686-pc-windows-gnu)   echo 'linker = "i686-w64-mingw32-gcc"' ;;
-              # aarch64 windows has no mingw gcc in the Ubuntu archive; the
-              # gnullvm target is designed for clang/lld instead. Do NOT set
-              # -C linker-flavor here: the gnullvm target already defaults to a
-              # lld-flavoured gnu driver, and forcing gnu-lld-cc explicitly is
-              # rejected by stable rustc ("the linker flavor `gnu-lld-cc` is
-              # unstable"), which killed this job the first time it ever tried
-              # to build. The target triple has to be explicit because the
-              # stock clang driver would otherwise link for the host.
+              x86_64-pc-windows-gnu)      echo 'linker = "x86_64-w64-mingw32-clang"' ;;
+              i686-pc-windows-gnu)        echo 'linker = "i686-w64-mingw32-clang"' ;;
               aarch64-pc-windows-gnullvm)
-                  # Ubuntu ships no aarch64 mingw-w64 at all, so the stock clang
-                  # driver links and then cannot find libmingw32/libmingwex.
-                  # llvm-mingw bundles that sysroot together with a matching
-                  # clang driver whose argv[0] already selects the triple, so
-                  # no --target/-fuse-ld flags are needed here.
                   echo 'linker = "aarch64-w64-mingw32-clang"'
                   echo 'rustflags = ["-C", "target-feature=+crt-static"]' ;;
             esac

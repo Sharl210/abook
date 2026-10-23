@@ -55,7 +55,3 @@ __pycache__/
 /.*.bin
 /.*.rs
 /.*.sh
-
-# apt 下好的 .deb 暂存在工作区里，供 actions/cache 存取。它属于构建中间
-# 产物，不是源码。
-/.aptcache/
