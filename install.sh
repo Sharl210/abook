@@ -13,7 +13,15 @@
 set -eu
 
 REPO="${ABOOK_REPO:-Sharl210/abook}"
-BASE="${ABOOK_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
+# 两个官方固定地址，都不含版本号，发一次新版这里不用改：
+#   releases/latest  跟着最新 release 走
+#   raw/downloads    跟着 downloads 分支走（每次构建由 CI 覆盖）
+REL_BASE="https://github.com/${REPO}/releases/latest/download"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/downloads"
+BASE="${ABOOK_BASE_URL:-$REL_BASE}"
+# 镜像前缀：把官方整条 URL 原样拼在后面即可。国内直连 github.com 常年不稳，
+# 这一串是按实测通过率排的，前面的先试。
+MIRRORS="${ABOOK_MIRRORS:-https://gh-proxy.com/ https://ghfast.top/ https://ghproxy.net/}"
 # Private repositories cannot be downloaded from github.com/releases/download at
 # all -- that endpoint ignores an Authorization header and answers 404. The API
 # asset endpoint is the only working path, and it needs a token.
@@ -287,17 +295,59 @@ is_binary() {
 }
 
 say "下载到 $tmp"
-ok=0
-if command -v curl >/dev/null 2>&1; then
-  if curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$tmp" "$BASE/$name" 2>/dev/null \
-     && is_binary "$tmp"; then
-    ok=1
+
+# 逐源尝试。一个源失败不等于网络坏：国内直连 github.com 常被丢包，而镜像好使。
+# 每个源都要过 is_binary —— 只有 HTTP 200 不算数，劫持页和错误页也是 200。
+#
+# --connect-timeout 6 是关键：被墙时表现为连接挂住而不是立刻拒绝，不设这个
+# 上限就会卡满 --max-time，八个源挨下来要十几分钟，看起来像死机。
+fetch_from() {
+  _u="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 6 --max-time 180 \
+         --retry 2 --retry-delay 1 --retry-all-errors \
+         -o "$tmp" "$_u" 2>/dev/null && is_binary "$tmp"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 20 -t 2 -O "$tmp" "$_u" 2>/dev/null && is_binary "$tmp"
+  else
+    return 1
   fi
-elif command -v wget >/dev/null 2>&1; then
-  if wget -q -O "$tmp" "$BASE/$name" 2>/dev/null && is_binary "$tmp"; then ok=1; fi
+}
+
+# 源清单：
+#  - 显式给了 ABOOK_BASE_URL 就只认它（自建镜像/私有部署的用法）
+#  - 否则官方 release → 三个镜像 → downloads 分支 → 分支的三个镜像
+sources=""
+if [ -n "${ABOOK_BASE_URL:-}" ]; then
+  sources="$BASE/$name"
 else
-  die "找不到 curl 或 wget"
+  # release 资产是平铺的 abook-<triple>[.exe]；downloads 分支里同一样东西
+  # 放在 <triple>/abook[.exe]。两个形态不同，不能套同一个模板。
+  dl_triple="${target}"
+  case "$name" in *.exe) dl_suffix=".exe" ;; *) dl_suffix="" ;; esac
+  DL_PATH="$dl_triple/abook$dl_suffix"
+
+  sources="$REL_BASE/$name"
+  for m in $MIRRORS; do sources="$sources $m$REL_BASE/$name"; done
+  sources="$sources $RAW_BASE/$DL_PATH"
+  for m in $MIRRORS; do sources="$sources $m$RAW_BASE/$DL_PATH"; done
+  # jsDelivr 走自己的 CDN，和 gh 系镜像不是同一条线路；它只认仓库文件，
+  # 所以只对 downloads 分支这一路有效。
+  sources="$sources https://cdn.jsdelivr.net/gh/${REPO}@downloads/$DL_PATH"
 fi
+
+[ -n "$(command -v curl || command -v wget)" ] || die "找不到 curl 或 wget"
+
+ok=0
+n=0
+for u in $sources; do
+  n=$((n + 1))
+  if fetch_from "$u"; then
+    ok=1
+    [ "$n" -gt 1 ] && say "第 $n 个源可用: $u"
+    break
+  fi
+done
 
 # Private repositories: github.com/releases/download answers 404 no matter what
 # header you send, so fall back to the API asset endpoint which does honour it.

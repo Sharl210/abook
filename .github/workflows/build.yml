@@ -876,3 +876,136 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           make_latest: true
+
+  # 固定下载地址的支撑作业。
+  #
+  # 为什么要单独一条分支：国内直连 github.com 常年不通，必须经镜像；而把 15 个
+  # 二进制也放一份到固定分支后，提示词里只需写一条不含版本号的地址，发版时不用
+  # 改动提示词。release 的 latest/download 本来也稳，但它的资产地址要经过
+  # releases/download 路径，镜像对这条路径的处理不如对仓库文件规整，留一份更稳。
+  #
+  # 每次 force push 到单个孤儿提交：不做这件事，仓库会随每次发版多背 17MB 历史，
+  # 几十次之后克隆就没法看了。
+  downloads:
+    needs: [release]
+    if: always() && !cancelled() && needs.release.result == 'success' && !inputs.only
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Flatten
+        run: |
+          mkdir -p dist
+          cd dist
+          for f in *.tar.gz; do [ -e "$f" ] && tar xzf "$f"; done
+          for f in *.zip;    do [ -e "$f" ] && unzip -oq "$f"; done
+          rm -f *.tar.gz *.zip
+          chmod +x abook-* 2>/dev/null || true
+          echo "待归档 $(ls -1 abook-* 2>/dev/null | wc -l) 个"
+      - name: 生成 manifest 与校验和
+        run: |
+          set -eu
+          # 绝对路径：Flatten 与这一步是两个独立步骤，后者的 cwd 会回到
+          # workspace 根，而产物在 dist/ 里面。之前用相对路径 out=dl 且没有
+          # cd，for 循环扫不到任何文件，manifest 静默变成 0 条。
+          out="$PWD/dl"
+          rm -rf "$out"
+          mkdir -p "$out"
+          cd dist
+
+          # os/arch/libc 只是索引字段，file 与 sha256 才是权威。按 triple 逐条
+          # 显式判定而不用模糊匹配，是为了让写错的分类当场看不顺眼，而不是被
+          # 一个更宽的模式默默吃掉。
+          classify() {
+            t="$1"
+            case "$t" in
+              *windows*)      os=windows ;;
+              *apple-darwin*) os=macos ;;
+              *android*)      os=android ;;
+              *linux*)        os=linux ;;
+              *)              os=unknown ;;
+            esac
+            case "$t" in
+              aarch64-*)     arch=aarch64 ;;
+              x86_64-*)      arch=x86_64 ;;
+              i686-*)        arch=i686 ;;
+              armv7-*)       arch=armv7 ;;
+              riscv64*)      arch=riscv64 ;;
+              loongarch64-*) arch=loongarch64 ;;
+              *)             arch=unknown ;;
+            esac
+            case "$t" in
+              *android*)         libc=bionic ;;
+              *windows-gnullvm*) libc=mingw-llvm ;;
+              *windows-gnu*)     libc=mingw ;;
+              *musl*)            libc=musl ;;
+              *apple-darwin*)    libc=libSystem ;;
+              *linux-gnu*)       libc=glibc ;;
+              *)                 libc=unknown ;;
+            esac
+          }
+
+          echo '{"schema":"abook-downloads/1","files":[' > "$out/manifest.json"
+          first=1
+          : > "$out/SHA256SUMS"
+          for f in $(ls abook-* 2>/dev/null | sort); do
+            base="${f#abook-}"
+            sufx=""
+            case "$f" in *.exe) sufx=".exe" ;; esac
+            triple="${base%.exe}"
+            classify "$triple"
+            # 每个目标一个子目录，产物统一叫 abook[.exe]，于是"按架构取文件"
+            # 就是一条可预测的地址：.../downloads/<triple>/abook
+            mkdir -p "$out/$triple"
+            cp "$f" "$out/$triple/abook$sufx"
+            chmod +x "$out/$triple/abook$sufx"
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            size=$(stat -c '%s' "$f")
+            echo "$sha  $triple/abook$sufx" >> "$out/SHA256SUMS"
+            [ "$first" = 1 ] || echo ',' >> "$out/manifest.json"
+            first=0
+            printf '{"target":"%s","os":"%s","arch":"%s","libc":"%s","file":"%s/abook%s","size":%s,"sha256":"%s"}' \
+              "$triple" "$os" "$arch" "$libc" "$triple" "$sufx" "$size" "$sha" >> "$out/manifest.json"
+          done
+          echo ']}' >> "$out/manifest.json"
+
+          # manifest 不合法的话，下游按它取文件会拿到半截内容，所以在推分支前
+          # 就当场解析一遍，不能等调用方才发现。
+          python3 -c "
+          import json
+          d=json.load(open('$out/manifest.json'))
+          assert len(d['files'])==15, len(d['files'])
+          for e in d['files']:
+              assert e['os']!='unknown' and e['arch']!='unknown' and e['libc']!='unknown', e
+          print('manifest 15 条，分类字段齐全')
+          "
+          ls -1 "$out"
+      - name: 推到 downloads 分支
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          cd dl
+          N=$(find . -name 'abook*' -type f | wc -l)
+          # 少于 15 个说明有目标没产出。宁可本次不更新分支，也不能让分支进入
+          # 残缺状态——提示词里的地址是固定的，缺文件就是所有使用者拿到 404。
+          if [ "$N" -lt 15 ]; then
+            echo "::error::downloads 分支应有 15 个二进制，实际 $N 个，拒绝覆盖"
+            find . -type f | sort
+            exit 1
+          fi
+          git init -q .
+          git checkout -q --orphan downloads
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "downloads: 由 run ${{ github.run_id }} 自动生成
+
+          固定下载地址的内容，每次构建整体覆盖。
+          源码提交 ${{ github.sha }}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:refs/heads/downloads
+          echo "已更新 downloads 分支，共 $N 个二进制"
