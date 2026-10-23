@@ -130,11 +130,20 @@ jobs:
           # package set is therefore derived from the target, in the same
           # place the target is read, so the two cannot drift.
           T="${{ matrix.target }}"
+          # The four musl targets need NO cross toolchain at all. rustc ships
+          # the whole musl runtime inside rust-std: lib/rustlib/<target>/lib/
+          # self-contained/ holds libc.a, libunwind.a and every crt object
+          # (verified by unpacking the published rust-std archive), and the
+          # musl target spec sets crt_objects_fallback: Musl. The only missing
+          # piece was a LINKER, and rust-lld ships with the toolchain itself.
+          #
+          # This matters because the cross gcc was the only fragile download
+          # here, and it kept being the thing that failed: 19.6MB of
+          # gcc-13-arm-linux-gnueabihf at 40 kB/s, and gcc-i686-linux-gnu
+          # timing out outright. A linker that is already on disk cannot be
+          # slow.
           case "$T" in
-            x86_64-unknown-linux-musl)      PKGS="musl-tools" ;;
-            aarch64-unknown-linux-musl)     PKGS="gcc-aarch64-linux-gnu" ;;
-            armv7-unknown-linux-musleabihf) PKGS="gcc-arm-linux-gnueabihf" ;;
-            i686-unknown-linux-musl)        PKGS="gcc-i686-linux-gnu" ;;
+            *-unknown-linux-musl|*-unknown-linux-musleabihf) PKGS="" ;;
             aarch64-unknown-linux-gnu)      PKGS="gcc-aarch64-linux-gnu" ;;
             armv7-unknown-linux-gnueabihf)  PKGS="gcc-arm-linux-gnueabihf" ;;
             i686-unknown-linux-gnu)         PKGS="gcc-i686-linux-gnu" ;;
@@ -150,20 +159,9 @@ jobs:
           # lock, cannot half-configure. apt-get install remains as fallback.
           XDEBS=""
           XPREFIX=""
-          case "$T" in
-            aarch64-unknown-linux-musl)
-              XPREFIX=aarch64-linux-gnu
-              XDEBS="gcc-aarch64-linux-gnu gcc-13-aarch64-linux-gnu \
-                     cpp-aarch64-linux-gnu cpp-13-aarch64-linux-gnu \
-                     binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
-                     linux-libc-dev-arm64-cross libgcc-13-dev-arm64-cross" ;;
-            armv7-unknown-linux-musleabihf)
-              XPREFIX=arm-linux-gnueabihf
-              XDEBS="gcc-arm-linux-gnueabihf gcc-13-arm-linux-gnueabihf \
-                     cpp-arm-linux-gnueabihf cpp-13-arm-linux-gnueabihf \
-                     binutils-arm-linux-gnueabihf libc6-dev-armhf-cross \
-                     linux-libc-dev-armhf-cross libgcc-13-dev-armhf-cross" ;;
-          esac
+          # Nothing here any more: every musl target links with rust-lld and
+          # needs no downloaded compiler. The gnu targets below still install a
+          # cross gcc, because they link against a real glibc sysroot.
           if [ -n "$XPREFIX" ]; then
             XROOT="$HOME/xcross"
             mkdir -p "$XROOT/deb" "$XROOT/sys"
@@ -317,12 +315,22 @@ jobs:
           # symlink, so assuming `riscv64-linux-gnu-gcc` exists failed the job
           # twice while apt itself had installed fine.
           case "$T" in
-            x86_64-unknown-linux-musl)       LINKER=$(command -v musl-gcc) ;;
-            aarch64-unknown-linux-musl)      LINKER=$(command -v aarch64-linux-gnu-gcc \
-                                               || ls "$HOME"/xcross/sys/usr/bin/aarch64-linux-gnu-gcc[-0-9]* 2>/dev/null | head -1) ;;
-            armv7-unknown-linux-musleabihf)  LINKER=$(command -v arm-linux-gnueabihf-gcc \
-                                               || ls "$HOME"/xcross/sys/usr/bin/arm-linux-gnueabihf-gcc[-0-9]* 2>/dev/null | head -1) ;;
-            i686-unknown-linux-musl)         LINKER=$(command -v i686-linux-gnu-gcc) ;;
+            *-unknown-linux-musl|*-unknown-linux-musleabihf)
+                # rust-lld is NOT on PATH in a rustup toolchain; it lives in
+                # <sysroot>/lib/rustlib/<host>/bin/. Asking rustc for the
+                # sysroot keeps this correct regardless of how the toolchain
+                # was installed.
+                RLDD="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/rust-lld"
+                if [ -x "$RLDD" ]; then
+                  LINKER="$RLDD"
+                else
+                  # Older/newer layouts, or a distro rustc that puts it on PATH.
+                  LINKER=$(command -v rust-lld || true)
+                fi
+                if [ -z "$LINKER" ]; then
+                  FOUND=$(find "$(rustc --print sysroot)" -name rust-lld -type f 2>/dev/null | head -1)
+                  LINKER="$FOUND"
+                fi ;;
             riscv64gc-unknown-linux-gnu)
                 # The unpacked toolchain first; PATH-installed second.
                 LINKER=$(ls "$HOME"/rcross/sys/usr/bin/riscv64-linux-gnu-gcc[-0-9]* 2>/dev/null | head -1)
@@ -373,6 +381,13 @@ jobs:
             echo "[target.$T]"
             if [ -n "$LINKER" ]; then echo "linker = \"$LINKER\""; fi
             case "$T" in
+              *-unknown-linux-musl|*-unknown-linux-musleabihf)
+                  # -C link-self-contained=yes makes rustc link against the
+                  # libc.a/crt objects inside rust-std instead of asking a
+                  # compiler for them, which is what removes the cross gcc
+                  # entirely. +crt-static keeps the result a single static
+                  # executable, which is the point of shipping musl builds.
+                  echo 'rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=yes"]' ;;
               riscv64gc-unknown-linux-gnu|loongarch64-unknown-linux-gnu)
                   # --sysroot must go to the LINKER, never to rustc: rustc
                   # treats --sysroot as "where to find lib/rustlib/<target>/lib"
