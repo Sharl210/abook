@@ -107,7 +107,7 @@ impl Report {
     }
     pub fn summary(&self) -> String {
         format!(
-            "ERROR {} / WARN {} / 自动纠偏 {}",
+            "ERROR {} / WARN {} / 内存归一 {}",
             self.issues.iter().filter(|i| i.sev == Sev::Error).count()
                 + self.devs.iter().filter(|d| d.sev == Sev::Error).count(),
             self.warn_count(),

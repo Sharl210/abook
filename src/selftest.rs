@@ -2288,6 +2288,18 @@ TARGET=candidate/records/a.md\nSCOPE=仅改动 1 条记录\nSUMMARY=改了一个
         }
     }
 
+    // --- the first write into an empty library must map the record ------
+    {
+        let (ok, msg) = case_first_write_maps_record();
+        if ok {
+            pass += 1;
+            msgs.push(msg);
+        } else {
+            fail += 1;
+            msgs.push(msg);
+        }
+    }
+
     // --- a write may only move the bytes the user changed ---------------
     {
         let (ok, msg) = case_minimal_write_back();
@@ -3050,6 +3062,78 @@ fn json_one_ok(t: &str) -> bool {
 /// punctuation elsewhere -- 92 of 189 candidate records changed on a no-op
 /// write. Nothing downstream noticed, because every reader still saw the right
 /// values. Byte identity is therefore the only assertion that catches it.
+/// Writing into a brand-new library must produce an atlas that actually maps
+/// the record.
+///
+/// `Atlas::load` falls back to treating the whole file as `head_raw` when it
+/// finds no cards. `render` then emitted only each card's raw bytes, and a
+/// card created during the run has none -- so the first write produced an
+/// atlas with `RECORD_COUNT=1` and zero `PATH` lines. Nothing failed: the
+/// record was on disk and readable by name, it just could not be found through
+/// the map. Only a genuinely empty library hits this, which is why testing on
+/// a copy of the real one never showed it, and why every new user would.
+fn case_first_write_maps_record() -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "abook-first-{}-{}",
+        std::process::id(),
+        crate::util::now_secs()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return (false, "FAIL  空库首写：建临时目录失败".into());
+    }
+    let self_exe = match self_path() {
+        Some(p) => p,
+        None => return (false, "FAIL  空库首写：取不到自身路径".into()),
+    };
+    let out = std::process::Command::new(&self_exe)
+        .args([
+            "write",
+            "--root",
+            dir.to_str().unwrap_or("."),
+            "--title",
+            "空库首写",
+            "--read-when",
+            "需要时",
+            "--not-for",
+            "不需要时",
+            "--body",
+            "正文",
+        ])
+        .output();
+    let ok_run = matches!(&out, Ok(o) if o.status.success());
+
+    let atlas = std::fs::read_to_string(dir.join("candidate/Atlas.md")).unwrap_or_default();
+    let paths = atlas.lines().filter(|l| l.starts_with("PATH=")).count();
+    let recs = std::fs::read_dir(dir.join("candidate/records"))
+        .map(|d| d.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if !ok_run {
+        return (false, "FAIL  空库首写：write 命令执行失败".into());
+    }
+    if recs != 1 {
+        return (
+            false,
+            format!("FAIL  空库首写：应写入 1 条记录，实际 {recs} 条"),
+        );
+    }
+    if paths != 1 {
+        return (
+            false,
+            format!(
+                "FAIL  空库首写：记录写了但地图没有 PATH（应 1 条，实际 {paths} 条）\
+                 ——记录存在却无法通过地图找到"
+            ),
+        );
+    }
+    (
+        true,
+        "PASS  空库第一次写入，记录同时进入地图（PATH 1 条）".into(),
+    )
+}
+
 fn case_minimal_write_back() -> (bool, String) {
     let packed = "[CANDIDATE_MEMORY]
 FORMAT=CANDIDATE_MEMORY_V2

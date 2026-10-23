@@ -432,10 +432,30 @@ impl Atlas {
                 self.head_raw.len() + self.branches.iter().map(|b| b.raw.len()).sum::<usize>(),
             );
             s.push_str(&self.head_raw);
+            // A card created in this run has no source bytes, so skipping it
+            // here dropped it from the output entirely. `Atlas::load` sets
+            // head_raw to the whole file when it finds no cards at all, so the
+            // very first write into an empty library produced an atlas with a
+            // correct RECORD_COUNT and zero PATH entries -- the record existed
+            // but could not be found through the map.
+            let mut emitted_any = false;
             for b in &self.branches {
                 if !b.raw.is_empty() {
                     s.push_str(&b.raw);
+                    emitted_any = true;
+                    continue;
                 }
+                if b.emit_heading {
+                    if !emitted_any && !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+                    s.push('\n');
+                    s.push_str(&format!("## {}\n", b.heading));
+                }
+                for (k, v) in &b.fields {
+                    s.push_str(&format!("{k}={v}\n"));
+                }
+                emitted_any = true;
             }
             return s;
         }

@@ -99,7 +99,7 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
 
     crate::say_line!("审计 {total} 条记录");
     crate::say_line!("  完全规范      {clean}");
-    crate::say_line!("  仅自动纠偏    {fixed_only}   （能被容错吸收、已留痕）");
+    crate::say_line!("  仅内存归一    {fixed_only}   （能被容错吸收、已留痕）");
     crate::say_line!("  仅告警        {warn_only}   （能用，但召回质量下降）");
     crate::say_line!("  含 ERROR      {with_err}   （必须修）");
     // Enforced at runtime, not just in debug builds: a summary whose parts do
@@ -118,7 +118,7 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
     if rule_counts.is_empty() {
         crate::say_line!("没有任何规则被触发：真实库全部处于规范形态。");
     } else {
-        crate::say_line!("规则触发统计（ERROR / WARN / 自动纠偏）：");
+        crate::say_line!("规则触发统计（ERROR / WARN / 内存归一）：");
         let mut v: Vec<_> = rule_counts.iter().collect();
         v.sort_by(|a, b| (b.1 .0 + b.1 .1 + b.1 .2).cmp(&(a.1 .0 + a.1 .1 + a.1 .2)));
         for (rule, (e, w, f)) in v {
@@ -163,9 +163,27 @@ pub fn cmd_check(a: &Args) -> R<i32> {
             lib = l;
         }
     } else {
+        // No positional argument. Reading stdin unconditionally was wrong: in a
+        // terminal that returns immediately with an empty string, and the
+        // validator then reports six bogus ERRORs ("无法解析为记录" etc.) with
+        // exit code 5 -- indistinguishable from "your library is corrupt".
+        // `check -` already means stdin explicitly, so only honour an implicit
+        // stdin when something is actually piped in; otherwise say how to use it.
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            eprintln!("USAGE: check 需要一个记录，或 `check -` 从管道读；整库检查用 lint");
+            eprintln!("  abook check <记录>      校验单条记录");
+            eprintln!("  abook check -           校验管道送来的文本");
+            eprintln!("  abook lint              整库风格检查");
+            return Ok(2);
+        }
         use std::io::Read;
         std::io::stdin().read_to_string(&mut text)?;
         label = "<stdin>".into();
+        if text.trim().is_empty() {
+            eprintln!("USAGE: 管道没有内容可校验（check - 需要 stdin 有文本）");
+            return Ok(2);
+        }
     }
     if let Some(l) = a.get("lib") {
         lib = if l.starts_with('c') && !l.starts_with("cand") {

@@ -28,7 +28,10 @@ impl Sev {
         match self {
             Sev::Error => "ERROR",
             Sev::Warn => "WARN",
-            Sev::Fixed => "FIXED",
+            // "FIXED" read as "the file was changed", and `check` promised it
+            // only reports. These deviations are normalised in memory during
+            // parsing; the file on disk is untouched. Name it for what it is.
+            Sev::Fixed => "NORMALIZED",
         }
     }
 }
