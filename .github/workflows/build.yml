@@ -836,17 +836,33 @@ jobs:
             fi
           done < .have.txt
           if [ "$FIRST" = 1 ]; then exit 0; fi
-          # Count the survivors rather than trusting the loop above: silence
-          # from a failed delete looks exactly like success.
+          # Re-read rather than trusting the loop: silence from a failed delete
+          # looks exactly like success.
+          #
+          # This used to assert `survivors == COUNT`, which is wrong and failed
+          # a real run: this step runs BEFORE Publish, so the assets for the
+          # current build do not exist yet. Renaming the windows targets made
+          # the old .exe files stale; deleting them left 13 where COUNT is 15,
+          # and the step aborted a build whose 15 artifacts were all present.
+          # What actually has to hold is that every SURVIVOR is about to be
+          # overwritten by this build -- anything left over is stale.
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[].name' > .after.txt
           LEFT=$(wc -l < .after.txt)
-          echo "清理后 $LEFT 个（删除 $PRUNED 个）"
-          if [ "$LEFT" != "$COUNT" ]; then
-            echo "::error::清理后应有 $COUNT 个资产，实际 $LEFT 个"
-            cat .after.txt
+          echo "清理后 $LEFT 个（删除 $PRUNED 个）；本次将发布 $COUNT 个"
+          STALE=0
+          while read -r a; do
+            [ -n "$a" ] || continue
+            if [ ! -e "dist/$a" ]; then
+              echo "::error::清理后仍有过期资产: $a"
+              STALE=$((STALE+1))
+            fi
+          done < .after.txt
+          if [ "$STALE" != 0 ]; then
+            echo "::error::还有 $STALE 个过期资产没删掉"
             exit 1
           fi
+          echo "存活资产都会被本次构建覆盖"
       - name: Publish
         if: env.COUNT != '0'
         uses: softprops/action-gh-release@v2
