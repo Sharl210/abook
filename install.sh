@@ -67,8 +67,8 @@ target_for() {
     # flavour is no longer produced by the workflow.
     linux/riscv64)      target=riscv64gc-unknown-linux-gnu ;;
     linux/loongarch64)  target=loongarch64-unknown-linux-gnu ;;
-    windows/x86_64)     target=x86_64-pc-windows-gnu.exe ;;
-    windows/x86)        target=i686-pc-windows-gnu.exe ;;
+    windows/x86_64)     target=x86_64-pc-windows-gnullvm.exe ;;
+    windows/x86)        target=i686-pc-windows-gnullvm.exe ;;
     windows/aarch64)    target=aarch64-pc-windows-gnullvm.exe ;;
     macos/x86_64)       target=x86_64-apple-darwin ;;
     macos/aarch64)      target=aarch64-apple-darwin ;;
@@ -132,8 +132,8 @@ self_check() {
   tp linux/x86         i686-unknown-linux-musl
   tp linux/riscv64     riscv64gc-unknown-linux-gnu
   tp linux/loongarch64 loongarch64-unknown-linux-gnu
-  tp windows/x86_64    x86_64-pc-windows-gnu.exe
-  tp windows/x86       i686-pc-windows-gnu.exe
+  tp windows/x86_64    x86_64-pc-windows-gnullvm.exe
+  tp windows/x86       i686-pc-windows-gnullvm.exe
   tp windows/aarch64   aarch64-pc-windows-gnullvm.exe
   tp macos/x86_64      x86_64-apple-darwin
   tp macos/aarch64     aarch64-apple-darwin
@@ -228,8 +228,8 @@ case "$os/$arch" in
   # a stale asset and is pruned, so asking for it here would 404 right after.
   linux/riscv64)      target=riscv64gc-unknown-linux-gnu ;;
   linux/loongarch64)  target=loongarch64-unknown-linux-gnu ;;
-  windows/x86_64)     target=x86_64-pc-windows-gnu.exe ;;
-  windows/x86)        target=i686-pc-windows-gnu.exe ;;
+  windows/x86_64)     target=x86_64-pc-windows-gnullvm.exe ;;
+  windows/x86)        target=i686-pc-windows-gnullvm.exe ;;
   windows/aarch64)    target=aarch64-pc-windows-gnullvm.exe ;;
   macos/x86_64)       target=x86_64-apple-darwin ;;
   macos/aarch64)      target=aarch64-apple-darwin ;;

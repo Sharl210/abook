@@ -78,8 +78,15 @@ jobs:
             echo "android=$out]" >> "$GITHUB_OUTPUT"
           }
           and_mk
+          # All three are gnullvm, not gnu. rustc hard-codes -lgcc / -lgcc_eh
+          # into `*-pc-windows-gnu`, and llvm-mingw is a compiler-rt toolchain
+          # that ships neither, so linking dies with "unable to find library
+          # -lgcc_eh". The gnullvm variants use the same GNU ABI and mingw-w64
+          # headers/CRT but link through LLVM, which is exactly what
+          # llvm-mingw provides. Official std exists for all three on stable,
+          # and the produced executables are ordinary PE files.
           mk windows \
-            x86_64-pc-windows-gnu i686-pc-windows-gnu aarch64-pc-windows-gnullvm
+            x86_64-pc-windows-gnullvm i686-pc-windows-gnullvm aarch64-pc-windows-gnullvm
           mk macos x86_64-apple-darwin aarch64-apple-darwin
           if [ -n "$ONLY" ]; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "any=true" >> "$GITHUB_OUTPUT"; fi
 
@@ -561,8 +568,8 @@ jobs:
           # Verify what the build actually depends on instead of trusting the
           # tarball: the sysroot archives and the driver itself.
           case "${{ matrix.target }}" in
-            x86_64-pc-windows-gnu)      MP=x86_64-w64-mingw32 ;;
-            i686-pc-windows-gnu)        MP=i686-w64-mingw32 ;;
+            x86_64-pc-windows-gnullvm)  MP=x86_64-w64-mingw32 ;;
+            i686-pc-windows-gnullvm)    MP=i686-w64-mingw32 ;;
             aarch64-pc-windows-gnullvm) MP=aarch64-w64-mingw32 ;;
             *) echo "::error::unknown windows target ${{ matrix.target }}"; exit 1 ;;
           esac
@@ -594,13 +601,17 @@ jobs:
             # explicitly is rejected by stable rustc ("the linker flavor
             # `gnu-lld-cc` is unstable"), which killed this job the first time
             # it ever tried to build.
+            # +crt-static on all three: the delivered file must run on a bare
+            # Windows install without a matching vcruntime beside it. It used
+            # to be set only for aarch64, which was an accident of that target
+            # being the only one that already needed special handling.
             case "$T" in
-              x86_64-pc-windows-gnu)      echo 'linker = "x86_64-w64-mingw32-clang"' ;;
-              i686-pc-windows-gnu)        echo 'linker = "i686-w64-mingw32-clang"' ;;
-              aarch64-pc-windows-gnullvm)
-                  echo 'linker = "aarch64-w64-mingw32-clang"'
-                  echo 'rustflags = ["-C", "target-feature=+crt-static"]' ;;
+              x86_64-pc-windows-gnullvm)  M=x86_64-w64-mingw32 ;;
+              i686-pc-windows-gnullvm)    M=i686-w64-mingw32 ;;
+              aarch64-pc-windows-gnullvm) M=aarch64-w64-mingw32 ;;
             esac
+            echo "linker = \"$M-clang\""
+            echo 'rustflags = ["-C", "target-feature=+crt-static"]'
           } > .cargo/config.toml
       # This step was missing entirely: Configure wrote the linker config and
       # the job went straight to Package, so no binary was ever produced, the
