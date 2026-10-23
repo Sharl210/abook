@@ -1,0 +1,1055 @@
+//! Read-only commands: state, stats, recall, search, show, atlas, index,
+//! recent, lint, doctor, reconcile.
+
+use crate::atlas::Atlas;
+use crate::book::BookFile;
+use crate::query::*;
+use crate::paging::Page;
+use crate::rec::{load_lib, resolve_record, Lib, Record};
+use crate::util::*;
+use std::path::Path;
+
+
+pub fn cmd_state(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    if !root.exists() {
+        return notfound(format!("记忆根不存在: {}", root.display()));
+    }
+    let st = read_state(&root);
+    if a.has("json") {
+        println!(
+            "{{\"root\":{},\"canonical\":{},\"candidate\":{},\"canonical_atlas\":{},\
+\"candidate_atlas\":{},\"vault_files\":{},\"vault_rows\":{},\"covered_canonical\":{},\
+\"covered_candidate\":{},\"latest_commit\":{},\"problems\":[{}]}}",
+            jstr(&st.root),
+            st.canonical,
+            st.candidate,
+            st.canonical_atlas_count,
+            st.candidate_atlas_count,
+            st.vault_files,
+            st.vault_rows,
+            jstr(&st.covered_canonical),
+            jstr(&st.covered_candidate),
+            jstr(&st.latest_commit),
+            st.problems
+                .iter()
+                .map(|p| jstr(p))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        return Ok(0);
+    }
+    println!("记忆根      {}", st.root);
+    println!("正式库      {} 条记录 / 地图 {} 条", st.canonical, st.canonical_atlas_count);
+    println!("候选库      {} 条记录 / 地图 {} 条", st.candidate, st.candidate_atlas_count);
+    println!("收录时刻    正式 {}  候选 {}", st.covered_canonical, st.covered_candidate);
+    println!("最新变更    {}", if st.latest_commit.is_empty() { "-" } else { &st.latest_commit });
+    println!("保险箱      {} 文件 / 名册 {} 行", st.vault_files, st.vault_rows);
+    if st.problems.is_empty() {
+        println!("一致性      通过");
+    } else {
+        println!("一致性      发现 {} 个问题", st.problems.len());
+        for p in &st.problems {
+            println!("  - {p}");
+        }
+    }
+    Ok(if st.problems.is_empty() { 0 } else { 5 })
+}
+
+pub fn cmd_stats(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    // One JSON object per library stacked on separate lines is JSONL, not JSON:
+    // json.loads() rejects it with "Extra data". Collect and emit one array.
+    let mut json_rows: Vec<String> = Vec::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let recs = load_lib(&root, lib);
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut mats: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut promoted = 0;
+        for r in &recs {
+            *kinds.entry(r.kind()).or_insert(0) += 1;
+            *mats.entry(r.get("MATURITY")).or_insert(0) += 1;
+            if r.promotion.is_some() {
+                promoted += 1;
+            }
+        }
+        if a.has("json") {
+            let dump = |m: &std::collections::BTreeMap<String, usize>| -> String {
+                m.iter()
+                    .map(|(k, v)| format!("{}:{}", jstr(if k.is_empty() { "?" } else { k.as_str() }), v))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let (branches, paths) = match Atlas::load(&root.join(lib.atlas())) {
+                Ok(at) => (at.branches.len(), at.total_count()),
+                Err(_) => (0, 0),
+            };
+            json_rows.push(format!(
+                "{{\"lib\":{},\"records\":{},\"promoted\":{},\"kind\":{{{}}},\"maturity\":{{{}}},\"branches\":{},\"map_paths\":{}}}",
+                jstr(lib.name()),
+                recs.len(),
+                promoted,
+                dump(&kinds),
+                dump(&mats),
+                branches,
+                paths
+            ));
+            continue;
+        }
+        println!("== {}  {} 条", lib.name(), recs.len());
+        if lib == Lib::Candidate {
+            println!("   已晋升 {}", promoted);
+        }
+        print!("   KIND:");
+        for (k, v) in &kinds {
+            print!(" {k}={v}");
+        }
+        println!();
+        print!("   MATURITY:");
+        for (k, v) in &mats {
+            let kk = if k.is_empty() { "?" } else { k.as_str() };
+            print!(" {kk}={v}");
+        }
+        println!();
+        if let Ok(at) = Atlas::load(&root.join(lib.atlas())) {
+            println!("   分支 {} 个 / 路径 {} 条", at.branches.len(), at.total_count());
+        }
+    }
+    if a.has("json") {
+        println!("{{\"libraries\":[{}]}}", json_rows.join(","));
+    }
+    Ok(0)
+}
+
+pub fn cmd_recall(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let q = match a.pos.first() {
+        Some(q) => q.clone(),
+        None => a.get("q").unwrap_or("").to_string(),
+    };
+    if q.trim().is_empty() {
+        return usage("recall 需要查询词");
+    }
+    let libs = libs_from(a);
+    let limit = a.num("limit").unwrap_or(8) as usize;
+    let with_body = a.has("body") || a.has("raw");
+    let res = recall(
+        &root,
+        &q,
+        &libs,
+        limit,
+        a.has("include-promoted"),
+        with_body,
+    );
+    if a.has("json") {
+        let arr = res
+            .hits
+            .iter()
+            .map(|h| {
+                format!(
+                    "{{\"lib\":{},\"path\":{},\"title\":{},\"tier\":{},\"score\":{},\
+\"reason\":{},\"body\":{}}}",
+                    jstr(h.lib.name()),
+                    jstr(&h.path),
+                    jstr(&h.title),
+                    jstr(h.tier.label()),
+                    h.score,
+                    jstr(&h.reason),
+                    jstr(&h.record.as_ref().map(|r| r.body.clone()).unwrap_or_default())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{{\"status\":{},\"query\":{},\"scanned\":{},\"hits\":[{}],\"rejected\":{}}}",
+            jstr(res.status),
+            jstr(&res.query),
+            res.scanned,
+            arr,
+            res.rejected.len()
+        );
+        return Ok(0);
+    }
+    println!("{}  「{}」  扫描 {} 条", res.status, res.query, res.scanned);
+    if res.hits.is_empty() {
+        println!("  无命中。");
+    }
+    for h in &res.hits {
+        println!(
+            "  [{}] {} {}  ({} / {})",
+            h.lib.name(),
+            h.title,
+            h.path,
+            h.tier.label(),
+            h.reason
+        );
+        if with_body {
+            if let Some(r) = &h.record {
+                for line in r.body.lines().take(6) {
+                    println!("      {line}");
+                }
+            }
+        }
+    }
+    if !res.rejected.is_empty() && (a.has("verbose") || a.has("all")) {
+        println!("  被精度过滤 {} 条:", res.rejected.len());
+        for h in &res.rejected {
+            println!(
+                "    - {} {}  ({})",
+                h.title,
+                h.path,
+                h.rejected.clone().unwrap_or_default()
+            );
+        }
+    }
+    Ok(if res.hits.is_empty() { 3 } else { 0 })
+}
+
+pub fn cmd_show(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录选择器（路径 / 文件名 / ID）")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    let rec = Record::parse(&path, lib)?;
+    // `cat` and `show` shared one handler, so `cat` printed the whole record
+    // while the help screen promised "只输出正文". A caller piping `cat` into
+    // something that expects prose got headers and a body glued together.
+    // Both names still route here; only the output differs.
+    if a.cmd == "cat" {
+        if a.has("json") {
+            println!(
+                "{{\"path\":{},\"lib\":{},\"body\":{}}}",
+                jstr(&rel(&root, &path)),
+                jstr(lib.name()),
+                jstr(&rec.body)
+            );
+        } else {
+            print!("{}", rec.body);
+            if !rec.body.ends_with('\n') {
+                println!();
+            }
+        }
+        return Ok(0);
+    }
+    if a.has("json") {
+        println!(
+            "{{\"path\":{},\"lib\":{},\"fields\":{{{}}},\"body\":{},\"deviations\":{}}}",
+            jstr(&rel(&root, &path)),
+            jstr(lib.name()),
+            rec.fields
+                .iter()
+                .map(|(k, v)| format!("{}:{}", jstr(k), jstr(v)))
+                .collect::<Vec<_>>()
+                .join(","),
+            jstr(&rec.body),
+            rec.devs.len()
+        );
+        return Ok(0);
+    }
+    // `--field` is the natural thing for a caller to reach for when it only
+    // wants one value (a script asking for ID, or an AI checking STATUS).
+    // It used to be silently ignored, which quietly returned the whole record
+    // and made any downstream parse wrong.
+    if let Some(want) = a.get("field") {
+        if !want.trim().is_empty() {
+            let names: Vec<&str> = want.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect();
+            let mut out = 0usize;
+            for name in &names {
+                if name.eq_ignore_ascii_case("body") || name.eq_ignore_ascii_case("__body__") {
+                    print!("{}", rec.body);
+                    if !rec.body.ends_with('\n') {
+                        println!();
+                    }
+                    out += 1;
+                    continue;
+                }
+                // exact key first, then case-insensitive, so callers who write
+                // `--field title` still get TITLE instead of an empty line.
+                let hit = rec
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .or_else(|| rec.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)));
+                match hit {
+                    Some((_, v)) => {
+                        println!("{v}");
+                        out += 1;
+                    }
+                    None => {
+                        eprintln!("警告: 记录没有字段 {name}");
+                    }
+                }
+            }
+            if out == 0 {
+                return Ok(4);
+            }
+            return Ok(0);
+        }
+    }
+
+    println!("{}  [{}]", rel(&root, &path), lib.name());
+    for (k, v) in &rec.fields {
+        let vv = if v.chars().count() > 200 && !a.has("verbose") {
+            truncate_chars(v, 200)
+        } else {
+            v.clone()
+        };
+        println!("  {k}={vv}");
+    }
+    println!();
+    // The body of a long record was printed whole no matter what `--page`
+    // said, because the copy that actually honoured paging (`cmd_view::
+    // cmd_show`) was never wired into the dispatch table. The two had drifted
+    // apart; this is the surviving one, now carrying the paging.
+    let (body, footer) = if a.has("page") || a.has("per-page") {
+        crate::paging::text_page(&rec.body, a)
+    } else {
+        (rec.body.clone(), String::new())
+    };
+    println!("{body}");
+    if !footer.is_empty() {
+        println!("{footer}");
+    }
+    if let Some(p) = &rec.promotion {
+        println!();
+        println!("[PROMOTION]");
+        println!("{}", p.trim_end());
+    }
+    // Deviations are the tolerance ledger: which rule fired, on what text.
+    // Without `--verbose`/`--deviations` they stay hidden so ordinary output
+    // is unchanged.
+    if !rec.devs.is_empty() && (a.has("verbose") || a.has("deviations")) {
+        println!();
+        println!("[解析纠偏 {} 处]", rec.devs.len());
+        for d in &rec.devs {
+            println!("  {}", d.show());
+        }
+    }
+    Ok(0)
+}
+
+pub fn cmd_search(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let pat = a.need_pos(0, "搜索模式（支持 * 与 ?）")?;
+    let libs = libs_from(a);
+    let mut n = 0;
+    for lib in &libs {
+        for rec in load_lib(&root, *lib) {
+            let hay = format!(
+                "{} {} {} {}",
+                rec.title(),
+                rec.get("KEYS"),
+                rec.get("CONCEPTS"),
+                rec.body
+            );
+            let hit = if pat.contains('*') || pat.contains('?') {
+                let base = rec.file_name();
+                wildcard_match(pat, &base) || wildcard_match(&format!("*{pat}*"), &hay)
+            } else {
+                ci_contains(&hay, pat) || ci_contains(&rec.file_name(), pat)
+            };
+            if hit {
+                n += 1;
+                println!("[{}] {}  {}", lib.name(), rec.title(), rel(&root, &rec.path));
+                if a.has("verbose") {
+                    for line in rec.body.lines().take(3) {
+                        println!("    {line}");
+                    }
+                }
+            }
+        }
+    }
+    if n == 0 {
+        println!("无命中");
+        return Ok(3);
+    }
+    println!("共 {n} 条");
+    Ok(0)
+}
+
+pub fn cmd_atlas(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let which = a.pos_or(0, "both");
+    let libs: Vec<Lib> = match which.as_str() {
+        "canonical" | "c" => vec![Lib::Canonical],
+        "candidate" | "n" => vec![Lib::Candidate],
+        _ => vec![Lib::Canonical, Lib::Candidate],
+    };
+    if a.has("json") {
+        // Dedicated branch: the human path interleaves headers with a --card
+        // drill-down, and folding JSON into it would emit prose on some inputs.
+        let mut out: Vec<String> = Vec::new();
+        for lib in libs {
+            let p = root.join(lib.atlas());
+            if !p.exists() {
+                out.push(format!(
+                    "{{\"lib\":{},\"exists\":false}}",
+                    jstr(lib.name())
+                ));
+                continue;
+            }
+            let at = Atlas::load(&p)?;
+            let only = a.get("card");
+            let cards = at
+                .branches
+                .iter()
+                .filter(|b| match only {
+                    Some(w) => b.name() == w || b.heading == w,
+                    None => true,
+                })
+                .map(|b| {
+                    let fields = b
+                        .fields
+                        .iter()
+                        .map(|(k, v)| format!("{}:{}", jstr(k), jstr(v)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(
+                        "{{\"branch\":{},\"heading\":{},\"declared_count\":{},\"parsed_count\":{},\"paths\":{},\"fields\":{{{fields}}}}}",
+                        jstr(&b.name()),
+                        jstr(&b.heading),
+                        b.get("COUNT").parse::<i64>().unwrap_or(-1),
+                        b.count(),
+                        b.paths().len()
+                    )
+                })
+                .collect::<Vec<_>>();
+            let all_cards = cards.len();
+            let (cards, pg) = crate::paging::page_json(a, cards);
+            out.push(format!(
+                "{{\"lib\":{},\"exists\":true,\"path\":{},\"branches\":{},\"total_count\":{},\"covered_through\":{},{pg},\"card_total\":{all_cards},\"cards\":[{}]}}",
+                jstr(lib.name()),
+                jstr(lib.atlas()),
+                at.branches.len(),
+                at.total_count(),
+                jstr(&at.get("COVERED_THROUGH")),
+                cards.join(",")
+            ));
+        }
+        println!("[{}]", out.join(","));
+        return Ok(0);
+    }
+    for lib in libs {
+        let p = root.join(lib.atlas());
+        if !p.exists() {
+            println!("{} 不存在", lib.atlas());
+            continue;
+        }
+        let at = Atlas::load(&p)?;
+        println!(
+            "== {}  {} 分支 / {} 路径  COVERED_THROUGH={}",
+            lib.atlas(),
+            at.branches.len(),
+            at.total_count(),
+            at.get("COVERED_THROUGH")
+        );
+        if let Some(want) = a.get("card") {
+            for b in &at.branches {
+                if b.name() == want || b.heading == want {
+                    println!("== 卡片 {}", b.name());
+                    for (k, v) in &b.fields {
+                        println!("  {k}={}", truncate_chars(v, 300));
+                    }
+                    println!("  [解析] PATH {} 条", b.paths().len());
+                }
+            }
+            continue;
+        }
+        let rows: Vec<String> = at
+            .branches
+            .iter()
+            .map(|b| {
+                if a.has("verbose") {
+                    format!(
+                        "   {:<24} 声明={:<4} 实析={:<4} PATH原文={}",
+                        b.name(),
+                        b.get("COUNT"),
+                        b.count(),
+                        b.paths().len()
+                    )
+                } else {
+                    format!(
+                        "   {:<24} COUNT={:<4} REVISION={:<3} {}",
+                        b.name(),
+                        b.get("COUNT"),
+                        b.get("REVISION"),
+                        truncate_chars(&b.get("KEYS"), 60)
+                    )
+                }
+            })
+            .collect();
+        let (shown, footer) = crate::paging::page_rows(a, rows);
+        for r in &shown {
+            println!("{r}");
+        }
+        if !footer.is_empty() {
+            println!("{footer}");
+        }
+    }
+    Ok(0)
+}
+
+/// `identity` — the credential identity index in Global.md.
+///
+/// The spec makes this section a per-turn read: it says what credentials exist,
+/// what each may be used for, and at what disclosure level -- everything needed
+/// to decide whether to fetch one, with no values in it. `BookFile` could parse
+/// it from the start and nothing ever called the parser, so the one section
+/// designed to be read every turn had no way to be read at all. Callers fell
+/// back to `vault ledger`, which lives inside the encrypted vault and therefore
+/// requires decrypting the whole box to learn only the names.
+///
+/// Columns are positional in the source and the last one can be long; the table
+/// form here keeps the identifier and the purpose together at the front because
+/// that is what a caller matches on.
+pub fn cmd_identity(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let p = root.join("Global.md");
+    if !p.exists() {
+        return notfound("Global.md 不存在");
+    }
+    let bf = BookFile::load(&p)?;
+    let rows = bf.credential_rows();
+    if rows.is_empty() {
+        // Not an error: a library may legitimately have no credentials yet.
+        // Saying so beats an empty table that looks like a parse failure.
+        if a.has("json") {
+            println!("{{\"count\":0,\"total\":0,\"identities\":[]}}");
+        } else {
+            println!("Global.md 的 Credential Identity Index 为空。");
+        }
+        return Ok(0);
+    }
+    let q = a.pos.first().cloned().unwrap_or_default();
+    let hit: Vec<(usize, &Vec<String>)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| q.is_empty() || r.iter().any(|c| ci_contains(c, &q)))
+        .collect();
+    if hit.is_empty() {
+        return notfound(&format!("身份索引里没有匹配 {q} 的条目"));
+    }
+    if a.has("json") {
+        let items: Vec<String> = hit
+            .iter()
+            .map(|(_, r)| {
+                let get = |i: usize| jstr(r.get(i).map(|s| s.as_str()).unwrap_or(""));
+                format!(
+                    "{{\"id\":{},\"purpose\":{},\"owner\":{},\"allowed\":{},\"when\":{},\"disclosure\":{}}}",
+                    get(0),
+                    get(1),
+                    get(2),
+                    get(3),
+                    get(4),
+                    get(5)
+                )
+            })
+            .collect();
+        let total = items.len();
+        let (shown, pg) = crate::paging::page_json(a, items);
+        println!(
+            "{{\"count\":{},\"total\":{total},{pg},\"identities\":[{}]}}",
+            shown.len(),
+            shown.join(",")
+        );
+        return Ok(0);
+    }
+    println!("Global.md 凭据身份索引：{} 条（不含任何凭据值）", rows.len());
+    let lines: Vec<String> = hit
+        .iter()
+        .map(|(_, r)| {
+            let id = r.first().map(|s| s.as_str()).unwrap_or("");
+            let purpose = r.get(1).map(|s| s.as_str()).unwrap_or("");
+            let when = r.get(4).map(|s| s.as_str()).unwrap_or("");
+            format!("  {id}\n    用途: {purpose}\n    取用: {when}")
+        })
+        .collect();
+    let (shown, footer) = crate::paging::page_rows(a, lines);
+    for l in &shown {
+        println!("{l}");
+    }
+    if !footer.is_empty() {
+        println!("{footer}");
+    }
+    println!("取单条值: abook vault get <标识>");
+    Ok(0)
+}
+
+pub fn cmd_index(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let p = root.join("Index.md");
+    if !p.exists() {
+        return notfound("Index.md 不存在");
+    }
+    let bf = BookFile::load(&p)?;
+    let routes = bf.routes();
+    let q = a.pos.first().cloned().unwrap_or_default();
+    if a.has("json") {
+        // Routes carry the full-width ｜ separator because a half-width one
+        // appears inside route values (AB2V1|nonce|tag); the split already
+        // honours that, so JSON just re-emits the three real fields.
+        // `--limit` used to be applied *before* paging and defaulted to 40, so
+        // `index --json --page 2 --per-page 10` sliced a 40-row set and came
+        // back empty forever. `page_json` applies the cap first and pages the
+        // capped set, the only order that keeps both flags meaningful. The 40
+        // default is gone as well: an unpaged machine-readable inventory that
+        // silently stops at 40 rows is the same lie as ignoring the flag.
+        let items: Vec<String> = routes
+            .iter()
+            .filter(|(path, summary, when)| {
+                q.is_empty()
+                    || ci_contains(path, &q)
+                    || ci_contains(summary, &q)
+                    || ci_contains(when, &q)
+            })
+            .map(|(path, summary, when)| {
+                format!(
+                    "{{\"path\":{},\"summary\":{},\"read_when\":{}}}",
+                    jstr(path),
+                    jstr(summary),
+                    jstr(when)
+                )
+            })
+            .collect();
+        let matched_n = items.len();
+        let (shown, pg) = crate::paging::page_json(a, items);
+        // Count real items; counting occurrences of a substring in the emitted
+        // text would break the moment a path itself contains that substring.
+        let shown_n = shown.len();
+        let body = shown.join(",");
+        println!(
+            "{{\"routes\":{},\"matched\":{matched_n},\"shown\":{shown_n},{pg},\"items\":[{body}]}}",
+            routes.len()
+        );
+        return Ok(0);
+    }
+    println!("Index.md  路由 {} 条", routes.len());
+    let lim = a.num("limit").unwrap_or(40) as usize;
+    let matched: Vec<String> = routes
+        .iter()
+        .filter(|(path, summary, when)| {
+            q.is_empty()
+                || ci_contains(path, &q)
+                || ci_contains(summary, &q)
+                || ci_contains(when, &q)
+        })
+        .map(|(path, summary, when)| format!("  {path}｜{summary}｜{when}"))
+        .collect();
+    let cut = matched.len().min(lim);
+    // `--limit` caps how many routes are considered at all; `--page` then
+    // walks that capped set. Applying the cap first keeps the two flags
+    // independent, which is how every other list command behaves.
+    let (shown_rows, footer) = crate::paging::page_rows(a, matched[..cut].to_vec());
+    for r in &shown_rows {
+        println!("{r}");
+    }
+    if cut < matched.len() {
+        println!("  …（另有 {} 条，用 --limit 扩大）", matched.len() - cut);
+    }
+    if !footer.is_empty() {
+        println!("{footer}");
+    }
+    Ok(0)
+}
+
+pub fn cmd_lint(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let libs = libs_from(a);
+    let want_json = a.has("json");
+    let mut bad = 0;
+    let mut checked = 0;
+    // Built alongside the human lines rather than in a second pass: lint already
+    // has every rule violation in hand, and re-deriving it later is how the two
+    // views drift apart.
+    let mut rows: Vec<String> = Vec::new();
+    for lib in &libs {
+        for rec in load_lib(&root, *lib) {
+            checked += 1;
+            let probs = rec.lint();
+            if !probs.is_empty() {
+                bad += 1;
+                if want_json {
+                    rows.push(format!(
+                        "{{\"lib\":{},\"file\":{},\"title\":{},\"problems\":[{}]}}",
+                        crate::util::jstr(lib.name()),
+                        crate::util::jstr(&rec.file_name()),
+                        crate::util::jstr(&rec.title()),
+                        crate::util::jstr_list(&probs)
+                    ));
+                } else {
+                    println!("[{}] {}  {}", lib.name(), rec.file_name(), rec.title());
+                    for pr in &probs {
+                        println!("    - {pr}");
+                    }
+                }
+            }
+        }
+    }
+    if want_json {
+        println!(
+            "{{\"checked\":{checked},\"with_problems\":{bad},\"records\":[{}]}}",
+            rows.join(",")
+        );
+    } else {
+        println!("检查 {checked} 条，问题 {bad} 条");
+    }
+    Ok(if bad > 0 { 5 } else { 0 })
+}
+
+pub fn cmd_doctor(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let want_json = a.has("json");
+    let mut fail = 0;
+    // Collected as structured rows and rendered at the end, so the JSON and the
+    // prose come from the same measurements instead of two traversals that can
+    // disagree after a file changes in between.
+    let mut entries: Vec<(String, String, bool)> = Vec::new();
+    if !want_json {
+        println!("记忆根    {}", root.display());
+    }
+    if !root.exists() {
+        if want_json {
+            println!(
+                "{{\"root\":{},\"healthy\":false,\"missing_root\":true,\"entries\":[]}}",
+                crate::util::jstr(&root.display().to_string())
+            );
+        } else {
+            println!("  缺失：请先运行 abook init");
+        }
+        return Ok(4);
+    }
+    for f in ["Global.md", "Index.md"] {
+        let p = root.join(f);
+        if p.exists() {
+            let n = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            entries.push((f.to_string(), human_bytes(n), true));
+        } else {
+            entries.push((f.to_string(), "缺失".to_string(), false));
+            fail += 1;
+        }
+    }
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let d = root.join(lib.dir());
+        let n = list_md(&d).len();
+        entries.push((lib.dir().to_string(), format!("{n} 条"), true));
+        if !root.join(lib.atlas()).exists() {
+            entries.push((lib.atlas().to_string(), "地图缺失".to_string(), false));
+            fail += 1;
+        }
+    }
+    let st = read_state(&root);
+    for p in &st.problems {
+        entries.push(("问题".to_string(), p.clone(), false));
+        fail += 1;
+    }
+    if a.has("fix") {
+        let _ = fail;
+        for lib in [Lib::Canonical, Lib::Candidate] {
+            let r = crate::cmd_admin::refresh_atlas(&root, lib, false)?;
+            entries.push((lib.atlas().to_string(), format!("已刷新 {} 条路径", r.mapped), true));
+        }
+        let _ = crate::vault::sync_ledger(&root)?;
+        entries.push(("名册".to_string(), "已同步".to_string(), true));
+        if want_json {
+            doctor_json(&root, &entries, 0);
+        }
+        return Ok(0);
+    }
+    if want_json {
+        doctor_json(&root, &entries, fail);
+        return Ok(if fail > 0 { 5 } else { 0 });
+    }
+    for (k, v, ok) in &entries {
+        println!("  {:<20} {}{}", k, if *ok { "" } else { "  " }, v);
+    }
+    if fail == 0 {
+        println!("结论      健康");
+    } else {
+        println!("结论      {fail} 个问题（可用 --fix 修复可自动处理项）");
+    }
+    Ok(if fail > 0 { 5 } else { 0 })
+}
+
+/// Render the doctor findings as one document.
+fn doctor_json(root: &std::path::Path, entries: &[(String, String, bool)], fail: usize) {
+    let rows: Vec<String> = entries
+        .iter()
+        .map(|(k, v, ok)| {
+            format!(
+                "{{\"item\":{},\"value\":{},\"ok\":{}}}",
+                crate::util::jstr(k),
+                crate::util::jstr(v),
+                ok
+            )
+        })
+        .collect();
+    println!(
+        "{{\"root\":{},\"healthy\":{},\"problems\":{fail},\"entries\":[{}]}}",
+        crate::util::jstr(&root.display().to_string()),
+        fail == 0,
+        rows.join(",")
+    );
+}
+
+pub fn cmd_reconcile(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let mut problems = 0;
+    // JSON is assembled alongside the human report; reconcile already computes
+    // every number it prints, so one more sink is cheaper than a second pass
+    // that could drift from what a human was shown.
+    let mut json_libs: Vec<String> = Vec::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let recs = load_lib(&root, lib);
+        let disk: Vec<String> = list_md(&root.join(lib.dir()))
+            .iter()
+            .map(|p| rel(&root, p))
+            .collect();
+        let at = Atlas::load(&root.join(lib.atlas()))?;
+        let in_map = at.all_paths();
+        let mut missing: Vec<String> = Vec::new();
+        for d in &disk {
+            let base = d.rsplit('/').next().unwrap_or(d);
+            if !in_map.iter().any(|m| m.rsplit('/').next().unwrap_or(m) == base) {
+                missing.push(d.clone());
+            }
+        }
+        let mut ghost: Vec<String> = Vec::new();
+        for m in &in_map {
+            let base = m.rsplit('/').next().unwrap_or(m);
+            if !disk.iter().any(|d| d.rsplit('/').next().unwrap_or(d) == base) {
+                ghost.push(m.clone());
+            }
+        }
+        let disk_n = disk.len();
+        let map_n = in_map.len();
+        let rec_n = recs.len();
+        // Machine output goes through one branch only. Printing the human
+        // report first and appending JSON later produced a mixed stream that
+        // json.loads() rejects outright.
+        let quiet = a.has("json");
+        if !quiet {
+            println!(
+                "== {}  目录 {} / 地图 {} / 已读 {}",
+                lib.name(),
+                disk_n,
+                map_n,
+                rec_n
+            );
+        }
+        // Counts are accumulated regardless of output mode so the exit code
+        // stays identical for both callers.
+        problems += missing.len();
+        if !quiet && !missing.is_empty() {
+            println!("   地图未收录 {} 条:", missing.len());
+            for m in missing.iter().take(10) {
+                println!("     + {m}");
+            }
+        }
+        problems += ghost.len();
+        if !quiet && !ghost.is_empty() {
+            println!("   地图有幽灵条目 {} 条:", ghost.len());
+            for g in ghost.iter().take(10) {
+                println!("     - {g}");
+            }
+        }
+        // A record belongs to several branches regularly -- "维护与演进" and
+        // "凭据保险箱" are both legitimate homes for the same note. Counting
+        // those as duplicates made this command announce damage on a healthy
+        // library (canonical 2 / candidate 11), which is the worst possible
+        // false alarm: it invites "repairing" data that was never broken.
+        //
+        // So the two cases are separated. The same name twice *within one
+        // branch* is a genuine defect -- one of the two lines can never be
+        // reached. The same name under different branches is the intended
+        // multi-home behaviour and is reported without affecting the verdict.
+        let mut dupes: Vec<String> = Vec::new();      // same branch, twice
+        for b in &at.branches {
+            let mut seen_here: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for p in b.paths() {
+                let base = p.rsplit('/').next().unwrap_or(&p).to_string();
+                if !seen_here.insert(base.clone()) && !dupes.contains(&base) {
+                    dupes.push(base);
+                }
+            }
+        }
+        let mut multi: Vec<String> = Vec::new();       // several branches
+        let mut homes: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for b in &at.branches {
+            for p in b.paths() {
+                let base = p.rsplit('/').next().unwrap_or(&p).to_string();
+                let e = homes.entry(base).or_default();
+                if !e.contains(&b.heading) {
+                    e.push(b.heading.clone());
+                }
+            }
+        }
+        for (name, brs) in &homes {
+            if brs.len() > 1 {
+                multi.push(name.clone());
+            }
+        }
+        // Only the within-branch kind is a problem. Multi-home records make
+        // map_n exceed disk_n by design, so the count comparison below uses
+        // distinct names instead of raw path count.
+        problems += dupes.len();
+        if !quiet && !dupes.is_empty() {
+            println!("   同一分支内重复 {} 条（真问题，两条只有一条可达）:", dupes.len());
+            for d in dupes.iter().take(10) {
+                println!("     = {d}");
+            }
+        }
+        if !quiet && !multi.is_empty() {
+            println!("   多分支归属 {} 条（正常，同一记录挂在多个分支下）:", multi.len());
+            for m in multi.iter().take(10) {
+                let brs = homes.get(m).map(|v| v.join("、")).unwrap_or_default();
+                println!("     ~ {m}  ->  {brs}");
+            }
+        }
+        let distinct = homes.len();
+        if !quiet && missing.is_empty() && ghost.is_empty() && dupes.is_empty() && distinct == disk_n {
+            println!("   对账一致");
+        }
+        if a.has("json") {
+            let arr = |v: &Vec<String>| -> String {
+                v.iter().map(|x| jstr(x)).collect::<Vec<_>>().join(",")
+            };
+            let row = format!(
+                "{{\"lib\":{},\"disk\":{},\"map\":{},\"distinct\":{},\"parsed\":{},\"missing\":{},\"missing_items\":[{}],\"ghost\":{},\"ghost_items\":[{}],\"duplicates\":{},\"duplicate_items\":[{}],\"multi_branch\":{},\"multi_branch_items\":[{}],\"consistent\":{}}}",
+                jstr(lib.name()),
+                disk_n,
+                map_n,
+                distinct,
+                rec_n,
+                missing.len(),
+                arr(&missing),
+                ghost.len(),
+                arr(&ghost),
+                dupes.len(),
+                arr(&dupes),
+                multi.len(),
+                arr(&multi),
+                missing.is_empty() && ghost.is_empty() && dupes.is_empty() && distinct == disk_n
+            );
+            // push, not index-assign: an earlier refactor removed the
+            // placeholder push and `len() - 1` underflowed on an empty Vec,
+            // panicking (rc=134) instead of emitting JSON.
+            json_libs.push(row);
+        }
+    }
+    let (f, r, vp) = crate::vault::reconcile(&root);
+    // Count once, before branching: incrementing inside a print loop made the
+    // JSON path and the human path disagree on the exit code.
+    problems += vp.len();
+    if a.has("json") {
+        let vault = format!(
+            "{{\"files\":{},\"ledger\":{},\"problems\":[{}]}}",
+            f,
+            r,
+            vp.iter().map(|x| jstr(x)).collect::<Vec<_>>().join(",")
+        );
+        println!(
+            "{{\"libraries\":[{}],\"vault\":{vault},\"problems\":{},\"ok\":{}}}",
+            json_libs.join(","),
+            problems,
+            problems == 0
+        );
+    } else {
+        println!("== 保险箱  文件 {f} / 名册 {r}");
+        for p in &vp {
+            println!("   - {p}");
+        }
+    }
+    Ok(if problems > 0 { 5 } else { 0 })
+}
+
+pub fn cmd_recent(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let dir = root.join("commits");
+    // Order by the commit's own recorded time, not by mtime.
+    //
+    // mtime happens to agree today because file writes and events coincide,
+    // but a `git clone` or a directory copy resets every mtime at once and
+    // would flip this listing wholesale. `history` already reads the declared
+    // time; sharing `commit_time` keeps the two commands consistent.
+    let mut fs: Vec<(i64, String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let sz = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
+            let txt = read_str(&p).unwrap_or_default();
+            fs.push((
+                commit_time(&p, &txt),
+                p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                sz,
+            ));
+        }
+    }
+    fs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    // Read the paging pair through `Page`, not `--limit`: `Args::alias` folds
+    // `--limit`/`--size` onto `--per-page`, so looking up "limit" here always
+    // missed and the caller got a fixed 10 rows no matter what they asked for.
+    let pg = Page::from_args(a, fs.len());
+    if a.has("json") {
+        let items = fs
+            .iter()
+            .skip(pg.start())
+            .take(pg.per.min(fs.len()))
+            .map(|(_, name, sz)| {
+                format!("{{\"name\":{},\"bytes\":{}}}", jstr(name), sz)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("{{{},\"commits\":[{items}]}}", pg.json_fields());
+        return Ok(0);
+    }
+    for (i, (_, name, sz)) in fs
+        .iter()
+        .skip(pg.start())
+        .take(pg.per.min(fs.len()))
+        .enumerate()
+    {
+        println!("{:>2}. {:<52} {}", pg.start() + i + 1, name, human_bytes(*sz));
+    }
+    println!("{}", pg.bar());
+    Ok(0)
+}
+
+pub fn cmd_paths(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    if a.has("json") {
+        // Paths are the vocabulary an agent needs before any other call, so
+        // machine callers must get them as fields, not as padded text.
+        let mut parts: Vec<String> = Vec::new();
+        for (k, v) in [
+            ("global", root.join("Global.md")),
+            ("index", root.join("Index.md")),
+            ("canonical", root.join(Lib::Canonical.dir())),
+            ("candidate", root.join(Lib::Candidate.dir())),
+            ("canonical_atlas", root.join(Lib::Canonical.atlas())),
+            ("candidate_atlas", root.join(Lib::Candidate.atlas())),
+            ("commits", root.join("commits")),
+            ("review", root.join("review")),
+            ("staging", root.join("staging")),
+            ("vault", root.join("vault")),
+        ] {
+            parts.push(format!("{}:{}", jstr(k), jstr(&v.display().to_string())));
+        }
+        println!("{{\"root\":{},\"paths\":{{{}}}}}", jstr(&root.display().to_string()), parts.join(","));
+        return Ok(0);
+    }
+    println!("Global     {}", root.join("Global.md").display());
+    println!("Index      {}", root.join("Index.md").display());
+    println!("正式库     {}", root.join(Lib::Canonical.dir()).display());
+    println!("候选库     {}", root.join(Lib::Candidate.dir()).display());
+    println!("正式图     {}", root.join(Lib::Canonical.atlas()).display());
+    println!("候选图     {}", root.join(Lib::Candidate.atlas()).display());
+    println!("变更记录   {}", root.join("commits").display());
+    println!("晋升记录   {}", root.join("review").display());
+    println!("暂存       {}", root.join("staging").display());
+    println!("保险箱     {}", root.join("vault").display());
+    Ok(0)
+}
+

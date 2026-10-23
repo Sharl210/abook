@@ -1,0 +1,798 @@
+name: build
+
+# Build only what needs building. Triggering a 15-target matrix on every push
+# exhausted the free tier's TWO concurrent slots and left runs queued for hours
+# behind zombie jobs. Normal commits therefore do not build; a tag or an
+# explicit manual dispatch does.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      only:
+        description: '只构建这个 target（留空=全部 15 个）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- plan
+  # Fills the matrices. `only` narrows to one target so a single architecture
+  # can be retested without burning the free tier's two concurrent slots on all
+  # fifteen. Without this the input would be cosmetic, and an input that does
+  # nothing is the same defect class as a flag the parser accepts and ignores.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.m.outputs.linux }}
+      android: ${{ steps.m.outputs.android }}
+      windows: ${{ steps.m.outputs.windows }}
+      macos: ${{ steps.m.outputs.macos }}
+      any: ${{ steps.m.outputs.any }}
+    steps:
+      - id: m
+        run: |
+          # `only` accepts a comma-separated list so several damaged targets can
+          # be retried in one run instead of one dispatch each. Matching is by
+          # whole word so `x86_64-pc-windows-gnu` cannot also select
+          # `i686-pc-windows-gnu`.
+          ONLY=$(echo "${{ inputs.only }}" | tr ',' ' ' | tr -s ' ')
+          mk() {  # mk <name> <entry>...
+            local name="$1"; shift
+            local out="["
+            local n=0
+            for e in "$@"; do
+              t="${e%%|*}"
+              if [ -n "$ONLY" ]; then
+                case " $ONLY " in *" $t "*) ;; *) continue;; esac
+              fi
+              [ "$n" -gt 0 ] && out="$out,"
+              out="$out{\"target\":\"$t\""
+              out="$out}"
+              n=$((n+1))
+            done
+            echo "$name=$out]" >> "$GITHUB_OUTPUT"
+          }
+          mk linux             x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+            armv7-unknown-linux-musleabihf i686-unknown-linux-musl \
+            riscv64gc-unknown-linux-gnu loongarch64-unknown-linux-gnu
+          # Android entries carry two extra fields, so they are emitted
+          # explicitly instead of via mk (which handles one).
+          and_mk() {
+            local out="[" n=0
+            for e in aarch64-linux-android:arm64-v8a:aarch64-linux-android \
+                     armv7-linux-androideabi:armeabi-v7a:armv7a-linux-androideabi \
+                     x86_64-linux-android:x86_64:x86_64-linux-android \
+                     i686-linux-android:x86:i686-linux-android; do
+              local t="${e%%:*}" rest="${e#*:}"
+              local abi="${rest%%:*}" pfx="${rest#*:}"
+              if [ -n "$ONLY" ]; then
+                case " $ONLY " in *" $t "*) ;; *) continue;; esac
+              fi
+              [ "$n" -gt 0 ] && out="$out,"
+              out="$out{\"target\":\"$t\",\"ndk_abi\":\"$abi\",\"prefix\":\"$pfx\"}"
+              n=$((n+1))
+            done
+            echo "android=$out]" >> "$GITHUB_OUTPUT"
+          }
+          and_mk
+          mk windows \
+            x86_64-pc-windows-gnu i686-pc-windows-gnu aarch64-pc-windows-gnullvm
+          mk macos x86_64-apple-darwin aarch64-apple-darwin
+          if [ -n "$ONLY" ]; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "any=true" >> "$GITHUB_OUTPUT"; fi
+
+  # ---------------------------------------------------------------- Linux
+  linux:
+    needs: plan
+    if: ${{ needs.plan.outputs.linux != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross toolchains
+        # Every network call here is bounded. Two jobs once sat in this step for
+        # over an hour because apt/curl were silently waiting on a dead socket;
+        # the job timeout only fires after six hours, so the whole run looked
+        # "stuck" with no error to act on.
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          # A swallowed apt failure used to surface much later as a confusing
+          # linker error ("host gcc cannot link target objects"), so update and
+          # install now fail the step immediately and name what broke.
+          apt_get() {
+            export DEBIAN_FRONTEND=noninteractive
+            timeout 300 sudo -E apt-get update -qq \
+              || { echo "::error::apt-get update failed"; return 1; }
+            timeout 600 sudo -E apt-get install -y -qq --no-install-recommends "$@" \
+              || { echo "::error::apt-get install failed: $*"; return 1; }
+          }
+          # Only install what THIS target links with. The unconditional
+          # install of all four packages used to run on every matrix entry,
+          # and on riscv64 it blew through its own 600s budget and failed the
+          # step -- killing a build that needs none of those packages. The
+          # package set is therefore derived from the target, in the same
+          # place the target is read, so the two cannot drift.
+          T="${{ matrix.target }}"
+          case "$T" in
+            x86_64-unknown-linux-musl)      PKGS="musl-tools" ;;
+            aarch64-unknown-linux-musl)     PKGS="gcc-aarch64-linux-gnu" ;;
+            armv7-unknown-linux-musleabihf) PKGS="gcc-arm-linux-gnueabihf" ;;
+            i686-unknown-linux-musl)        PKGS="gcc-i686-linux-gnu" ;;
+            aarch64-unknown-linux-gnu)      PKGS="gcc-aarch64-linux-gnu" ;;
+            armv7-unknown-linux-gnueabihf)  PKGS="gcc-arm-linux-gnueabihf" ;;
+            i686-unknown-linux-gnu)         PKGS="gcc-i686-linux-gnu" ;;
+            *) PKGS="" ;;
+          esac
+          # A cross gcc is only a LINKER DRIVER for these targets: rustc ships
+          # the musl libc.a and crt objects itself (self-contained), so no
+          # target header is ever read. apt-get install nonetheless runs dpkg's
+          # configure phase, which spent 609s on gcc-aarch64-linux-gnu and got
+          # killed by the 600s budget -- failing aarch64-musl and armv7-musl
+          # while the SAME package configured fine a minute later on the gnu
+          # targets. Download and unpack like riscv64 does: no root, no dpkg
+          # lock, cannot half-configure. apt-get install remains as fallback.
+          XDEBS=""
+          XPREFIX=""
+          case "$T" in
+            aarch64-unknown-linux-musl)
+              XPREFIX=aarch64-linux-gnu
+              XDEBS="gcc-aarch64-linux-gnu gcc-13-aarch64-linux-gnu \
+                     cpp-aarch64-linux-gnu cpp-13-aarch64-linux-gnu \
+                     binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
+                     linux-libc-dev-arm64-cross libgcc-13-dev-arm64-cross" ;;
+            armv7-unknown-linux-musleabihf)
+              XPREFIX=arm-linux-gnueabihf
+              XDEBS="gcc-arm-linux-gnueabihf gcc-13-arm-linux-gnueabihf \
+                     cpp-arm-linux-gnueabihf cpp-13-arm-linux-gnueabihf \
+                     binutils-arm-linux-gnueabihf libc6-dev-armhf-cross \
+                     linux-libc-dev-armhf-cross libgcc-13-dev-armhf-cross" ;;
+          esac
+          if [ -n "$XPREFIX" ]; then
+            XROOT="$HOME/xcross"
+            mkdir -p "$XROOT/deb" "$XROOT/sys"
+            # `apt-get download a b c` fails as a unit when any single name is
+            # unknown, so one typo silently yields zero debs and the real
+            # failure surfaces later as "no $XPREFIX-gcc". Fetch them one at a
+            # time and name the offender.
+            for d in $XDEBS; do
+              if ! ( cd "$XROOT/deb" && timeout 300 apt-get download "$d" ); then
+                echo "::error::apt-get download failed for package '$d' (target $T)"
+                XMISS=1
+              fi
+            done
+            if [ "${XMISS:-0}" = "1" ]; then
+              echo "::error::cross packages for $T could not all be fetched; see the names above"
+              exit 1
+            fi
+            xn=0
+            for d in "$XROOT"/deb/*.deb; do
+              [ -e "$d" ] || continue
+              dpkg-deb -x "$d" "$XROOT/sys" && xn=$((xn+1))
+            done
+            echo "unpacked $XPREFIX debs: $xn"
+            # The target binutils are HOST x86-64 programs that dlopen their
+            # target companions (libbfd-*.so, libopcodes-*.so) from
+            # ./usr/lib/x86_64-linux-gnu/, which is not on the runner's search
+            # path once unpacked below $XROOT/sys. Without this, ld dies with
+            # "libbfd-*.so: cannot open shared object file" and collect2
+            # returns 127.
+            XL="$XROOT/sys/usr/lib/x86_64-linux-gnu:$XROOT/sys/lib/x86_64-linux-gnu"
+            XL="$XL:${LD_LIBRARY_PATH:-}"
+            echo "LD_LIBRARY_PATH=$XL" >> "$GITHUB_ENV"
+            echo "$XROOT/sys/usr/bin" >> "$GITHUB_PATH"
+            export LD_LIBRARY_PATH="$XL"
+            export PATH="$XROOT/sys/usr/bin:$PATH"
+            # Fall back only when unpacking genuinely produced no compiler:
+            # a silent empty LINKER is exactly what used to surface much later
+            # as "host gcc cannot link target objects".
+            if [ -z "$(command -v "$XPREFIX-gcc" || true)" ]; then
+              echo "::warning::unpacked toolchain has no $XPREFIX-gcc; falling back to apt"
+              XPKGS=""
+              case "$T" in
+                aarch64-unknown-linux-musl)     XPKGS="gcc-aarch64-linux-gnu" ;;
+                armv7-unknown-linux-musleabihf) XPKGS="gcc-arm-linux-gnueabihf" ;;
+              esac
+              # This step has a 15 minute budget. Waiting 1800s here can only
+              # end as "the action timed out", which hides the real cause, so
+              # keep the fallback well inside the budget and say what is wrong.
+              timeout 300 sudo -E apt-get install -y -qq --no-install-recommends $XPKGS \
+                || { echo "::error::no $XPREFIX cross gcc after unpack and apt (packages: $XDEBS)"; exit 1; }
+            fi
+          elif [ -n "$PKGS" ]; then
+            apt_get $PKGS || exit 1
+          else
+            echo "no apt cross toolchain needed for $T"
+          fi
+          # riscv64 and loongarch64 are not packaged in the Ubuntu archive at
+          # all (verified: "Unable to locate package gcc-loongarch64-linux-gnu"),
+          # and rust-lld cannot link them because the self-contained runtime
+          # lacks libgcc_s. musl.cc publishes complete cross toolchains that
+          # include their own sysroot, so they are fetched directly.
+          case "$T" in
+            riscv64gc-unknown-linux-gnu)
+              # Ubuntu noble ships gcc-riscv64-linux-gnu in main, and real
+              # riscv64 machines run glibc, so this is the right target. Two
+              # things had to change:
+              #   1. `apt-get install` exceeded its 420s budget on these
+              #      packages and the failure was swallowed by `|| echo`, so
+              #      LINKER silently became empty and the HOST gcc was used to
+              #      link riscv64 objects ("incompatible with elf64-x86-64").
+              #   2. The slow part is dpkg's configure phase, so the packages
+              #      are downloaded and unpacked instead; unpacking is not
+              #      rooting, needs no locks and cannot half-configure.
+              RROOT="$HOME/rcross"
+              mkdir -p "$RROOT/deb" "$RROOT/sys"
+              ( cd "$RROOT/deb" && \
+                timeout 900 apt-get download \
+                  gcc-riscv64-linux-gnu cpp-riscv64-linux-gnu \
+                  gcc-13-riscv64-linux-gnu cpp-13-riscv64-linux-gnu \
+                  binutils-riscv64-linux-gnu \
+                  libc6-dev-riscv64-cross linux-libc-dev-riscv64-cross \
+                  libgcc-13-dev-riscv64-cross ) \
+                || echo "::warning::apt-get download incomplete"
+              n=0
+              for d in "$RROOT"/deb/*.deb; do
+                [ -e "$d" ] || continue
+                dpkg-deb -x "$d" "$RROOT/sys" && n=$((n+1))
+              done
+              echo "unpacked debs: $n"
+              find "$RROOT/sys/usr/bin" -maxdepth 1 -name 'riscv64-linux-gnu-gcc*' 2>/dev/null | head -3
+              if [ "$n" -eq 0 ]; then echo "::error::no riscv64 toolchain debs downloaded"; exit 1; fi
+              #      The target binutils are HOST x86-64 programs that dlopen
+              #      their target-specific companions (libbfd-2.42-riscv64.so,
+              #      libctf-riscv64.so.0, libopcodes-...). Those ship inside
+              #      binutils-riscv64-linux-gnu under ./usr/lib/x86_64-linux-gnu/,
+              #      which is NOT on the runner's default search path once
+              #      unpacked below $RROOT/sys, so `ld` died with
+              #      "libbfd-2.42-riscv64.so: cannot open shared object file"
+              #      and collect2 returned 127. Point the loader at the
+              #      unpacked host-lib dirs rather than installing packages.
+              RCLIBS="$RROOT/sys/usr/lib/x86_64-linux-gnu:$RROOT/sys/lib/x86_64-linux-gnu"
+              echo "RCLIBS=$RCLIBS" >> "$GITHUB_ENV"
+              # Exported rather than passed per-command: the Build step runs the
+              # linker too, and a value that only one step knows is how the
+              # configure/verify drift happened before.
+              echo "LD_LIBRARY_PATH=$RCLIBS" >> "$GITHUB_ENV"
+              ls "$RROOT/sys/usr/lib/x86_64-linux-gnu" 2>/dev/null | head -8;;
+            loongarch64-unknown-linux-gnu)
+              # No musl toolchain for loongarch64 exists anywhere (musl.cc 404,
+              # Ubuntu archive has no gcc-loongarch64). Loongson publishes the
+              # official cross toolchain; the oldest glibc flavour is 2.40,
+              # which is what real Loongnix/Debian-loong64 systems ship.
+              timeout 900 curl -fSL --connect-timeout 30 --max-time 840 \
+                --retry 4 --retry-all-errors --retry-delay 5 \
+                -o /tmp/la.tar.xz \
+                "https://github.com/loongson/build-tools/releases/download/2024.08.08/x86_64-cross-tools-loongarch64-binutils_2.43-gcc_14.2.0-glibc_2.40.tar.xz" \
+                || timeout 900 curl -fSL --connect-timeout 30 --max-time 840 \
+                     --retry 4 --retry-all-errors \
+                     -o /tmp/la.tar.xz \
+                     "https://github.com/loongson/build-tools/releases/download/2025.02.21/x86_64-cross-tools-loongarch64-binutils_2.44-gcc_14.2.0-glibc_2.41.tar.xz"
+              mkdir -p "$HOME/la"
+              tar xJf /tmp/la.tar.xz -C "$HOME/la" --strip-components=1
+              find "$HOME/la" -maxdepth 3 -name 'loongarch64*-gcc' -type f | head -3
+              echo "$HOME/la/bin" >> "$GITHUB_PATH"
+              ;;
+          esac
+      - name: Configure
+        run: |
+          T="${{ matrix.target }}"
+          mkdir -p .cargo
+          # The linker is resolved ONCE here and exported, so Configure and
+          # Verify cannot disagree -- they used to check two different names
+          # and drifted apart.
+          #
+          # riscv64: the Ubuntu package ships only the VERSIONED binary.
+          # Listing the .deb shows riscv64-linux-gnu-gcc-13 and no unversioned
+          # symlink, so assuming `riscv64-linux-gnu-gcc` exists failed the job
+          # twice while apt itself had installed fine.
+          case "$T" in
+            x86_64-unknown-linux-musl)       LINKER=$(command -v musl-gcc) ;;
+            aarch64-unknown-linux-musl)      LINKER=$(command -v aarch64-linux-gnu-gcc \
+                                               || ls "$HOME"/xcross/sys/usr/bin/aarch64-linux-gnu-gcc[-0-9]* 2>/dev/null | head -1) ;;
+            armv7-unknown-linux-musleabihf)  LINKER=$(command -v arm-linux-gnueabihf-gcc \
+                                               || ls "$HOME"/xcross/sys/usr/bin/arm-linux-gnueabihf-gcc[-0-9]* 2>/dev/null | head -1) ;;
+            i686-unknown-linux-musl)         LINKER=$(command -v i686-linux-gnu-gcc) ;;
+            riscv64gc-unknown-linux-gnu)
+                # The unpacked toolchain first; PATH-installed second.
+                LINKER=$(ls "$HOME"/rcross/sys/usr/bin/riscv64-linux-gnu-gcc[-0-9]* 2>/dev/null | head -1)
+                [ -n "$LINKER" ] || LINKER=$(command -v riscv64-linux-gnu-gcc || true)
+                [ -n "$LINKER" ] || LINKER=$(ls /usr/bin/riscv64-linux-gnu-gcc-* 2>/dev/null | head -1)
+                if [ -n "$LINKER" ]; then
+                  # The compiler needs its own as/ld and sysroot on PATH.
+                  export PATH="$HOME/rcross/sys/usr/bin:$PATH"
+                  RCSYS="$HOME/rcross/sys/usr/riscv64-linux-gnu"
+                  [ -d "$RCSYS" ] || RCSYS="$HOME/rcross/sys"
+                  echo "riscv64 sysroot: $RCSYS"
+                  echo "RCSYS=$RCSYS" >> "$GITHUB_ENV"
+                fi ;;
+            loongarch64-unknown-linux-gnu)
+                LINKER=$(command -v loongarch64-unknown-linux-gnu-gcc \
+                  || ls "$HOME"/cross/bin/loongarch64-*-gcc 2>/dev/null | head -1) ;;
+            *) LINKER="" ;;
+          esac
+          if [ -n "$LINKER" ] && [ ! -x "$LINKER" ]; then
+            echo "::error::resolved linker is not executable: $LINKER"
+            exit 1
+          fi
+          #      -x is not enough: an ELF whose shared libraries cannot be
+          #      resolved is executable but unusable, and the failure only
+          #      surfaced much later as a cryptic ld error. Make the linker
+          #      actually answer --version here, with the unpacked host-lib
+          #      dirs on the loader path when the toolchain was unpacked.
+          if [ -n "$LINKER" ]; then
+            if ! env ${RCLIBS:+LD_LIBRARY_PATH="$RCLIBS"} "$LINKER" --version > /dev/null 2>&1; then
+              echo "::error::linker cannot run (missing shared libs?): $LINKER"
+              env ${RCLIBS:+LD_LIBRARY_PATH="$RCLIBS"} "$LINKER" --version 2>&1 | head -5
+              exit 1
+            fi
+          fi
+          echo "LINKER=$LINKER" >> "$GITHUB_ENV"
+          # Static-PIE needs rcrt1.o. Ubuntu's glibc 2.39 cross-dev package
+          # installed cleanly, yet the link still failed with "cannot find
+          # rcrt1.o", so presence is PROBED here instead of assumed.
+          # `-print-file-name` echoes the bare name when it cannot find the
+          # file -- that is the reliable negative signal.
+          RCRT=""
+          if [ -n "$LINKER" ]; then
+            RCRT=$("$LINKER" -print-file-name=rcrt1.o 2>/dev/null || true)
+            case "$RCRT" in rcrt1.o|"") RCRT="" ;; esac
+          fi
+          echo "rcrt1.o: ${RCRT:-<missing>}"
+          {
+            echo "[target.$T]"
+            if [ -n "$LINKER" ]; then echo "linker = \"$LINKER\""; fi
+            case "$T" in
+              riscv64gc-unknown-linux-gnu|loongarch64-unknown-linux-gnu)
+                  # --sysroot must go to the LINKER, never to rustc: rustc
+                  # treats --sysroot as "where to find lib/rustlib/<target>/lib"
+                  # and then cannot find std, which is exactly how this target
+                  # failed while loongarch64 (no RCSYS) passed.
+                  SYSARG=""
+                  if [ -n "${RCSYS:-}" ]; then SYSARG=", \"-C\", \"link-arg=--sysroot=$RCSYS\""; fi
+                  if [ -n "$RCRT" ]; then
+                    echo "rustflags = [\"-C\", \"target-feature=+crt-static\"$SYSARG]"
+                  else
+                    # Plain static links crt1.o only, no rcrt1.o required.
+                    echo "rustflags = [\"-C\", \"target-feature=+crt-static\", \"-C\", \"link-arg=-no-pie\"$SYSARG]"
+                  fi ;;
+            esac
+          } > .cargo/config.toml
+          cat .cargo/config.toml
+      - name: Verify linker present
+        run: |
+          # Same value Configure resolved and exported -- one source of truth.
+          if [ -n "$LINKER" ] && [ ! -x "$LINKER" ]; then
+            echo "::error::linker missing: $LINKER"
+            exit 1
+          fi
+          echo "linker ok: ${LINKER:-<system default>}"
+      # Trust the filesystem, not the action. `dtolnay/rust-toolchain` was
+      # handed `targets: riscv64gc-unknown-linux-gnu` and reported success, yet
+      # `~/.rustup/toolchains/*/lib/rustlib/riscv64gc-unknown-linux-gnu` was
+      # never created and the build died with "can't find crate for `std`".
+      # Other linux targets only passed because their std ships in the default
+      # profile. Install explicitly and then assert the directory is real.
+      - name: Ensure target std installed
+        run: |
+          T="${{ matrix.target }}"
+          rustup target add "$T" || echo "::warning::rustup target add reported a problem"
+          LIB=$(rustc --print sysroot)/lib/rustlib/$T/lib
+          if [ ! -d "$LIB" ]; then
+            echo "::error::target std missing: $LIB"
+            rustup target list --installed
+            exit 1
+          fi
+          echo "target std ok: $LIB ($(ls "$LIB" | wc -l) entries)"
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        continue-on-error: false
+      - name: Package
+        run: |
+          NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          # A job that produced no binary must NOT report success: the empty
+          # artifact then disappears at the release step and the platform is
+          # silently left on a stale build. Fail loudly with the build log hint.
+          if [ ! -f "$BIN" ]; then
+            echo "::error::没有产出二进制，无法打包 $NAME（构建步骤失败或未执行）"
+            ls -la "target/${{ matrix.target }}/release" 2>/dev/null | head -20
+            exit 1
+          fi
+          mkdir -p out
+          cp "$BIN" "out/$NAME"
+          chmod +x "out/$NAME"
+          tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abook-${{ matrix.target }}
+          path: out/*
+          retention-days: 1
+
+  # ---------------------------------------------------------------- Android
+  android:
+    needs: plan
+    if: ${{ needs.plan.outputs.android != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.android) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install NDK
+        run: |
+          NDK_VERSION="27c"
+          echo "Installing NDK r${NDK_VERSION}"
+          curl -fSL --retry 8 --retry-all-errors --retry-delay 6 \
+            --http1.1 -o /tmp/ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}-linux.zip"
+          unzip -q /tmp/ndk.zip -d "$HOME"
+          echo "NDK=$HOME/android-ndk-r${NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Configure
+        run: |
+          T="${{ matrix.target }}"
+          API=21
+          case "$T" in
+            armv7-linux-androideabi) API=21 ;;
+            *) API=21 ;;
+          esac
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$BIN/${{ matrix.prefix }}${API}-clang"
+          echo "using $CC"
+          ls -la "$CC"
+          mkdir -p .cargo
+          {
+            echo "[target.$T]"
+            echo "linker = \"$CC\""
+          } > .cargo/config.toml
+          echo "CC_${T//-/_}=${CC}" >> "$GITHUB_ENV"
+      # Same guard as the other build jobs: assert the target std really exists
+      # instead of trusting the toolchain action's `targets:` input.
+      - name: Ensure target std installed
+        run: |
+          T="${{ matrix.target }}"
+          rustup target add "$T" || echo "::warning::rustup target add reported a problem"
+          LIB=$(rustc --print sysroot)/lib/rustlib/$T/lib
+          if [ ! -d "$LIB" ]; then
+            echo "::error::target std missing: $LIB"
+            rustup target list --installed
+            exit 1
+          fi
+          echo "target std ok: $LIB ($(ls "$LIB" | wc -l) entries)"
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ env.NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ${{ env.NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
+          CARGO_TARGET_I686_LINUX_ANDROID_LINKER: ${{ env.NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          # A job that produced no binary must NOT report success: the empty
+          # artifact then disappears at the release step and the platform is
+          # silently left on a stale build. Fail loudly with the build log hint.
+          if [ ! -f "$BIN" ]; then
+            echo "::error::没有产出二进制，无法打包 $NAME（构建步骤失败或未执行）"
+            ls -la "target/${{ matrix.target }}/release" 2>/dev/null | head -20
+            exit 1
+          fi
+          mkdir -p out
+          cp "$BIN" "out/$NAME"
+          chmod +x "out/$NAME"
+          tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abook-${{ matrix.target }}
+          path: out/*
+          retention-days: 1
+
+  # ---------------------------------------------------------------- Windows
+  windows:
+    needs: plan
+    if: ${{ needs.plan.outputs.windows != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.windows) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 clang lld llvm
+      - name: Install llvm-mingw
+        if: matrix.target == 'aarch64-pc-windows-gnullvm'
+        run: |
+          # llvm-mingw is an x86_64 host toolchain, which matches the runner.
+          V=20261020
+          URL="https://github.com/mstorsjo/llvm-mingw/releases/download/$V/llvm-mingw-$V-msvcrt-ubuntu-22.04-x86_64.tar.xz"
+          for i in 1 2 3; do
+            curl -sSL --retry 3 --retry-delay 5 -m 900 -o /tmp/lm.tar.xz "$URL" && break
+            echo "download attempt $i failed"; sleep 10
+          done
+          mkdir -p "$RUNNER_TEMP/lm"
+          tar -xJf /tmp/lm.tar.xz -C "$RUNNER_TEMP/lm" --strip-components=1
+          echo "$RUNNER_TEMP/lm/bin" >> "$GITHUB_PATH"
+          # Verify what the build actually depends on instead of trusting the
+          # tarball: the sysroot archives and the driver itself.
+          LSYS="$RUNNER_TEMP/lm/aarch64-w64-mingw32"
+          for f in lib/libmingw32.a lib/libmingwex.a lib/crt2.o; do
+            test -f "$LSYS/$f" || { echo "::error::llvm-mingw sysroot missing $f"; exit 1; }
+          done
+          test -x "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" || { echo "::error::driver missing"; exit 1; }
+          "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" --version | head -1
+      - name: Configure
+        run: |
+          T="${{ matrix.target }}"
+          mkdir -p .cargo
+          {
+            echo "[target.$T]"
+            case "$T" in
+              x86_64-pc-windows-gnu) echo 'linker = "x86_64-w64-mingw32-gcc"' ;;
+              i686-pc-windows-gnu)   echo 'linker = "i686-w64-mingw32-gcc"' ;;
+              # aarch64 windows has no mingw gcc in the Ubuntu archive; the
+              # gnullvm target is designed for clang/lld instead. Do NOT set
+              # -C linker-flavor here: the gnullvm target already defaults to a
+              # lld-flavoured gnu driver, and forcing gnu-lld-cc explicitly is
+              # rejected by stable rustc ("the linker flavor `gnu-lld-cc` is
+              # unstable"), which killed this job the first time it ever tried
+              # to build. The target triple has to be explicit because the
+              # stock clang driver would otherwise link for the host.
+              aarch64-pc-windows-gnullvm)
+                  # Ubuntu ships no aarch64 mingw-w64 at all, so the stock clang
+                  # driver links and then cannot find libmingw32/libmingwex.
+                  # llvm-mingw bundles that sysroot together with a matching
+                  # clang driver whose argv[0] already selects the triple, so
+                  # no --target/-fuse-ld flags are needed here.
+                  echo 'linker = "aarch64-w64-mingw32-clang"'
+                  echo 'rustflags = ["-C", "target-feature=+crt-static"]' ;;
+            esac
+          } > .cargo/config.toml
+      # This step was missing entirely: Configure wrote the linker config and
+      # the job went straight to Package, so no binary was ever produced, the
+      # warning path below swallowed it, and the job reported SUCCESS with no
+      # artifact. The release then published 10 of 15 platforms while the three
+      # Windows assets silently stayed at their previous build.
+      - name: Ensure target std installed
+        run: |
+          T="${{ matrix.target }}"
+          rustup target add "$T" || echo "::warning::rustup target add reported a problem"
+          LIB=$(rustc --print sysroot)/lib/rustlib/$T/lib
+          if [ ! -d "$LIB" ]; then
+            echo "::error::target std missing: $LIB"
+            rustup target list --installed
+            exit 1
+          fi
+          echo "target std ok: $LIB ($(ls "$LIB" | wc -l) entries)"
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook.exe"
+          # A job that produced no binary must NOT report success: the empty
+          # artifact then disappears at the release step and the platform is
+          # silently left on a stale build. Fail loudly with the build log hint.
+          if [ ! -f "$BIN" ]; then
+            echo "::error::没有产出二进制，无法打包 $NAME（构建步骤失败或未执行）"
+            ls -la "target/${{ matrix.target }}/release" 2>/dev/null | head -20
+            exit 1
+          fi
+          mkdir -p out
+          cp "$BIN" "out/$NAME.exe"
+          cd out && zip -q "$NAME.zip" "$NAME.exe"
+          echo "打包完成: $NAME.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abook-${{ matrix.target }}
+          path: out/*
+          retention-days: 1
+
+  # ---------------------------------------------------------------- macOS
+  macos:
+    needs: plan
+    if: ${{ needs.plan.outputs.macos != '[]' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.macos) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Trust the filesystem, not the action. `dtolnay/rust-toolchain` was
+      # handed `targets: riscv64gc-unknown-linux-gnu` and reported success, yet
+      # `~/.rustup/toolchains/*/lib/rustlib/riscv64gc-unknown-linux-gnu` was
+      # never created and the build died with "can't find crate for `std`".
+      # Other linux targets only passed because their std ships in the default
+      # profile. Install explicitly and then assert the directory is real.
+      - name: Ensure target std installed
+        run: |
+          T="${{ matrix.target }}"
+          rustup target add "$T" || echo "::warning::rustup target add reported a problem"
+          LIB=$(rustc --print sysroot)/lib/rustlib/$T/lib
+          if [ ! -d "$LIB" ]; then
+            echo "::error::target std missing: $LIB"
+            rustup target list --installed
+            exit 1
+          fi
+          echo "target std ok: $LIB ($(ls "$LIB" | wc -l) entries)"
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          NAME="abook-${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/abook"
+          # A job that produced no binary must NOT report success: the empty
+          # artifact then disappears at the release step and the platform is
+          # silently left on a stale build. Fail loudly with the build log hint.
+          if [ ! -f "$BIN" ]; then
+            echo "::error::没有产出二进制，无法打包 $NAME（构建步骤失败或未执行）"
+            ls -la "target/${{ matrix.target }}/release" 2>/dev/null | head -20
+            exit 1
+          fi
+          mkdir -p out
+          cp "$BIN" "out/$NAME"
+          chmod +x "out/$NAME"
+          tar czf "out/$NAME.tar.gz" -C out "$NAME"
+          echo "打包完成: $NAME ($(stat -c%s "$BIN") 字节)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abook-${{ matrix.target }}
+          path: out/*
+          retention-days: 1
+
+  # ---------------------------------------------------------------- Release
+  release:
+    needs: [linux, android, windows, macos]
+    # needs.*.result is 'skipped' for every matrix when `only` narrows the run
+    # to a single target -- that is a valid retry path, not a publish, so the
+    # release must be skipped rather than fail on an empty dist/ directory.
+    # A narrowed retry (`only`) builds one platform; publishing from it would
+    # overwrite the release with a single asset and trip the count check.
+    if: always() && !cancelled() && !inputs.only && contains(needs.*.result, 'success') && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Flatten
+        run: |
+          # download-artifact creates nothing when every build job was skipped
+          # or failed, so dist may not exist at all.
+          mkdir -p dist
+          cd dist
+          for f in *.tar.gz; do [ -e "$f" ] && tar xzf "$f"; done
+          for f in *.zip;    do [ -e "$f" ] && unzip -oq "$f"; done
+          rm -f *.tar.gz *.zip
+          chmod +x abook-* 2>/dev/null || true
+          echo "=== 待发布产物 ==="
+          ls -la
+          N=$(ls abook-* 2>/dev/null | wc -l)
+          echo "COUNT=$N" >> "$GITHUB_ENV"
+          echo "共 $N 个"
+      - name: Abort when empty
+        if: env.COUNT == '0'
+        run: |
+          echo "::error::没有任何构建产物，release 步骤中止"
+          exit 1
+      # A partial publish is invisible to users: each platform keeps whatever
+      # binary it had, and `install` happily pulls a months-old one. Missing
+      # targets are only detectable here, by counting, so a full run that
+      # produced fewer than 15 binaries fails loudly instead of publishing.
+      - name: Check all targets are present
+        if: env.COUNT != '0' && inputs.only == ''
+        env:
+          EXPECTED: '15'
+        run: |
+          if [ "$COUNT" != "$EXPECTED" ]; then
+            echo "::error::全量构建应有 $EXPECTED 个产物，实际只有 $COUNT 个"
+            ls abook-* 2>/dev/null || true
+            exit 1
+          fi
+          echo "产物齐全: $COUNT/$EXPECTED"
+      # Assets for targets that no longer exist would otherwise stay published
+      # forever (a stale riscv64gc-unknown-linux-musl did exactly this), so a
+      # full run prunes anything the current matrix does not produce.
+      - name: Prune stale assets
+        if: env.COUNT != '0' && inputs.only == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}"
+          # This job never checks out the repository, and `gh` infers the repo
+          # from git remotes. Without -R it died with "not a git repository",
+          # the empty listing was swallowed by `|| true`, the loop deleted
+          # nothing -- and the step still reported success while a stale
+          # riscv64gc-unknown-linux-musl stayed published for a day.
+          # A missing release is normal on the very first publish and must be
+          # treated as "no assets yet". Any OTHER failure must still abort:
+          # removing the old `|| true` made the first run fail outright, and
+          # putting it back would re-hide the "not a git repository" class of
+          # error that let a stale asset survive. So the error text is checked
+          # rather than discarded.
+          FIRST=0
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
+                 --jq '.assets[].name' > .have.txt 2> .err.txt; then
+            if grep -qiE 'not found|release not found|HTTP 404' .err.txt; then
+              echo "发布页还没有 $TAG，首轮发布"
+              FIRST=1
+              : > .have.txt
+            else
+              echo "::error::读取发布页失败（不是「还没有 release」）"
+              cat .err.txt
+              exit 1
+            fi
+          fi
+          # Nothing can be stale if the release does not exist yet, and the
+          # verification read below would fail for the same reason. Skipping
+          # the whole block is not laziness: GitHub runs this under `bash -e`,
+          # so an unguarded second `release view` aborts the first publish.
+          if [ "$FIRST" = 1 ]; then
+            echo "首轮发布，没有过期资产需要清理"
+          fi
+          HAVE=$(wc -l < .have.txt)
+          echo "发布页现有 $HAVE 个资产"
+          PRUNED=0
+          [ "$FIRST" = 1 ] && PRUNED=0
+          while [ "$FIRST" = 0 ] && read -r a; do
+            [ -n "$a" ] || continue
+            if [ ! -e "dist/$a" ]; then
+              echo "删除过期资产: $a"
+              gh release delete-asset "$TAG" "$a" -R "$GITHUB_REPOSITORY" --yes
+              PRUNED=$((PRUNED+1))
+            fi
+          done < .have.txt
+          if [ "$FIRST" = 1 ]; then exit 0; fi
+          # Count the survivors rather than trusting the loop above: silence
+          # from a failed delete looks exactly like success.
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' > .after.txt
+          LEFT=$(wc -l < .after.txt)
+          echo "清理后 $LEFT 个（删除 $PRUNED 个）"
+          if [ "$LEFT" != "$COUNT" ]; then
+            echo "::error::清理后应有 $COUNT 个资产，实际 $LEFT 个"
+            cat .after.txt
+            exit 1
+          fi
+      - name: Publish
+        if: env.COUNT != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest build' }}
+          files: dist/*
+          # Without this a rebuild leaves the OLD asset in place, and a user who
+          # installs gets a stale binary (this actually happened: the published
+          # build had 22 fewer commands than the source).
+          overwrite_files: true
+          generate_release_notes: true
+          make_latest: true

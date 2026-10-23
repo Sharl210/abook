@@ -1,0 +1,47 @@
+/target
+/.cargo
+
+# 测试沙箱：每次自检/回归都会重建，内容随真库变化，不该进版本库
+.sandbox/
+target/.src-stamp
+
+# llvm-mingw 工具链：本地用来验证 aarch64-windows 链接，单个包 700MB。
+# 它不进版本库——CI 自己下载，磁盘上按需重建。
+.lm/
+
+# 临时测试沙箱：自检与手工实验的副本目录。这里用通配而不是逐个列举，
+# 因为每加一个实验点就要手写一行，漏写的那次就会把整个库副本提交上去。
+.t[0-9]*/
+.t[0-9][0-9]*/
+.*.bak
+.spec_head.rs
+
+# 运行时残留：预检时间戳、临时脚本、压缩验证产物、Python 字节码
+.lastrun
+.t.rs
+.wa/
+__pycache__/
+*.pyc
+
+# Scratch space created while diagnosing a build. These are throwaway
+# downloads and extracted workflow fragments; one of them (a 700MB cross
+# toolchain) once reached the repository because `git add -A` does not
+# distinguish scratch from source.
+/.lm/
+/.rs/
+/.ab/
+/.ab2/
+/.ll
+/.xr.sh
+/.t[0-9]*/
+/*.bak
+/.spec_head.rs
+
+# 这个仓库公开后只承担一件事：跑 Actions 出二进制。构建只需要 src/ 与
+# 三个构建文件，其余都留在本地。用 ignore 而不是「记得别 add」，因为
+# 靠记性守的那条线总会有一次 `git add -A` 撞上去。
+/docs/
+/tools/
+/Plan_Mode_Books/
+/.agents/
+/.claude/

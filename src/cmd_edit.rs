@@ -1,0 +1,599 @@
+//! Fine-grained record editing: single-field set, body append/prepend,
+//! text patch, rename, branch move, merge, split, copy, demote.
+//!
+//! Every write goes through the same chain: parse tolerantly, validate, write
+//! to a temp file, read back, compare, atomically rename, then update atlas,
+//! index, Global counts and the commit log.
+
+use crate::rec::{resolve_record, Lib, Record};
+use crate::schema;
+use crate::util::*;
+use std::path::Path;
+
+fn guard(a: &Args, lib: Lib, what: &str) -> R<()> {
+    if lib == Lib::Canonical && !a.has("approve") && !a.has("dry-run") {
+        return blocked(format!("正式库{what}需要用户明确批准：确认后加 --approve。"));
+    }
+    Ok(())
+}
+
+/// Persist one record and keep every derived artefact in step.
+
+/// Render the dry-run report. Kept separate from the writing path so `selftest`
+/// can assert the contract: a dry run is a decision aid, so it stays short,
+/// and the full text is available only on request.
+pub fn render_dry_run(rec: &Record, op: &str, target: &str, verbose: bool) -> String {
+    let mut out = format!("[dry-run] {op} {target}\n");
+    out.push_str(&format!(
+        "          字段 {} 个，正文 {} 字节（校验已通过；加 --verbose 可看全文）\n",
+        rec.fields.len(),
+        rec.body.len()
+    ));
+    if verbose {
+        out.push_str(&rec.render());
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Same function under a name that says why `selftest` calls it.
+pub fn render_dry_run_for_test(rec: &Record, op: &str, target: &str, verbose: bool) -> String {
+    render_dry_run(rec, op, target, verbose)
+}
+
+/// Write the record back. Returns `true` when bytes actually changed.
+///
+/// The `bool` matters: a same-value edit used to write the file, rewrite the
+/// map, bump the index and append a change record that announced a change which
+/// never happened. Re-running a bulk "normalise" pass over the library
+/// therefore inflated it by hundreds of phantom commits -- 286 of them in one
+/// test pass. A write that changes nothing must not claim to have changed
+/// anything.
+pub fn save(root: &Path, rec: &mut Record, a: &Args, op: &str) -> R<bool> {
+    // Splice from the original bytes, not a re-render: a change to one field
+    // must not reformat the rest of the file. Falls back to a full render when
+    // the layout cannot be matched.
+    let body = rec.render_for_write();
+    if std::env::var_os("ABOOK_SPLICE_DEBUG").is_some() {
+        eprintln!(
+            "[save] base={} 原字节={} 待写字节={} 相同={}",
+            rec.base.is_some(),
+            rec.raw.len(),
+            body.len(),
+            body == rec.raw
+        );
+    }
+    // validate what we are about to write
+    let parsed = crate::parse::parse(&body, Some(rec.lib));
+    if parsed.has_error() {
+        let msgs: Vec<String> = parsed.errors().iter().map(|d| d.show()).collect();
+        return integrity(format!("待写入内容未通过解析: {}", msgs.join(" | ")));
+    }
+    let rep = schema::validate(&parsed, rec.lib, Some(&rec.file_name()));
+    if rep.has_error() {
+        let msgs: Vec<String> = rep
+            .issues
+            .iter()
+            .filter(|i| i.sev == crate::parse::Sev::Error)
+            .map(|i| i.show())
+            .collect();
+        return integrity(format!("待写入内容未通过校验: {}", msgs.join(" | ")));
+    }
+    // Nothing to do. Verified before any side effect, so a no-op cannot touch
+    // the record, the map, the index or the change log.
+    let unchanged = body == rec.raw;
+    if a.has("dry-run") {
+        print!("{}", render_dry_run(rec, op, &rel(root, &rec.path), a.has("verbose")));
+        return Ok(!unchanged);
+    }
+    if unchanged {
+        return Ok(false);
+    }
+    write_atomic(&rec.path, &body)?;
+    rec.rebase(&body);
+    let back = Record::parse(&rec.path, rec.lib)?;
+    if back.body != rec.body && !rec.body.trim().is_empty() {
+        return integrity(format!(
+            "写入复读不一致: {}",
+            rel(root, &rec.path)
+        ));
+    }
+    // atlas + index + counts
+    crate::cmd_write_sync::sync_record(root, &back)?;
+    {
+        // `op` arrives already spelled as the library spells it
+        // (`set-field`, `append-body`, ...), so it doubles as the slug and as
+        // the KIND. The operation verb is derived from it by prefix.
+        // Every edit command mutates an existing record in place, which the
+        // library spells `PATCH`; the finer verb already lives in KIND.
+        let operation = "PATCH";
+        crate::cmd_admin::write_commit(
+            root,
+            &crate::cmd_admin::CommitInfo {
+                slug: op,
+            scope: "仅改动 1 条记录的目标字段，其余字节不变",
+                operation,
+                library: if rec.lib == crate::rec::Lib::Canonical {
+                    "CANONICAL"
+                } else {
+                    "CANDIDATE"
+                },
+                summary: &format!("{} {}", op, back.title()),
+                target: &rel(root, &rec.path),
+                body: &format!("{op}
+
+记录: {}
+标题: {}", rel(root, &rec.path), back.title()),
+            },
+        )?;
+    }
+    Ok(true)
+}
+
+pub fn cmd_set(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let field = a.need_pos(1, "字段名")?;
+    let value = a.pos.get(2).cloned().unwrap_or_else(|| {
+        a.get("value").unwrap_or("").to_string()
+    });
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "修改")?;
+    let mut rec = Record::parse(&path, lib)?;
+    let (canon, _) = crate::parse::canon_key(&field);
+    if canon.is_empty() {
+        return usage(format!("字段名不合法: {field}"));
+    }
+    rec.set(&canon, &value);
+    let wrote = save(&root, &mut rec, a, "set-field")?;
+    if !a.has("dry-run") {
+        if wrote {
+            crate::say_line!("{}= {}", canon, value);
+        } else {
+            crate::say_line!("{}= {} （与现值相同，未写入）", canon, value);
+        }
+    }
+    Ok(0)
+}
+
+pub fn cmd_unset(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let field = a.need_pos(1, "字段名")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "修改")?;
+    let mut rec = Record::parse(&path, lib)?;
+    let (canon, _) = crate::parse::canon_key(&field);
+    rec.fields.retain(|(k, _)| k != &canon);
+    save(&root, &mut rec, a, "unset-field")?;
+    crate::say_line!("已移除 {canon}");
+    Ok(0)
+}
+
+fn read_payload(a: &Args) -> R<String> {
+    if let Some(f) = a.get("file") {
+        return read_str(&expand_tilde(f));
+    }
+    if let Some(t) = a.get("text") {
+        return Ok(t.to_string());
+    }
+    if let Some(b) = a.get("body") {
+        return Ok(b.to_string());
+    }
+    let mut s = String::new();
+    use std::io::Read;
+    std::io::stdin().read_to_string(&mut s)?;
+    Ok(s)
+}
+
+pub fn cmd_append(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "追加正文")?;
+    let mut rec = Record::parse(&path, lib)?;
+    let payload = read_payload(a)?;
+    if payload.trim().is_empty() {
+        return usage("没有要追加的内容");
+    }
+    let old_body = rec.body.clone();
+    if !rec.body.is_empty() && !rec.body.ends_with('\n') {
+        rec.body.push('\n');
+    }
+    rec.body.push_str(payload.trim_end());
+    rederive_after_body_change(&mut rec, &old_body);
+    save(&root, &mut rec, a, "append-body")?;
+    if !a.has("dry-run") {
+        crate::say_line!("正文已追加，现 {} 字节", rec.body.len());
+    }
+    Ok(0)
+}
+
+pub fn cmd_prepend(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "前置正文")?;
+    let mut rec = Record::parse(&path, lib)?;
+    let payload = read_payload(a)?;
+    if payload.trim().is_empty() {
+        return usage("没有要插入的内容");
+    }
+    let old_body = rec.body.clone();
+    let mut s = payload.trim_end().to_string();
+    s.push('\n');
+    s.push_str(&rec.body);
+    rec.body = s;
+    rederive_after_body_change(&mut rec, &old_body);
+    save(&root, &mut rec, a, "prepend-body")?;
+    if !a.has("dry-run") {
+        crate::say_line!("正文已前置，现 {} 字节", rec.body.len());
+    }
+    Ok(0)
+}
+
+pub fn cmd_patch(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "替换")?;
+    let old = a.get("old").ok_or_else(|| EE::Usage("缺 --old".into()))?.to_string();
+    let new = a.get("new").unwrap_or("").to_string();
+    let mut rec = Record::parse(&path, lib)?;
+    // `--field F` means "the field named F". Reading it only when `--in field`
+    // was also passed meant the documented form `patch X --field TITLE ...`
+    // silently edited the body: the caller believes they are renaming a field
+    // and the prose changes instead. There is no visible failure to catch it,
+    // because a body match on `aa` usually succeeds.
+    //
+    // So the presence of `--field` decides, and `--in field` stays supported for
+    // callers that already pass it. `--in body` still wins when given explicitly
+    // with a field, because that combination is at least unambiguous about what
+    // was asked for.
+    let scope = a.get("in").unwrap_or("").to_string();
+    let hay = if scope == "body" {
+        "body".to_string()
+    } else if !scope.is_empty() || a.get("field").is_some() {
+        let f = a.get("field").unwrap_or("").to_string();
+        if f.is_empty() {
+            return usage("--in field 需要同时给出 --field <字段名>");
+        }
+        f
+    } else {
+        "body".to_string()
+    };
+    let hits: usize;
+    if hay == "body" {
+        let old_body = rec.body.clone();
+        hits = rec.body.matches(&old).count();
+        if hits == 0 {
+            return notfound("正文中未找到该文本");
+        }
+        if hits > 1 && !a.has("all") {
+            return usage(format!("命中 {hits} 处，确认全部替换请加 --all"));
+        }
+        rec.body = rec.body.replace(&old, &new);
+        rederive_after_body_change(&mut rec, &old_body);
+    } else {
+        let cur = rec.get(&hay);
+        hits = cur.matches(&old).count();
+        if hits == 0 {
+            return notfound(format!("字段 {hay} 中未找到该文本"));
+        }
+        if hits > 1 && !a.has("all") {
+            return usage(format!("命中 {hits} 处，确认全部替换请加 --all"));
+        }
+        rec.set(&hay, &cur.replace(&old, &new));
+    }
+    save(&root, &mut rec, a, "patch-text")?;
+    if !a.has("dry-run") {
+        crate::say_line!("已替换 {hits} 处");
+    }
+    Ok(0)
+}
+
+pub fn cmd_rename(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let newname = a.need_pos(1, "新文件名或新标题")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "改名")?;
+    let mut rec = Record::parse(&path, lib)?;
+    if a.has("title") {
+        rec.set("TITLE", &newname);
+        save(&root, &mut rec, a, "retitle")?;
+        crate::say_line!("标题已改为 {newname}");
+        return Ok(0);
+    }
+    let clean: String = if newname.ends_with(".md") {
+        newname.to_string()
+    } else {
+        format!("{newname}.md")
+    };
+    let dst = path.with_file_name(&clean);
+    if dst.exists() {
+        return integrity(format!("目标已存在: {}", rel(&root, &dst)));
+    }
+    if a.has("dry-run") {
+        crate::say_line!("[dry-run] {} → {}", rel(&root, &path), rel(&root, &dst));
+        return Ok(0);
+    }
+    let old_rel = rel(&root, &path);
+    std::fs::rename(&path, &dst)?;
+    rec.path = dst.clone();
+    // keep the header ID aligned with the new name when it was aligned before
+    if Record::is_scheme_name(&clean) {
+        let stem = clean.trim_end_matches(".md").to_string();
+        rec.set("ID", &stem);
+        write_atomic(&dst, &rec.render())?;
+    }
+    crate::cmd_write_sync::repoint(&root, lib, &old_rel, &rel(&root, &dst))?;
+    crate::cmd_admin::write_commit(
+        &root,
+        &crate::cmd_admin::CommitInfo {
+            slug: "rename-record",
+            scope: "1 条记录改名，索引与地图指针同步改写",
+            operation: "REPLACE",
+            library: if lib == crate::rec::Lib::Canonical { "CANONICAL" } else { "CANDIDATE" },
+            summary: &format!("改名 {old_rel} → {}", rel(&root, &dst)),
+            target: &rel(&root, &dst),
+            body: &format!("改名\n\n旧: {old_rel}\n新: {}", rel(&root, &dst)),
+        },
+    )?;
+    crate::say_line!("{}", rel(&root, &dst));
+    Ok(0)
+}
+
+pub fn cmd_move(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let branch = a.need_pos(1, "目标分支")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "换分支")?;
+    if a.has("dry-run") {
+        crate::say_line!("[dry-run] 把 {} 移到分支 {branch}", rel(&root, &path));
+        return Ok(0);
+    }
+    crate::cmd_write_sync::move_branch(&root, lib, &rel(&root, &path), &branch)?;
+    crate::cmd_admin::write_commit(
+        &root,
+        &crate::cmd_admin::CommitInfo {
+            slug: "move-branch",
+            scope: "1 条记录换分支，地图两分支计数同步",
+            operation: "PATCH",
+            library: if lib == crate::rec::Lib::Canonical { "CANONICAL" } else { "CANDIDATE" },
+            summary: &format!("换分支 {} → {branch}", rel(&root, &path)),
+            target: &rel(&root, &path),
+            body: &format!("换分支\n\n记录: {}\n新分支: {branch}", rel(&root, &path)),
+        },
+    )?;
+    crate::say_line!("已移到分支 {branch}");
+    Ok(0)
+}
+
+pub fn cmd_copy(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    let mut rec = Record::parse(&path, lib)?;
+    let target_lib = match a.get("to").unwrap_or("") {
+        "canonical" | "c" => Lib::Canonical,
+        "candidate" | "n" => Lib::Candidate,
+        _ => lib,
+    };
+    if target_lib == Lib::Canonical && !a.has("approve") && !a.has("dry-run") {
+        return blocked("复制到正式库需要 --approve。");
+    }
+    let st = stamps();
+    let id = Record::new_id(target_lib, &st.compact, &rec.body);
+    rec.set("ID", &id);
+    rec.set(
+        "FORMAT",
+        if target_lib == Lib::Canonical {
+            "CANONICAL_MEMORY_V2"
+        } else {
+            "CANDIDATE_MEMORY_V2"
+        },
+    );
+    let dir = root.join(target_lib.dir());
+    ensure_dir(&dir)?;
+    let dst = dir.join(format!("{id}.md"));
+    rec.path = dst.clone();
+    rec.lib = target_lib;
+    save(&root, &mut rec, a, "copy-record")?;
+    if !a.has("dry-run") {
+        crate::say_line!("{}", rel(&root, &dst));
+    }
+    Ok(0)
+}
+
+pub fn cmd_demote(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "正式记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    if lib != Lib::Canonical {
+        return usage("demote 只接受正式记录");
+    }
+    if !a.has("approve") && !a.has("dry-run") {
+        return blocked("把正式记录退回候选需要 --approve。");
+    }
+    let mut rec = Record::parse(&path, lib)?;
+    let st = stamps();
+    let id = Record::new_id(Lib::Candidate, &st.compact, &rec.body);
+    rec.set("ID", &id);
+    rec.set("FORMAT", "CANDIDATE_MEMORY_V2");
+    rec.set("STATUS", "ACTIVE");
+    rec.set(
+        "CANDIDATE_SOURCE",
+        &format!("从正式记录退回: {}", rec.file_name()),
+    );
+    let dir = root.join(Lib::Candidate.dir());
+    ensure_dir(&dir)?;
+    let dst = dir.join(format!("{id}.md"));
+    rec.path = dst.clone();
+    rec.lib = Lib::Candidate;
+    save(&root, &mut rec, a, "demote-record")?;
+    // remove the canonical copy
+    if !a.has("dry-run") {
+        let old_rel = rel(&root, &path);
+        std::fs::remove_file(&path)?;
+        crate::cmd_write_sync::forget(&root, Lib::Canonical, &old_rel)?;
+        crate::say_line!("{}", rel(&root, &dst));
+    }
+    Ok(0)
+}
+
+pub fn cmd_merge(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    if a.pos.len() < 2 {
+        return usage("merge 需要至少两条记录");
+    }
+    let mut recs: Vec<(std::path::PathBuf, Lib, Record)> = Vec::new();
+    for sel in &a.pos {
+        let (p, l) = resolve_record(&root, sel)?;
+        let r = Record::parse(&p, l)?;
+        recs.push((p, l, r));
+    }
+    let lib = recs[0].1;
+    if lib == Lib::Canonical && !a.has("approve") && !a.has("dry-run") {
+        return blocked("合并进正式库需要 --approve。");
+    }
+    let title = a
+        .get("title")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| recs[0].2.title());
+    let mut body = String::new();
+    for (_, _, r) in &recs {
+        body.push_str(&format!("## 来自 {}\n\n", r.file_name()));
+        body.push_str(r.body.trim_end());
+        body.push_str("\n\n");
+    }
+    let st = stamps();
+    let id = Record::new_id(lib, &st.compact, &body);
+    // union the recall keys so the merged record stays findable
+    let mut keys: Vec<String> = Vec::new();
+    for (_, _, r) in &recs {
+        for part in r.get("KEYS").split([',', '，']) {
+            let t = part.trim();
+            if !t.is_empty() && !keys.iter().any(|k| k == t) {
+                keys.push(t.to_string());
+            }
+        }
+    }
+    let mut out = Record {
+        path: root.join(lib.dir()).join(format!("{id}.md")),
+        lib,
+        fields: Vec::new(),
+        body: body.trim_end().to_string(),
+        promotion: None,
+        raw: String::new(),
+        devs: Vec::new(),
+        header_inferred: false,
+        // A brand-new record has no bytes on disk yet, so there is nothing to
+        // splice: this one is written by rendering it in full.
+        base: None,
+    };
+    out.set(
+        "FORMAT",
+        if lib == Lib::Canonical {
+            "CANONICAL_MEMORY_V2"
+        } else {
+            "CANDIDATE_MEMORY_V2"
+        },
+    );
+    out.set("ID", &id);
+    out.set("KIND", &recs[0].2.kind());
+    out.set("MATURITY", &recs[0].2.get("MATURITY"));
+    out.set("AUTHORITY", &recs[0].2.get("AUTHORITY"));
+    out.set("TITLE", &title);
+    out.set("SUMMARY", &format!("合并 {} 条记录", recs.len()));
+    out.set(
+        "READ_WHEN",
+        &recs[0].2.get("READ_WHEN"),
+    );
+    out.set("NOT_FOR", &recs[0].2.get("NOT_FOR"));
+    out.set("KEYS", &keys.join(","));
+    out.set("CONCEPTS", &keys.join(","));
+    out.set(
+        "RELATED_IDS",
+        &recs
+            .iter()
+            .map(|(_, _, r)| r.id())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    out.set(
+        "SOURCE",
+        &format!("merge: {}", recs.iter().map(|(_, _, r)| r.file_name()).collect::<Vec<_>>().join(" + ")),
+    );
+    ensure_dir(&root.join(lib.dir()))?;
+    save(&root, &mut out, a, "merge-records")?;
+    if !a.has("dry-run") {
+        crate::say_line!("{}", rel(&root, &out.path));
+        if a.has("remove-sources") {
+            for (p, l, _) in &recs {
+                let r = rel(&root, p);
+                let mut rr = Record::parse(p, *l)?;
+                rr.set("STATUS", "SUPERSEDED");
+                rr.set("SUPERSEDES", &id);
+                write_atomic(p, &rr.render())?;
+                crate::cmd_write_sync::forget(&root, *l, &r)?;
+            }
+            crate::say_line!("源记录已标记 SUPERSEDED");
+        }
+    }
+    Ok(0)
+}
+
+pub fn cmd_split(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sel = a.need_pos(0, "记录")?;
+    let (path, lib) = resolve_record(&root, sel)?;
+    guard(a, lib, "拆分")?;
+    let rec = Record::parse(&path, lib)?;
+    let marker = a
+        .get("at")
+        .ok_or_else(|| EE::Usage("缺 --at <标题行文本>".into()))?
+        .to_string();
+    let mut pre: Vec<&str> = Vec::new();
+    let mut post: Vec<&str> = Vec::new();
+    let mut seen = false;
+    for line in rec.body.lines() {
+        if !seen && line.contains(&marker) {
+            seen = true;
+        }
+        if seen {
+            post.push(line);
+        } else {
+            pre.push(line);
+        }
+    }
+    if !seen {
+        return notfound(format!("正文中未找到分隔文本: {marker}"));
+    }
+    if pre.is_empty() || post.is_empty() {
+        return usage("拆分后会出现空段，请换一个分隔位置");
+    }
+    if a.has("dry-run") {
+        crate::say_line!("[dry-run] 拆成两段: {} 行 / {} 行", pre.len(), post.len());
+        return Ok(0);
+    }
+    let st = stamps();
+    let body2 = post.join("\n");
+    let id2 = Record::new_id(lib, &st.compact, &body2);
+    let mut r2 = rec.clone();
+    r2.body = body2;
+    r2.set("ID", &id2);
+    r2.set("TITLE", &format!("{}（续）", rec.title()));
+    r2.path = root.join(lib.dir()).join(format!("{id2}.md"));
+    r2.promotion = None;
+    save(&root, &mut r2, a, "split-record")?;
+    let mut r1 = rec.clone();
+    r1.body = pre.join("\n");
+    r1.set("RELATED_IDS", &id2);
+    save(&root, &mut r1, a, "split-record")?;
+    crate::say_line!("{}", rel(&root, &r2.path));
+    Ok(0)
+}
