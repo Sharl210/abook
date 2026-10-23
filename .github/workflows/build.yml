@@ -585,8 +585,14 @@ jobs:
           # network, so it cannot be killed by a slow mirror. The meta package
           # `gcc-mingw-w64-x86-64` alone is a few hundred bytes -- the 200MB is
           # in its dependencies, which is exactly what --download-only pulls.
+          # Two attempts of 20 minutes each fit inside this step's 45-minute
+          # budget. They did not always: the per-attempt timeout used to be 25
+          # minutes, so the retry could never finish and the step died on its
+          # own timeout instead of on a download error -- the same class of
+          # mistake (a budget smaller than the work it covers) that started
+          # this whole list.
           for try in 1 2; do
-            if timeout 1500 sudo -E apt-get install -y -qq --no-install-recommends \
+            if timeout 1200 sudo -E apt-get install -y -qq --no-install-recommends \
                  $APTOPT --download-only \
                  -o Acquire::Retries=5 -o Acquire::http::Timeout=60 $PKGS; then
               echo "第 $try 次下载完成"
