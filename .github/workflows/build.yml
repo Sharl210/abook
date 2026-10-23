@@ -103,7 +103,7 @@ jobs:
         # over an hour because apt/curl were silently waiting on a dead socket;
         # the job timeout only fires after six hours, so the whole run looked
         # "stuck" with no error to act on.
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
           set -o pipefail
           # A swallowed apt failure used to surface much later as a confusing
@@ -164,8 +164,22 @@ jobs:
             # unknown, so one typo silently yields zero debs and the real
             # failure surfaces later as "no $XPREFIX-gcc". Fetch them one at a
             # time and name the offender.
+            # 300s was too small and it failed armv7: gcc-13-arm-linux-gnueabihf
+            # is 19.6MB and the azure mirror served it at 40 kB/s on that run,
+            # i.e. ~490s. The budget is now 600s per package with a second
+            # attempt, and apt itself retries a stalled connection instead of
+            # dying on the first one. A package that is merely SLOW must not
+            # fail the build; only a package that is absent may.
             for d in $XDEBS; do
-              if ! ( cd "$XROOT/deb" && timeout 300 apt-get download "$d" ); then
+              ok=0
+              for try in 1 2; do
+                if ( cd "$XROOT/deb" && timeout 600 apt-get download \
+                       -o Acquire::Retries=5 -o Acquire::http::Timeout=60 "$d" ); then
+                  ok=1; break
+                fi
+                echo "第 $try 次下载 $d 失败，重试"
+              done
+              if [ "$ok" != 1 ]; then
                 echo "::error::apt-get download failed for package '$d' (target $T)"
                 XMISS=1
               fi
@@ -205,7 +219,7 @@ jobs:
               # This step has a 15 minute budget. Waiting 1800s here can only
               # end as "the action timed out", which hides the real cause, so
               # keep the fallback well inside the budget and say what is wrong.
-              timeout 300 sudo -E apt-get install -y -qq --no-install-recommends $XPKGS \
+              timeout 600 sudo -E apt-get install -y -qq --no-install-recommends $XPKGS \
                 || { echo "::error::no $XPREFIX cross gcc after unpack and apt (packages: $XDEBS)"; exit 1; }
             fi
           elif [ -n "$PKGS" ]; then
