@@ -534,9 +534,43 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install toolchains
+        timeout-minutes: 20
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 clang lld llvm
+          # Every windows matrix entry used to install the union of everything:
+          # both mingw gccs plus clang, lld and llvm (~700MB). On a slow mirror
+          # that step sat for 32 minutes with no budget, so the 40-minute job
+          # timeout was the thing that eventually fired and it said only
+          # "exceeded maximum execution time".
+          #
+          # aarch64-pc-windows-gnullvm needs NONE of it: llvm-mingw (the next
+          # step) ships its own clang driver, lld and the aarch64 sysroot, and
+          # the Configure step points rustc at that driver. Installing the
+          # Ubuntu toolchain for it was 700MB of download for nothing.
+          T="${{ matrix.target }}"
+          case "$T" in
+            x86_64-pc-windows-gnu) PKGS="gcc-mingw-w64-x86-64" ;;
+            i686-pc-windows-gnu)   PKGS="gcc-mingw-w64-i686" ;;
+            *)                     PKGS="" ;;
+          esac
+          if [ -z "$PKGS" ]; then
+            echo "no apt toolchain needed for $T"
+            exit 0
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 300 sudo -E apt-get update -qq \
+            || { echo "::error::apt-get update failed"; exit 1; }
+          # Slow is not broken: retry once before calling it a failure, and
+          # let apt retry stalled connections itself.
+          for try in 1 2; do
+            if timeout 900 sudo -E apt-get install -y -qq --no-install-recommends \
+                 -o Acquire::Retries=5 -o Acquire::http::Timeout=60 $PKGS; then
+              echo "installed: $PKGS"
+              exit 0
+            fi
+            echo "第 $try 次安装 $PKGS 失败，重试"
+          done
+          echo "::error::apt-get install failed for $T ($PKGS)"
+          exit 1
       - name: Install llvm-mingw
         if: matrix.target == 'aarch64-pc-windows-gnullvm'
         run: |
@@ -557,7 +591,15 @@ jobs:
             test -f "$LSYS/$f" || { echo "::error::llvm-mingw sysroot missing $f"; exit 1; }
           done
           test -x "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" || { echo "::error::driver missing"; exit 1; }
+          # This step now replaces the Ubuntu clang/lld/llvm install for this
+          # target, so the bundled copies have to actually be there. Checking
+          # here turns a missing piece into a named error instead of a link
+          # failure three steps later.
+          for f in bin/ld.lld bin/llvm-ar bin/llvm-rc; do
+            test -e "$RUNNER_TEMP/lm/$f" || { echo "::error::llvm-mingw missing $f"; exit 1; }
+          done
           "$RUNNER_TEMP/lm/bin/aarch64-w64-mingw32-clang" --version | head -1
+          "$RUNNER_TEMP/lm/bin/ld.lld" --version | head -1
       - name: Configure
         run: |
           T="${{ matrix.target }}"
