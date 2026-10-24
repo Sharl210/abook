@@ -43,11 +43,25 @@ detect_triple() {
 
 TRIPLE="${1:-}"
 case "$TRIPLE" in
-  --check) MODE=check; TRIPLE=$(detect_triple) ;;
-  "")      MODE=install; TRIPLE=$(detect_triple) ;;
-  *)       MODE=install ;;
+  --check|check) MODE=check;  TRIPLE=$(detect_triple) ;;
+  "")            MODE=install; TRIPLE=$(detect_triple) ;;
+  -*)            echo "未知选项: $TRIPLE（可用: --check）" >&2; exit 2 ;;
+  *)             MODE=install ;;
 esac
 [ -n "$TRIPLE" ] || { echo "无法判定本机架构，请显式给 triple" >&2; exit 2; }
+
+# 校验 triple 是否在 CI 的发布清单里。
+#
+# 不校验的话，任何写错的字符串都会被当成架构名拿去拼下载地址，然后四个镜像全部
+# 404，最后只打印一句「所有源都失败」——真正的错因（架构名写错了）被埋在下面。
+# 失败要指向原因，不能只说结果。
+case "$TRIPLE" in
+  aarch64-linux-android|armv7-linux-androideabi|i686-linux-android|x86_64-linux-android|  x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|armv7-unknown-linux-musleabihf|  i686-unknown-linux-musl|loongarch64-unknown-linux-gnu|riscv64gc-unknown-linux-gnu|  aarch64-apple-darwin|x86_64-apple-darwin|  aarch64-pc-windows-gnullvm|x86_64-pc-windows-gnullvm|i686-pc-windows-gnullvm) ;;
+  *) echo "未知架构: $TRIPLE" >&2
+     echo "可用架构共 15 个，例如 aarch64-linux-android / x86_64-unknown-linux-musl。" >&2
+     echo "只想比对不安装用 --check。" >&2
+     exit 2 ;;
+esac
 
 case "$TRIPLE" in *windows*) SUF=.exe ;; *) SUF= ;; esac
 
@@ -98,15 +112,38 @@ if [ -z "$REMOTE_FP" ]; then
 fi
 echo "远程指纹: ${REMOTE_FP:-读不出}"
 
-LOCAL_FP=""
-[ -x "$DEST" ] && LOCAL_FP=$("$DEST" version 2>/dev/null | sed -n 's/.*src=\([0-9a-f]\{16\}\).*/\1/p')
-echo "本地指纹: ${LOCAL_FP:-无}"
+# 工作树的源码指纹：直接问当前源码编出来的那份。
+#
+# 这里**不能**读 $DEST 的指纹：那是"磁盘上现在装着什么"，本次运行之后它就会被
+# 换掉，与被换上的那份比是没有意义的（一个是被替换文件的历史值，一个是远程值）。
+# 真正该回答的问题是"远程这份和我的源码是不是同源"，所以要问的是源码自己——
+# 让 cargo 静默编一次，问它报什么。
+WORKTREE_FP=""
+if command -v cargo >/dev/null 2>&1; then
+  cargo build --release --quiet >/dev/null 2>&1
+  if [ -x "target/release/abook" ]; then
+    WORKTREE_FP=$(./target/release/abook version 2>/dev/null | sed -n 's/.*src=\([0-9a-f]\{16\}\).*/\1/p')
+  fi
+fi
+echo "工作树指纹: ${WORKTREE_FP:-无法计算（缺 cargo，跳过同源核对）}"
+
+if [ -n "$WORKTREE_FP" ] && [ "$WORKTREE_FP" != "$REMOTE_FP" ]; then
+  echo
+  echo "远程产物与工作树源码不同源：" >&2
+  echo "  远程: $REMOTE_FP" >&2
+  echo "  工作树: $WORKTREE_FP" >&2
+  echo "说明你要装的这份不是由当前源码编出来的。可能原因：tag 推早了、CI 缓存、" >&2
+  echo "或本地还有未提交的改动。先确认这两者为何不同，不要直接装上。" >&2
+  exit 1
+fi
 
 if [ "$MODE" = check ]; then
-  if [ "$REMOTE_FP" = "$LOCAL_FP" ]; then
+  LOCAL_FP=""
+  [ -x "$DEST" ] && LOCAL_FP=$("$DEST" version 2>/dev/null | sed -n 's/.*src=\([0-9a-f]\{16\}\).*/\1/p')
+  if [ "$REMOTE_FP" = "$LOCAL_FP" ] && [ "$REMOTE_FP" = "$WORKTREE_FP" ]; then
     echo "结论: 已一致，无需更新"
   else
-    echo "结论: 不一致，需要同步"
+    echo "结论: 需要同步（已装:${LOCAL_FP:-无} 远程:$REMOTE_FP 工作树:${WORKTREE_FP:-?}）"
     exit 1
   fi
   exit 0
