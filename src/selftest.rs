@@ -1513,6 +1513,100 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
                 msgs.push(format!("FAIL  repair --only 没限定住范围:{detail}"));
             }
         }
+
+        // 已晋升的候选不许再晋升一次。
+        //
+        // 晋升记录有两个时期的写法：新流程写末尾 `[PROMOTION]` 块，早期流程把
+        // `PROMOTED_TO`/`PROMOTED_AT` 直接写在头部字段。只看末尾块时，一条头部
+        // 已标 `PROMOTED_TO=C-...` 的老候选会被当成没晋升过再晋升一遍——正式库
+        // 于是出现两条标题相同、`PROMOTED_FROM` 也相同的记录。这事真发生过，
+        // 所以两种写法都必须拦住。
+        {
+            let tmp = std::env::temp_dir().join(format!("abook-st-promo-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let mut detail = String::new();
+            let mut ok = true;
+            let cdir = tmp.join("candidate").join("records");
+            let _ = std::fs::create_dir_all(&cdir);
+            let _ = std::fs::create_dir_all(tmp.join("canonical").join("records"));
+            let mk = |name: &str, extra: &str| -> std::path::PathBuf {
+                let f = cdir.join(format!("{name}.md"));
+                let _ = std::fs::write(
+                    &f,
+                    format!(
+                        "[CANDIDATE_MEMORY]\nFORMAT=CANDIDATE_MEMORY_V2\nID={name}\nTITLE=晋升测试\n\
+                         KIND=DECISION\nMATURITY=VERIFIED\nAUTHORITY=USER_EXPLICIT\nSUMMARY=摘要\n\
+                         KEYS=甲\nREAD_WHEN=测试\nSIZE=SMALL\n{extra}[/CANDIDATE_MEMORY]\n\
+                         [MEMORY_BODY]\n正文内容足够长可以接受\n[/MEMORY_BODY]\n"
+                    ),
+                );
+                f
+            };
+            // 头部已带 PROMOTED_TO 的老候选
+            mk(
+                "N-20260101T000000-cccccccc",
+                "PROMOTED_TO=C-20260101T010000-11111111\nPROMOTED_AT=2026-01-01T01:00:00+08:00\n",
+            );
+            let o = std::process::Command::new(&exe)
+                .args([
+                    "promote",
+                    "--root",
+                    &tmp.to_string_lossy(),
+                    "N-20260101T000000-cccccccc",
+                    "--approve",
+                ])
+                .output();
+            if let Ok(o) = o {
+                let all = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                if !all.contains("此前晋升过") {
+                    ok = false;
+                    detail.push_str("头部已有 PROMOTED_TO 的候选未被拦住;");
+                }
+            }
+            // 正式库里不能多出记录
+            let n = std::fs::read_dir(tmp.join("canonical").join("records"))
+                .map(|d| d.count())
+                .unwrap_or(0);
+            if n != 0 {
+                ok = false;
+                detail.push_str(&format!("拦下后仍写了 {n} 条正式记录;"));
+            }
+            // 未晋升的候选仍必须能晋升（不能把正常路径一起堵死）
+            mk("N-20260101T000000-dddddddd", "");
+            let o2 = std::process::Command::new(&exe)
+                .args([
+                    "promote",
+                    "--root",
+                    &tmp.to_string_lossy(),
+                    "N-20260101T000000-dddddddd",
+                    "--approve",
+                ])
+                .output();
+            let n2 = std::fs::read_dir(tmp.join("canonical").join("records"))
+                .map(|d| d.count())
+                .unwrap_or(0);
+            if n2 != 1 {
+                ok = false;
+                if let Ok(o2) = o2 {
+                    detail.push_str(&format!(
+                        "正常晋升被堵死({n2} 条) {};",
+                        crate::util::truncate_chars(&String::from_utf8_lossy(&o2.stderr), 60)
+                    ));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+            if ok {
+                pass += 1;
+                msgs.push("PASS  已晋升的候选（头部或尾块任一写法）不能再晋升一次".into());
+            } else {
+                fail += 1;
+                msgs.push(format!("FAIL  重复晋升没拦住:{detail}"));
+            }
+        }
     } else {
         skip += 1;
         msgs.push("SKIP  无稳定自身路径，跳过写边界检查".into());

@@ -323,8 +323,31 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
         return usage("promote 只接受候选记录");
     }
     let cand = Record::parse(&cpath, Lib::Candidate)?;
+
+    // 已晋升的候选不许再晋升一次。
+    //
+    // 两个地方都要看，因为它们来自不同时期：新流程写末尾的 `[PROMOTION]` 块
+    // （`cand.promotion`），而早期流程把 `PROMOTED_TO`/`PROMOTED_AT` 直接写在
+    // 头部字段里。只查前者时，一条头部已标 `PROMOTED_TO=C-...` 的老候选会被
+    // 当成"没晋升过"再晋升一遍，正式库于是出现两条标题相同、`PROMOTED_FROM`
+    // 也相同的记录——重复就是这么来的。
     if cand.promotion.is_some() {
         return blocked(format!("该候选已晋升过: {}", cand.file_name()));
+    }
+    let hdr_to = cand.get("PROMOTED_TO").trim().to_string();
+    if !hdr_to.is_empty() {
+        let dest = if root.join("canonical/records").join(format!("{hdr_to}.md")).exists() {
+            "正式库里还在"
+        } else {
+            "该正式记录已不在库里"
+        };
+        return blocked(format!(
+            "该候选头部已记 PROMOTED_TO={hdr_to}（{dest}），说明此前晋升过。\n\
+             要重新晋升请先确认那次晋升是否作废：作废就 `abook set {} PROMOTED_TO \"\"` 清掉再试；\n\
+             只是想改已晋升内容，直接编辑正式记录 {}。",
+            cand.file_name(),
+            hdr_to
+        ));
     }
     if !a.has("approve") {
         return blocked(format!(
