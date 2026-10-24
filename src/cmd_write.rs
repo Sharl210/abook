@@ -555,12 +555,25 @@ pub fn cmd_update(a: &Args) -> R<i32> {
         }
         return Ok(0);
     }
-    // keep ID/link integrity when body changed
-    let new_id = Record::new_id(lib, &rec.id(), &rec.body);
-    if rec.id().len() == 23 {
-        // <prefix>-<15>-<8> already scheme-shaped: keep the filename stable
-    } else {
-        rec.set("ID", &new_id);
+    // ID 是身份，不随正文改动而变。
+    //
+    // 初版在这里按"正文变了就换一个新 ID"处理，并且用 `rec.id().len() == 23`
+    // 判断"是否已是规范形态"。真实的规范 ID 是 26 字符（`N-` + 15 位时间 +
+    // `-` + 8 位哈希），于是这个条件**永远不成立**，每次 update 都把 ID 改成
+    // `N-<旧ID>-<新哈希>`——一条记录被编辑两次就套成 `N-N-...`。
+    //
+    // 危害不只是难看：ID 是 `RELATED_IDS`、`PROMOTED_FROM` 等所有引用的指向
+    // 目标，改它等于把入向引用全部打断；而文件名没变，于是 ID 与文件名也分叉了。
+    //
+    // 正确做法：正文编辑不动 ID。只有 ID 缺失或不成形（旧库手写记录）时，
+    // 才对齐到文件名干——因为文件名才是磁盘上的规范身份。
+    let shaped = Record::is_scheme_name(&format!("{}.md", rec.id()));
+    if !shaped {
+        if let Some(stem) = path.file_stem().map(|x| x.to_string_lossy().to_string()) {
+            if Record::is_scheme_name(&format!("{stem}.md")) {
+                rec.set("ID", &stem);
+            }
+        }
     }
     write_atomic(&path, &rec.render())?;
     let back = Record::parse(&path, lib)?;
