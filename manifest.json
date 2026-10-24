@@ -1,0 +1,16 @@
+{"schema":"abook-downloads/1","files":[
+{"target":"aarch64-apple-darwin","os":"macos","arch":"aarch64","libc":"libSystem","file":"aarch64-apple-darwin/abook","size":1071392,"sha256":"4e6ea2a5c293c28f60fffabfccb95e76c050a33000b0e78ebf000e8403ba08ce"},
+{"target":"aarch64-linux-android","os":"android","arch":"aarch64","libc":"bionic","file":"aarch64-linux-android/abook","size":1225904,"sha256":"a4da45ba09430e5358248bbe8a7b39b415316a274e3e91b99282202ac16007dc"},
+{"target":"aarch64-pc-windows-gnullvm","os":"windows","arch":"aarch64","libc":"mingw-llvm","file":"aarch64-pc-windows-gnullvm/abook.exe","size":1149440,"sha256":"97eafdc70939daeb7e51e6e170a2c07b3fd03ebad7efbc47c97d94e8dc9869ea"},
+{"target":"aarch64-unknown-linux-musl","os":"linux","arch":"aarch64","libc":"musl","file":"aarch64-unknown-linux-musl/abook","size":1274344,"sha256":"4c31319acb2ced6c2a9a4c64ff83e1edcc992f64e9ade2ddd83a0f5cdf888403"},
+{"target":"armv7-linux-androideabi","os":"android","arch":"armv7","libc":"bionic","file":"armv7-linux-androideabi/abook","size":897292,"sha256":"675a8f0435aa993eaca3908e6be8a134f806507c51e0d06b42726849abe2051b"},
+{"target":"armv7-unknown-linux-musleabihf","os":"linux","arch":"armv7","libc":"musl","file":"armv7-unknown-linux-musleabihf/abook","size":1293844,"sha256":"55fc79628d8dc5b089769e877d14dbd9d3dd47e008ea5d5fdd43cbcc9f7415e2"},
+{"target":"i686-linux-android","os":"android","arch":"i686","libc":"bionic","file":"i686-linux-android/abook","size":1428152,"sha256":"5a2093fae149cc4016a3ee464852b180e8757052b8bbc5a9d1ec78c527d7c1d9"},
+{"target":"i686-pc-windows-gnullvm","os":"windows","arch":"i686","libc":"mingw-llvm","file":"i686-pc-windows-gnullvm/abook.exe","size":1281024,"sha256":"75721a8e50ca71ec4b968072ce134a8b3e5b2562294dcd448f133bf38c7e82b4"},
+{"target":"i686-unknown-linux-musl","os":"linux","arch":"i686","libc":"musl","file":"i686-unknown-linux-musl/abook","size":1410024,"sha256":"088f38323a213a7b375e0a2e0f785bb06265453fbc92cc50526fdc8b37455459"},
+{"target":"loongarch64-unknown-linux-gnu","os":"linux","arch":"loongarch64","libc":"glibc","file":"loongarch64-unknown-linux-gnu/abook","size":2272056,"sha256":"4fe4a144df81d4c22cfef4d0675d78cc8a6cd2dfd37286060cc5c6b9c4eee049"},
+{"target":"riscv64gc-unknown-linux-gnu","os":"linux","arch":"riscv64","libc":"glibc","file":"riscv64gc-unknown-linux-gnu/abook","size":1759920,"sha256":"63109de84cf20e8e74725063b709e1fee133257e9b7af30e46409d6ee335dfeb"},
+{"target":"x86_64-apple-darwin","os":"macos","arch":"x86_64","libc":"libSystem","file":"x86_64-apple-darwin/abook","size":1244912,"sha256":"638ba68a5b4e025939025fda88b00ad7b1e7f225b6225f96745432ac52042499"},
+{"target":"x86_64-linux-android","os":"android","arch":"x86_64","libc":"bionic","file":"x86_64-linux-android/abook","size":1443832,"sha256":"a2381d5bf7cba96c4a9bf67999284327e3c007de515febb9e75964c3fad7ed5d"},
+{"target":"x86_64-pc-windows-gnullvm","os":"windows","arch":"x86_64","libc":"mingw-llvm","file":"x86_64-pc-windows-gnullvm/abook.exe","size":1329664,"sha256":"ee77c9b1582da0c9f9590f877d8601409f3762179fabcb3b6471780ee263fb7a"},
+{"target":"x86_64-unknown-linux-musl","os":"linux","arch":"x86_64","libc":"musl","file":"x86_64-unknown-linux-musl/abook","size":1552392,"sha256":"fb26ab74f9447ab4db2886040022475e023abd0d1405eb8b8f77b74da122bdc9"}]}
