@@ -24,6 +24,7 @@ pub struct Base<'a> {
     pub fields: &'a [(String, String)],
     pub body: &'a str,
     pub promo: Option<&'a str>,
+    pub attach: Option<&'a str>,
 }
 
 struct FieldLoc {
@@ -44,6 +45,10 @@ struct Analysis {
     promo_open_end: Option<usize>,
     promo_close_line_start: Option<usize>,
     promo_close_end: Option<usize>,
+    attach_open_line_start: Option<usize>,
+    attach_open_end: Option<usize>,
+    attach_close_line_start: Option<usize>,
+    attach_close_end: Option<usize>,
     spans: Vec<FieldLoc>,
 }
 
@@ -84,6 +89,17 @@ fn analyse(raw: &str) -> Analysis {
             if a.promo_close_end.is_none() {
                 a.promo_close_line_start = Some(start);
                 a.promo_close_end = Some(end);
+            }
+        } else if t == "[ATTACH]" {
+            // 附件清单段与晋升段并列，识别方式相同。
+            if a.attach_open_end.is_none() {
+                a.attach_open_line_start = Some(start);
+                a.attach_open_end = Some(end);
+            }
+        } else if t == "[/ATTACH]" {
+            if a.attach_close_end.is_none() {
+                a.attach_close_line_start = Some(start);
+                a.attach_close_end = Some(end);
             }
         } else if in_header && !t.is_empty() {
             match parse::pairs_with_span(content) {
@@ -145,6 +161,7 @@ pub fn write_back(
     fields: &[(String, String)],
     body: &str,
     promo: Option<&str>,
+    attach: Option<&str>,
 ) -> Option<String> {
     if raw.is_empty() {
         return fail("空文件");
@@ -288,6 +305,42 @@ pub fn write_back(
                 .then_some(e + 1)
                 .unwrap_or(e);
             edits.push((s, e, String::new()));
+        }
+        (None, None) => {}
+    }
+
+    // ---- attach block
+    //
+    // 和晋升段同构：改内容就地替换，首次出现就追加到文件末尾。追加点选在
+    // 文件尾而不是正文之后——附件清单是目录页，位置固定在最后，读的人往下
+    // 翻到底就能看到全部附件，不必先去列目录。
+    match (base.attach, attach) {
+        (Some(old), Some(new)) if old == new => {}
+        (Some(_), Some(new)) => {
+            let open = an.attach_open_end?;
+            let close = an.attach_close_line_start?;
+            let mut text = new.trim_matches('\n').to_string();
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            edits.push((open, close, text));
+        }
+        (None, Some(new)) => {
+            let at = raw.len();
+            let mut text = String::new();
+            if !raw.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str("[ATTACH]\n");
+            text.push_str(new.trim_matches('\n'));
+            text.push_str("\n[/ATTACH]\n");
+            edits.push((at, at, text));
+        }
+        (Some(_), None) => {
+            let s0 = an.attach_open_line_start?;
+            let e0 = an.attach_close_end?;
+            let e0 = raw[e0..].starts_with('\n').then_some(e0 + 1).unwrap_or(e0);
+            edits.push((s0, e0, String::new()));
         }
         (None, None) => {}
     }

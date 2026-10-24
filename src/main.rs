@@ -20,6 +20,7 @@ mod spec_text;
 mod cmd_spec;
 mod cmd_edit;
 mod cmd_audit;
+mod attach;
 mod cmd_path;
 mod cmd_view;
 mod cmd_read;
@@ -57,6 +58,7 @@ fn help_text() -> String {
   paths                     打印全部路径
   tree [--flat]             分支树：条目数 / 体积 / 行数 / 最近活跃（有 PARENT 则缩进）
   path <记录|分支>          反查：记录所属分支链；给分支名则向下展开子树
+  attach <子命令> <记录>    附件（文件域）：list / add / get / rm / path / check
   budget [记录]             预载与单条读取的字节预算（对照规则上限）
   audit [--all] [--json]    全库格式审计：纠偏了多少处、有无 ERROR
   lint                      头部完整性与命名规范检查
@@ -915,6 +917,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("diff", cmd_view::cmd_diff),
         ("tree", cmd_view::cmd_tree),
         ("path", cmd_path::cmd_path),
+        ("attach", attach::cmd_attach),
         ("budget", cmd_view::cmd_budget),
         ("export", cmd_view::cmd_export),
         // -- write

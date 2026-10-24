@@ -18,6 +18,41 @@ pub enum EE {
     Other(String),
 }
 
+/// 一个错误 = 发生了什么 + 接下来能做什么。
+///
+/// 只报前一半的错误，读的人知道失败了却不知道往哪走：`Permission denied`
+/// 是 SELinux 还是权限位？`未找到记录` 是名字错了还是库为空？把后一半写进
+/// 同一条消息，调用方才能自己往下走而不必回头问人。
+///
+/// 用结构而不是拼接字符串，是为了 `--json` 能把两段分开交给程序：`message`
+/// 给人看，`hint` 可以直接变成重试参数。
+#[derive(Debug, Clone)]
+pub struct Fail {
+    pub what: String,
+    pub hint: String,
+}
+
+impl Fail {
+    pub fn new(what: impl Into<String>) -> Fail {
+        Fail {
+            what: what.into(),
+            hint: String::new(),
+        }
+    }
+    pub fn hint(mut self, h: impl Into<String>) -> Fail {
+        self.hint = h.into();
+        self
+    }
+    /// 渲染成一行，`；` 分隔。没有 hint 时不留多余标点。
+    pub fn render(&self) -> String {
+        if self.hint.is_empty() {
+            self.what.clone()
+        } else {
+            format!("{}；{}", self.what, self.hint)
+        }
+    }
+}
+
 pub type R<T> = Result<T, EE>;
 
 impl From<io::Error> for EE {
@@ -61,6 +96,20 @@ impl EE {
 
 pub fn usage<T>(m: impl Into<String>) -> R<T> {
     Err(EE::Usage(m.into()))
+}
+
+/// 带下一步提示的版本。调用处用它，别手工拼 "；"。
+pub fn usage_hint<T>(m: impl Into<String>, hint: impl Into<String>) -> R<T> {
+    Err(EE::Usage(Fail::new(m).hint(hint).render()))
+}
+pub fn notfound_hint<T>(m: impl Into<String>, hint: impl Into<String>) -> R<T> {
+    Err(EE::NotFound(Fail::new(m).hint(hint).render()))
+}
+pub fn blocked_hint<T>(m: impl Into<String>, hint: impl Into<String>) -> R<T> {
+    Err(EE::Blocked(Fail::new(m).hint(hint).render()))
+}
+pub fn io_hint<T>(m: impl Into<String>, hint: impl Into<String>) -> R<T> {
+    Err(EE::Io(Fail::new(m).hint(hint).render()))
 }
 pub fn blocked<T>(m: impl Into<String>) -> R<T> {
     Err(EE::Blocked(m.into()))
@@ -114,7 +163,7 @@ const BOOLS: &[&str] = &[
     // authorisation and safety
     "approve", "yes", "force", "hard", "dry-run", "apply",
     // scope switches
-    "all", "full", "whole", "flat", "no-tree", "include-promoted", "include-deleted", "hide-promoted",
+    "all", "full", "whole", "flat", "no-tree", "move", "include-promoted", "include-deleted", "hide-promoted",
     "no-expand", "no-index", "no-atlas", "no-commit",
     "summary-only", "purpose-only", "deviations", "fields",
     "remove-sources", "rebuild", "fix", "verify", "prune",
@@ -353,7 +402,7 @@ impl Args {
     pub fn req(&self, k: &str) -> R<&str> {
         match self.get(k) {
             Some(v) if !v.is_empty() => Ok(v),
-            _ => usage(format!("缺少必填参数 --{k}")),
+            _ => usage(format!("缺少必填参数 --{k}（看这个命令要哪些参数: abook describe <命令>）")),
         }
     }
     pub fn num(&self, k: &str) -> Option<u64> {

@@ -374,6 +374,12 @@ enum Tag {
     BodyClose,
     PromoOpen,
     PromoClose,
+    /// `[ATTACH]` — 附件清单块。
+    ///
+    /// 存成尾部块而不是头部字段，原因和 [PROMOTION] 一样：清单是多行的
+    /// （一条记录可以有几十个附件），头部字段是单行 `KEY=VALUE`，塞不下。
+    AttachOpen,
+    AttachClose,
 }
 
 /// Recognise a structural tag line tolerantly: brackets optional, case
@@ -442,6 +448,9 @@ fn as_tag(line: &str) -> Option<(Tag, bool)> {
         "PROMOTION" | "PROMOTED" => {
             if closing { Tag::PromoClose } else { Tag::PromoOpen }
         }
+        "ATTACH" | "ATTACHMENTS" | "FILES" => {
+            if closing { Tag::AttachClose } else { Tag::AttachOpen }
+        }
         _ => return None,
     };
     Some((tag, had_bracket))
@@ -455,6 +464,8 @@ pub struct Parsed {
     pub fields: Vec<(String, String)>,
     pub body: String,
     pub promotion: Option<String>,
+    /// 附件清单块的原始内容（块内文本，不含标签行）。
+    pub attach: Option<String>,
     pub devs: Vec<Deviation>,
     pub had_header_tag: bool,
     pub body_inferred: bool,
@@ -496,6 +507,8 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
     let mut body_close: Option<usize> = None;
     let mut promo_open: Option<usize> = None;
     let mut promo_close: Option<usize> = None;
+    let mut attach_open: Option<usize> = None;
+    let mut attach_close: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
         if let Some((tag, bracketed)) = as_tag(line) {
             if !bracketed {
@@ -546,6 +559,16 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
                 Tag::PromoClose => {
                     if promo_close.is_none() {
                         promo_close = Some(i);
+                    }
+                }
+                Tag::AttachOpen => {
+                    if attach_open.is_none() {
+                        attach_open = Some(i);
+                    }
+                }
+                Tag::AttachClose => {
+                    if attach_close.is_none() {
+                        attach_close = Some(i);
                     }
                 }
             }
@@ -739,7 +762,17 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
                     action: "取到文件末尾（或晋升段之前）".into(),
                 });
             }
-            promo_open.filter(|p| *p >= bstart).unwrap_or(lines.len())
+            {
+                // 正文止于第一个尾部块：晋升段或附件清单段，谁先到谁算。
+                let a = attach_open.filter(|p| *p >= bstart);
+                let p_ = promo_open.filter(|p| *p >= bstart);
+                match (a, p_) {
+                    (Some(x), Some(y)) => x.min(y),
+                    (Some(x), None) => x,
+                    (None, Some(y)) => y,
+                    (None, None) => lines.len(),
+                }
+            }
         }
     };
     if body_open.is_none() && !lines.is_empty() {
@@ -756,6 +789,11 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
         // The promotion block is a separate section, never body.
         if let Some(p) = promo_open.filter(|p| *p >= bstart) {
             bend = p;
+        }
+        if let Some(p) = attach_open.filter(|p| *p >= bstart) {
+            if p < bend {
+                bend = p;
+            }
         }
         if bstart < lines.len() && !out.body_inferred {
             devs.push(Deviation {
@@ -807,6 +845,30 @@ pub fn parse(src: &str, lib_hint: Option<Lib>) -> Parsed {
             .join("\n");
         if !s.trim().is_empty() {
             out.promotion = Some(s);
+        }
+    }
+
+    // ---- attach block
+    //
+    // 与晋升段并列的尾部块，位置无关：两者顺序互换也能解析。
+    if let Some(ao) = attach_open {
+        let ac = match attach_close {
+            Some(c) if c >= ao => c,
+            _ => lines.len(),
+        };
+        let mut s = lines[ao + 1..ac.min(lines.len())].join("\n").trim_end().to_string();
+        if attach_close.is_none() && ao + 1 < lines.len() {
+            devs.push(Deviation {
+                rule: "T009",
+                sev: Sev::Warn,
+                line: ao + 1,
+                original: "附件段未闭合".into(),
+                action: "取到文件末尾".into(),
+            });
+        }
+        // 附件清单是 `名	字节` 的行，不 fold：文件名里可能带 ';' 或 '='
+        if !s.trim().is_empty() {
+            out.attach = Some(s);
         }
     }
 

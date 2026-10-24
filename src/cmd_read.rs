@@ -13,7 +13,11 @@ use std::path::Path;
 pub fn cmd_state(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     if !root.exists() {
-        return notfound(format!("记忆根不存在: {}", root.display()));
+        return notfound(
+            Fail::new(format!("记忆根不存在: {}", root.display()))
+                .hint("新建一个空库用 `abook init --root <路径>`；如果库在别处，把正确的根传进来（或设 ABOOK_ROOT）")
+                .render(),
+        );
     }
     let st = read_state(&root);
     if a.has("json") {
@@ -148,7 +152,7 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
             .map(|h| {
                 format!(
                     "{{\"lib\":{},\"path\":{},\"title\":{},\"tier\":{},\"score\":{},\
-\"reason\":{},\"body\":{},\"created\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
+\"reason\":{},\"body\":{},\"created\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
                     jstr(h.lib.name()),
                     jstr(&h.path),
                     jstr(&h.title),
@@ -159,6 +163,8 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
                     h.record.as_ref().map(|r| r.created()).unwrap_or(0),
                     h.bytes,
                     h.lines,
+                    h.attach_count,
+                    h.attach_bytes,
                     h.updated,
                     jstr(&crate::util::short_when(h.updated))
                 )
@@ -184,10 +190,15 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
         // time. Without it a reader cannot tell "this is how it works now" from
         // "this was how it worked a year ago".
         println!(
-            "  {}  {:>8} {:>7}  [{}] {} {}  ({} / {})",
+            "  {}  {:>8} {:>7} {:>12}  [{}] {} {}  ({} / {})",
             crate::util::short_when(h.updated),
             human_bytes(h.bytes as u64),
             format!("{}行", h.lines),
+            if h.attach_count == 0 {
+                String::new()
+            } else {
+                format!("{}件{}", h.attach_count, human_bytes(h.attach_bytes))
+            },
             h.lib.name(),
             h.title,
             h.path,
@@ -461,22 +472,28 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
         updated: i64,
         bytes: usize,
         lines: usize,
+        attach_count: usize,
+        attach_bytes: u64,
     }
     let mut index: std::collections::HashMap<String, Meta> = std::collections::HashMap::new();
     for l in [Lib::Canonical, Lib::Candidate] {
         for r in crate::rec::load_lib(&root, l) {
+            let a = crate::attach::scan(&r.path);
             let m = Meta {
                 updated: r.updated(),
                 bytes: r.raw.len(),
                 lines: r.raw.lines().count(),
+                attach_count: a.count(),
+                attach_bytes: a.bytes,
             };
             index.insert(format!("{}/{}", l.dir(), r.file_name()), m);
             index.insert(r.file_name(), m);
         }
     }
-    let agg = |b: &crate::atlas::Branch| -> (usize, i64, usize, usize) {
+    let agg = |b: &crate::atlas::Branch| -> (usize, i64, usize, usize, usize, u64) {
         let mut seen: Vec<String> = Vec::new();
         let (mut latest, mut bytes, mut lines) = (0i64, 0usize, 0usize);
+        let (mut ac, mut ab) = (0usize, 0u64);
         for p in b.paths() {
             let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
             if seen.contains(&bare) {
@@ -493,8 +510,10 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
             }
             bytes += m.bytes;
             lines += m.lines;
+            ac += m.attach_count;
+            ab += m.attach_bytes;
         }
-        (seen.len(), latest, bytes, lines)
+        (seen.len(), latest, bytes, lines, ac, ab)
     };
     for lib in libs {
         let p = root.join(lib.atlas());
@@ -535,13 +554,14 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
                         b.paths().len()
                     )
                 } else {
-                    let (n, ts, by, ln) = agg(b);
+                    let (n, ts, by, ln, ac, ab) = agg(b);
                     format!(
-                        "   {:<24} {:>4}条 {:>8} {:>7}  {}  REV={}  {}",
+                        "   {:<24} {:>4}条 {:>8} {:>7} {:>11}  {}  REV={}  {}",
                         b.name(),
                         n,
                         human_bytes(by as u64),
                         format!("{ln}行"),
+                        if ac == 0 { String::new() } else { format!("{}件{}", ac, human_bytes(ab)) },
                         crate::util::short_when(ts),
                         b.get("REVISION"),
                         truncate_chars(&b.get("KEYS"), 60)

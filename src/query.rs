@@ -56,6 +56,14 @@ pub struct Hit {
     /// gives size but not lines still leaves them guessing how far in a
     /// location is. Both are cheap to compute from text already in hand.
     pub lines: usize,
+    /// Attachment folder beside the record: count and total bytes.
+    ///
+    /// Kept separate from `bytes`/`lines` because the two halves cost different
+    /// things. The record body is paid for on every read; attachments are only
+    /// paid for when taken. Folding them into one number would hide the case
+    /// that matters -- 2 KB of prose next to 40 MB of video.
+    pub attach_count: usize,
+    pub attach_bytes: u64,
 }
 
 /// Split a query into terms: whitespace / comma, keep CJK runs intact.
@@ -320,6 +328,8 @@ pub fn recall(
         });
         if let Some((score, tier, reason)) = scored {
             let path = rel(root, &rec.path);
+            // Only hits that survived scoring pay for a directory listing.
+            let att = crate::attach::scan(&rec.path);
             let rej = precision(rec, &qs);
             let mut r2 = rec.clone();
             if !with_body {
@@ -337,6 +347,8 @@ pub fn recall(
                 updated: rec.updated(),
                 bytes: rec.raw.len(),
                 lines: rec.raw.lines().count(),
+                attach_count: att.count(),
+                attach_bytes: att.bytes,
             };
             if rej.is_some() {
                 res.rejected.push(h);
@@ -374,6 +386,7 @@ pub fn recall(
                                 continue;
                             }
                             if let Ok(rec) = Record::parse(&full, *lib) {
+                                let att = crate::attach::scan(&rec.path);
                                 let mut r2 = rec.clone();
                                 if !with_body {
                                     r2.body = String::new();
@@ -390,6 +403,8 @@ pub fn recall(
                                     updated: rec.updated(),
                                     bytes: rec.raw.len(),
                                     lines: rec.raw.lines().count(),
+                                    attach_count: att.count(),
+                                    attach_bytes: att.bytes,
                                 });
                             }
                         }

@@ -31,6 +31,7 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         fields: Vec::new(),
         body: body.trim_end().to_string(),
         promotion: None,
+        attach: None,
         raw: String::new(),
         devs: Vec::new(),
         header_inferred: false,
@@ -340,6 +341,7 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
         fields: Vec::new(),
         body: cand.body.clone(),
         promotion: None,
+        attach: None,
         raw: String::new(),
         devs: Vec::new(),
         header_inferred: false,
@@ -400,6 +402,60 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
     if back.id().is_empty() {
         return integrity("晋升写入复读校验失败");
     }
+    // 附件随晋升一起走。
+    //
+    // 晋升是"搬"不是"抄"：正文原样搬过去并保持原时间戳，附件目录也必须跟着
+    // 改名搬过去。否则晋升后正文还在、它携带的截图与日志却留在候选侧，候选
+    // 一旦清理证据就没了——一条只剩正文、丢了证据的记录，比没有这条记录更
+    // 容易误导人。
+    let mut moved_attach = String::new();
+    let cand_dirs = crate::attach::all_dirs(&cpath);
+    if !cand_dirs.is_empty() {
+        let want = crate::attach::dir_for(&path);
+        if want.exists() {
+            return blocked(format!(
+                "正式侧已存在附件目录 {}。先把两边文件核对清楚，再决定合并还是改名",
+                rel(&root, &want)
+            ));
+        }
+        let (mut moved_n, mut moved_b) = (0usize, 0u64);
+        for d in &cand_dirs {
+            if let Ok(rd) = std::fs::read_dir(d) {
+                for e in rd.flatten() {
+                    if let Ok(m) = std::fs::metadata(e.path()) {
+                        moved_n += 1;
+                        moved_b += m.len();
+                    }
+                }
+            }
+        }
+        // 第一个目录整目录改名（同设备上零拷贝），其余手建旧命名的内容并入。
+        for (i, d) in cand_dirs.iter().enumerate() {
+            if i == 0 {
+                std::fs::rename(d, &want)?;
+                continue;
+            }
+            for e in std::fs::read_dir(d)?.flatten() {
+                let from = e.path();
+                let to = want.join(e.file_name());
+                if to.exists() {
+                    return blocked(format!(
+                        "附件重名 {}：{} 与正式侧已有文件冲突，先手工处理",
+                        e.file_name().to_string_lossy(),
+                        rel(&root, &from)
+                    ));
+                }
+                std::fs::rename(&from, &to)?;
+            }
+            let _ = std::fs::remove_dir(d);
+        }
+        moved_attach = format!(
+            "附件 {} 个（{}）已随记录搬到 {}",
+            moved_n,
+            human_bytes(moved_b),
+            rel(&root, &want)
+        );
+    }
     map_record(&root, &back, &opt(a, "branch"))?;
     crate::cmd_admin::index_upsert(
         &root,
@@ -419,10 +475,15 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
     write_atomic(&cpath, &c2.render())?;
     sync_global_counts(&root)?;
     let body = format!(
-        "晋升候选 → 正式\n\n候选: {}\n正式: {}\n标题: {}",
+        "晋升候选 → 正式\n\n候选: {}\n正式: {}\n标题: {}{}",
         rel(&root, &cpath),
         rel(&root, &path),
-        back.title()
+        back.title(),
+        if moved_attach.is_empty() {
+            String::new()
+        } else {
+            format!("\n{moved_attach}")
+        }
     );
     crate::cmd_admin::write_commit(
         &root,
@@ -437,6 +498,9 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
         },
     )?;
     crate::say_line!("{}", rel(&root, &path));
+    if !moved_attach.is_empty() {
+        crate::say_line!("{moved_attach}");
+    }
     Ok(0)
 }
 

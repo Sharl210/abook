@@ -100,6 +100,14 @@ pub struct Hit {
     /// gives size but not lines still leaves them guessing how far in a
     /// location is. Both are cheap to compute from text already in hand.
     pub lines: usize,
+    /// Attachment folder beside the record: count and total bytes.
+    ///
+    /// Kept separate from `bytes`/`lines` because the two halves cost different
+    /// things. The record body is paid for on every read; attachments are only
+    /// paid for when taken. Folding them into one number would hide the case
+    /// that matters -- 2 KB of prose next to 40 MB of video.
+    pub attach_count: usize,
+    pub attach_bytes: u64,
 }
 
 // ---------------------------------------------------------------- BMH
@@ -455,6 +463,11 @@ fn snippet_for(text: &str, pos: usize, ctx: usize) -> (String, usize) {
 }
 
 fn score_record(m: &Matcher, rec: &Record, root: &Path, opts: &Opts) -> Option<Hit> {
+    // Attachments are counted here rather than in the caller because a hit may
+    // be built on either of two paths through this function, and both need the
+    // numbers. Cost is one directory listing per *surviving* hit, not per
+    // candidate: the byte prefilter has already discarded almost everything.
+    let att = crate::attach::scan(&rec.path);
     let mut best: Option<(i32, String, String, usize)> = None; // score, where, snippet, line
 
     if opts.raw_lines {
@@ -488,6 +501,8 @@ fn score_record(m: &Matcher, rec: &Record, root: &Path, opts: &Opts) -> Option<H
             updated: rec.updated(),
             bytes: rec.raw.len(),
             lines: rec.raw.lines().count(),
+            attach_count: att.count(),
+            attach_bytes: att.bytes,
         });
     }
 
@@ -530,6 +545,8 @@ fn score_record(m: &Matcher, rec: &Record, root: &Path, opts: &Opts) -> Option<H
         updated: rec.updated(),
         bytes: rec.raw.len(),
         lines: rec.raw.lines().count(),
+        attach_count: att.count(),
+        attach_bytes: att.bytes,
     })
 }
 

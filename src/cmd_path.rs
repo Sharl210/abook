@@ -24,6 +24,8 @@ struct Node {
     bytes: usize,
     lines: usize,
     updated: i64,
+    attach_count: usize,
+    attach_bytes: u64,
 }
 
 fn collect(root: &Path, lib: Lib) -> Vec<Node> {
@@ -34,9 +36,16 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
     };
     // Index every record once. Reading a branch's files per branch would stat
     // the same record as many times as it appears in a PATH.
-    let mut index: HashMap<String, (usize, usize, i64)> = HashMap::new();
+    let mut index: HashMap<String, (usize, usize, i64, usize, u64)> = HashMap::new();
     for r in crate::rec::load_lib(root, lib) {
-        let v = (r.raw.len(), r.raw.lines().count(), r.updated());
+        let a = crate::attach::scan(&r.path);
+        let v = (
+            r.raw.len(),
+            r.raw.lines().count(),
+            r.updated(),
+            a.count(),
+            a.bytes,
+        );
         index.insert(r.file_name(), v);
         index.insert(format!("{}/{}", lib.dir(), r.file_name()), v);
     }
@@ -45,19 +54,22 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
         .map(|b| {
             let mut seen: Vec<String> = Vec::new();
             let (mut bytes, mut lines, mut updated) = (0usize, 0usize, 0i64);
+            let (mut ac, mut ab) = (0usize, 0u64);
             for p in b.paths() {
                 let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
                 if seen.contains(&bare) {
                     continue;
                 }
-                let (by, ln, ts) = index
+                let (by, ln, ts, c, b2) = index
                     .get(&p)
                     .or_else(|| index.get(&bare))
                     .copied()
-                    .unwrap_or((0, 0, 0));
+                    .unwrap_or((0, 0, 0, 0, 0));
                 seen.push(bare);
                 bytes += by;
                 lines += ln;
+                ac += c;
+                ab += b2;
                 if ts > updated {
                     updated = ts;
                 }
@@ -69,6 +81,8 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
                 bytes,
                 lines,
                 updated,
+                attach_count: ac,
+                attach_bytes: ab,
             }
         })
         .collect()
@@ -139,6 +153,8 @@ pub fn cmd_path(a: &Args) -> R<i32> {
     };
     let rec = Record::parse(&path, lib)?;
     let bare = rec.file_name();
+    // 文字域与文件域各自的量：正文占上下文，附件只在真取时才占。
+    let own = crate::attach::scan(&path);
 
     let chains = chains_for(&nodes, &bare);
     if a.has("json") {
@@ -151,11 +167,13 @@ pub fn cmd_path(a: &Args) -> R<i32> {
                         let node = nodes.iter().find(|x| x.name == *n);
                         match node {
                             Some(x) => format!(
-                                "{{\"branch\":{},\"count\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
+                                "{{\"branch\":{},\"count\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
                                 jstr(&x.name),
                                 x.members.len(),
                                 x.bytes,
                                 x.lines,
+                                x.attach_count,
+                                x.attach_bytes,
                                 x.updated,
                                 jstr(&short_when(x.updated))
                             ),
@@ -169,11 +187,13 @@ pub fn cmd_path(a: &Args) -> R<i32> {
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "{{\"record\":{},\"id\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{},\"chains\":[{}]}}",
+            "{{\"record\":{},\"id\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{},\"chains\":[{}]}}",
             jstr(&bare),
             jstr(&rec.id()),
             rec.raw.len(),
             rec.raw.lines().count(),
+            own.count(),
+            own.bytes,
             rec.updated(),
             jstr(&short_when(rec.updated())),
             arr
@@ -187,10 +207,20 @@ pub fn cmd_path(a: &Args) -> R<i32> {
         rec.id()
     );
     println!(
-        "  {}  {}  {}",
+        "  {}  {}  {}  {}{}",
         human_bytes(rec.raw.len() as u64),
         format!("{}行", rec.raw.lines().count()),
-        short_when(rec.updated())
+        short_when(rec.updated()),
+        if own.is_empty() {
+            String::new()
+        } else {
+            format!("  {}件附件 共{}", own.count(), human_bytes(own.bytes))
+        },
+        if own.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", own.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default())
+        }
     );
     if chains.is_empty() {
         println!("  不属于任何分支（地图未收录这条记录）");
@@ -213,11 +243,16 @@ pub fn cmd_path(a: &Args) -> R<i32> {
             let pad = "  ".repeat(depth + 1);
             match node {
                 Some(x) => println!(
-                    "{pad}{name}  {}条  {}  {}  {}",
+                    "{pad}{name}  {}条  {}  {}  {}  {}",
                     x.members.len(),
                     human_bytes(x.bytes as u64),
                     format!("{}行", x.lines),
-                    short_when(x.updated)
+                    short_when(x.updated),
+                    if x.attach_count == 0 {
+                        String::new()
+                    } else {
+                        format!("{}件{}", x.attach_count, human_bytes(x.attach_bytes))
+                    }
                 ),
                 None => println!("{pad}{name}"),
             }
@@ -275,12 +310,17 @@ fn show_subtree(a: &Args, nodes: &[Node], start: &Node) -> R<i32> {
         let pad = "  ".repeat(*d);
         let mark = if *d == 0 { "▸" } else { "·" };
         println!(
-            "{pad}{mark} {:<28} {}条  {}  {}  {}",
+            "{pad}{mark} {:<28} {}条  {}  {}  {}  {}",
             n.name,
             n.members.len(),
             human_bytes(n.bytes as u64),
             format!("{}行", n.lines),
-            short_when(n.updated)
+            short_when(n.updated),
+            if n.attach_count == 0 {
+                String::new()
+            } else {
+                format!("{}件{}", n.attach_count, human_bytes(n.attach_bytes))
+            }
         );
     }
     println!("共 {} 个分支", out.len());

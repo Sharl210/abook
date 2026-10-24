@@ -34,6 +34,7 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
                 fields: rec.fields.clone(),
                 body: rec.body.clone(),
                 promotion: rec.promotion.clone(),
+                attach: None,
                 devs: rec.devs.clone(),
                 had_header_tag: !rec.header_inferred,
                 body_inferred: false,

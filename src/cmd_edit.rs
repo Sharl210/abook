@@ -522,6 +522,7 @@ pub fn cmd_merge(a: &Args) -> R<i32> {
         fields: Vec::new(),
         body: body.trim_end().to_string(),
         promotion: None,
+        attach: None,
         raw: String::new(),
         devs: Vec::new(),
         header_inferred: false,

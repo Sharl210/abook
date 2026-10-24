@@ -94,6 +94,12 @@ pub struct Record {
     pub fields: Vec<(String, String)>,
     pub body: String,
     pub promotion: Option<String>,
+    /// 附件清单块（`[ATTACH]`）的内容，一份行式清单：`名字<TAB>字节`。
+    ///
+    /// 这份清单是**记录的一部分**，不是缓存：它随记录一起被写、被搬、被读，
+    /// 因此记录自己就能说清"我带了哪些附件"。真正的权威仍是磁盘上的目录
+    /// （见 `attach::verify`），清单是索引与人类可读的目录页。
+    pub attach: Option<String>,
     pub raw: String,
     /// Every deviation the tolerant parser had to absorb for this file.
     /// Empty means the file was in canonical form.
@@ -125,6 +131,7 @@ pub struct Orig {
     pub fields: Vec<(String, String)>,
     pub body: String,
     pub promo: Option<String>,
+    pub attach: Option<String>,
 }
 
 /// Collapse every run of whitespace (including newlines) into a single space so
@@ -260,6 +267,7 @@ impl Record {
             fields: parsed.fields.clone(),
             body: parsed.body.clone(),
             promotion: parsed.promotion.clone(),
+            attach: parsed.attach.clone(),
             raw: raw.to_string(),
             devs: parsed.devs.clone(),
             header_inferred,
@@ -267,6 +275,7 @@ impl Record {
                 fields: parsed.fields.clone(),
                 body: parsed.body.clone(),
                 promo: parsed.promotion.clone(),
+                attach: parsed.attach.clone(),
             }),
             // Read the real file. `parse_str` is also reached from tests with a
             // path that has no file behind it, so a failure here is normal and
@@ -331,11 +340,13 @@ impl Record {
                     fields: &b.fields,
                     body: &b.body,
                     promo: b.promo.as_deref(),
+                    attach: b.attach.as_deref(),
                 },
                 self.lib,
                 &self.fields,
                 &self.body,
                 self.promotion.as_deref(),
+                self.attach.as_deref(),
             ) {
                 return s;
             }
@@ -353,6 +364,7 @@ impl Record {
             fields: self.fields.clone(),
             body: self.body.clone(),
             promo: self.promotion.clone(),
+            attach: self.attach.clone(),
         });
     }
 
@@ -392,6 +404,14 @@ impl Record {
             s.push_str(p.trim_matches('\n'));
             s.push('\n');
             s.push_str("[/PROMOTION]\n");
+        }
+        // 附件清单排在最后：它是"我带了什么"的目录页，位置固定在文件末尾，
+        // 读的人往下翻到底就能看到全貌，不必先去列目录。
+        if let Some(a) = &self.attach {
+            s.push_str("[ATTACH]\n");
+            s.push_str(a.trim_matches('\n'));
+            s.push('\n');
+            s.push_str("[/ATTACH]\n");
         }
         s
     }
@@ -463,6 +483,7 @@ impl Record {
             fields: self.fields.clone(),
             body: self.body.clone(),
             promotion: self.promotion.clone(),
+            attach: None,
             devs: self.devs.clone(),
             had_header_tag: !self.header_inferred,
             body_inferred: false,
@@ -584,7 +605,11 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
             )));
         }
     }
-    notfound(format!("未找到记录: {sel}"))
+    notfound(Fail::new(format!("未找到记录: {sel}")).hint(
+        "三种可能：名字写错、该记录已被删除、或它属于另一个库。\
+         用 `abook search <关键词>` 或 `abook list --q <词>` 找出真实名字；\
+         删掉的记录用 `abook list --status DELETED` 能看到",
+    ).render())
 }
 
 /// Load every record of a library, sorted by filename.

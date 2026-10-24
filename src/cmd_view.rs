@@ -539,14 +539,19 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
         updated: i64,
         bytes: usize,
         lines: usize,
+        attach_count: usize,
+        attach_bytes: u64,
     }
     let mut index: std::collections::HashMap<String, Meta> = std::collections::HashMap::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         for r in load_lib(&root, lib) {
+            let a = crate::attach::scan(&r.path);
             let m = Meta {
                 updated: r.updated(),
                 bytes: r.raw.len(),
                 lines: r.raw.lines().count(),
+                attach_count: a.count(),
+                attach_bytes: a.bytes,
             };
             index.insert(format!("{}/{}", lib.dir(), r.file_name()), m);
             index.insert(r.file_name(), m);
@@ -560,7 +565,7 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
         }
         let at = crate::atlas::Atlas::load(&ap)?;
         // (name, member_count, status, newest, bytes, lines)
-        let mut rows: Vec<(String, usize, String, i64, usize, usize)> = at
+        let mut rows: Vec<(String, usize, String, i64, usize, usize, usize, u64)> = at
             .branches
             .iter()
             .map(|b| {
@@ -572,6 +577,7 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 let mut latest = 0i64;
                 let mut bytes = 0usize;
                 let mut lines = 0usize;
+                let (mut attach_count, mut attach_bytes) = (0usize, 0u64);
                 for p in b.paths() {
                     let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
                     if seen.contains(&bare) {
@@ -590,8 +596,10 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                     }
                     bytes += m.bytes;
                     lines += m.lines;
+                    attach_count += m.attach_count;
+                    attach_bytes += m.attach_bytes;
                 }
-                (b.name(), seen.len(), b.get("STATUS"), latest, bytes, lines)
+                (b.name(), seen.len(), b.get("STATUS"), latest, bytes, lines, attach_count, attach_bytes)
             })
             .collect();
         rows.sort_by(|x, y| y.1.cmp(&x.1));
@@ -623,9 +631,9 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 .iter()
                 .skip(pg.start())
                 .take(pg.per.min(rows.len()))
-                .map(|(name, n, st, ts, by, ln)| {
+                .map(|(name, n, st, ts, by, ln, ac, ab)| {
                     format!(
-                        "{{\"branch\":{},\"count\":{n},\"status\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                        "{{\"branch\":{},\"count\":{n},\"status\":{},\"bytes\":{by},\"lines\":{ln},\"attach_count\":{ac},\"attach_bytes\":{ab},\"updated\":{ts},\"when\":{}}}",
                         jstr(name),
                         jstr(st),
                         jstr(&crate::util::short_when(*ts))
@@ -653,8 +661,16 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             // No hierarchy declared: print the flat list exactly as before.
             // The tree is an addition, not a replacement -- an existing library
             // with no PARENT fields must read the same way it always did.
-            for (name, n, st, ts, by, ln) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-                println!("  {name:<28} {}", stat(*n, *by, *ln, st, *ts));
+            for (name, n, st, ts, by, ln, ac, ab) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+                println!(
+                    "  {name:<28} {} {}",
+                    stat(*n, *by, *ln, st, *ts),
+                    if *ac == 0 {
+                        String::new()
+                    } else {
+                        format!("{}件{}", ac, human_bytes(*ab))
+                    }
+                );
             }
         } else {
             // Depth-first walk. Children are ordered by size so the biggest
@@ -664,16 +680,21 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 name: &str,
                 depth: usize,
                 parents: &std::collections::HashMap<String, String>,
-                rows: &[(String, usize, String, i64, usize, usize)],
+                rows: &[(String, usize, String, i64, usize, usize, usize, u64)],
                 out: &mut Vec<String>,
             ) {
-                if let Some((_, n, st, ts, by, ln)) = rows.iter().find(|r| r.0 == name) {
+                if let Some((_, n, st, ts, by, ln, ac, ab)) = rows.iter().find(|r| r.0 == name) {
                     let pad = "  ".repeat(depth);
                     let mark = if depth == 0 { "▸" } else { "·" };
                     out.push(format!(
-                        "{pad}{mark} {name:<28} {n:>4}条 {:>8} {:>7}  {st:<8} {}",
+                        "{pad}{mark} {name:<28} {n:>4}条 {:>8} {:>7}  {}  {st:<8} {}",
                         human_bytes(*by as u64),
                         format!("{ln}行"),
+                        if *ac == 0 {
+                            "        ".to_string()
+                        } else {
+                            format!("{:>8}", format!("{}件{}", ac, human_bytes(*ab)))
+                        },
                         crate::util::short_when(*ts)
                     ));
                 }
@@ -811,7 +832,7 @@ pub fn cmd_search(a: &Args) -> R<i32> {
             .take(pg.per.min(hits.len()))
             .map(|h| {
                 format!(
-                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
+                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
                     jstr(&h.path),
                     h.score,
                     jstr(&h.where_),
@@ -820,6 +841,8 @@ pub fn cmd_search(a: &Args) -> R<i32> {
                     jstr(&h.snippet),
                     h.bytes,
                     h.lines,
+                    h.attach_count,
+                    h.attach_bytes,
                     h.updated,
                     jstr(&crate::util::short_when(h.updated))
                 )
@@ -835,7 +858,12 @@ pub fn cmd_search(a: &Args) -> R<i32> {
     }
     for h in hits.iter().skip(pg.start()).take(pg.per.min(hits.len())) {
         // Ranked by score, as asked; the date rides along for placement in time.
-        println!("{:>4}  {:>8}  {:>7}  {}  {}  [{}] {}", h.score, human_bytes(h.bytes as u64), format!("{}行", h.lines), crate::util::short_when(h.updated), h.path, h.where_, truncate_chars(&h.title, 60));
+        let att = if h.attach_count == 0 {
+            String::new()
+        } else {
+            format!("{}件{}", h.attach_count, human_bytes(h.attach_bytes))
+        };
+        println!("{:>4}  {:>8}  {:>7} {:>12}  {}  {}  [{}] {}", h.score, human_bytes(h.bytes as u64), format!("{}行", h.lines), att, crate::util::short_when(h.updated), h.path, h.where_, truncate_chars(&h.title, 60));
         if !h.snippet.is_empty() {
             println!("       行{}  {}", h.line, h.snippet);
         }
@@ -1029,6 +1057,22 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             .cmp(&x.updated())
             .then_with(|| y.file_name().cmp(&x.file_name()))
     });
+    // Attachment totals come from one index built up front.
+    //
+    // Scanning a directory per record inside this loop would mean 500 directory
+    // walks for a 500-record listing, and the answer would still be a snapshot
+    // per row rather than one consistent view.
+    let mut att: std::collections::HashMap<String, crate::attach::Files> =
+        std::collections::HashMap::new();
+    for r in &rows {
+        let f = crate::attach::scan(&r.path);
+        if !f.is_empty() {
+            att.insert(r.file_name(), f);
+        }
+    }
+    let att_of = |rec: &Record| -> crate::attach::Files {
+        att.get(&rec.file_name()).cloned().unwrap_or_default()
+    };
     let pg = Page::from_args(a, rows.len());
     if a.has("json") {
         // A caller that asked for JSON and got a table would silently parse
@@ -1061,10 +1105,18 @@ pub fn cmd_list(a: &Args) -> R<i32> {
     }
     for rec in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
         println!(
-            "{:>8}  {:>7}  {}  {}  [{}] {}",
+            "{:>8}  {:>7} {:>4}  {:>12}  {}  [{}] {}",
             crate::util::short_when(rec.updated()),
             human_bytes(rec.raw.len() as u64),
             format!("{}行", rec.raw.lines().count()),
+            {
+                let f = att_of(rec);
+                if f.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}件{}", f.count(), human_bytes(f.bytes))
+                }
+            },
             rel(&root, &rec.path),
             rec.lib.name(),
             truncate_chars(&rec.title(), 70)

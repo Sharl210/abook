@@ -44,6 +44,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("review", "page,per-page,show", "json", "晋升记录", "--limit 2"),
     ("tree", "lib,page,per-page,depth", "json,flat,no-tree", "分支树（有 PARENT 时按层级缩进）", "--flat"),
     ("path", "", "json", "反查记录所属分支链；给分支名则向下展开子树", "@任一条记录ID 或 分支名"),
+    ("attach", "VAULT_SUB", "json,force,dry-run,move,all", "附件（文件域）：list/add/get/rm/path/check", "list <记录>"),
     ("stats", "lib", "json", "统计", ""),
     ("skill", "root,title,body,body-file,reason", "approve,force,dry-run,json", "Skill 约定与候选管理；子命令见 skill guide", "guide"),
     ("spec", "root", "json", "取回被抽离的规范全文；不带名字列目录", "plan"),
