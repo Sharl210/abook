@@ -90,6 +90,12 @@ pub struct Item {
     /// record's own path in a listing.
     pub name: String,
     pub bytes: u64,
+    /// 内容指纹，用来发现"字节数没变但内容被改了"。
+    ///
+    /// 只比字节数是不可靠的：把附件里的 `AAAA` 改成 `BBBB`，大小一字不差，
+    /// 校验报"0 漂移"，而文件其实已经换了个样。模型完全可能绕过工具直接编辑
+    /// 纯文本附件——路径模式必然如此——所以必须比内容，不能只比长度。
+    pub hash: u64,
 }
 
 /// Everything the file domain of one record contains.
@@ -147,14 +153,16 @@ pub fn scan(rec_path: &Path) -> Files {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            out.bytes += meta.len();
+            let len = meta.len();
+            out.bytes += len;
             out.items.push(Item {
                 name: p
                     .strip_prefix(&base)
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .replace('\\', "/"),
-                bytes: meta.len(),
+                bytes: len,
+                hash: fingerprint(&p, len),
             });
         }
     }
@@ -259,6 +267,8 @@ pub fn cmd_attach(a: &Args) -> R<i32> {
         "rm" | "remove" | "delete" => remove(a),
         "path" => path(a),
         "sync" => sync(a),
+        "edit" => edit(a),
+        "commit" => commit(a),
         "check" | "orphans" => check(a),
         "refs" => refs(a),
         "guide" | "help" => {
@@ -383,6 +393,11 @@ fn list(a: &Args) -> R<i32> {
     for i in &f.items {
         crate::say_line!("  {:>9}  {}", human_bytes(i.bytes), i.name);
     }
+    // 接触即检查：路径模式下工具看不见改动发生的那一刻，只能在下一次接触时
+    // 发现。所以每次 list 都把漂移说出来，别让它躺着。
+    if let Some(n) = drift_note(&path) {
+        crate::say_line!("{n}");
+    }
     Ok(0)
 }
 
@@ -469,8 +484,12 @@ fn get(a: &Args) -> R<i32> {
             crate::say_line!("{}", full.display());
             crate::say_line!(
                 "只操作这一个文件；同目录其他文件没给你路径就不要动。\
-                 改完用 `abook attach sync <记录>` 让清单与磁盘重新对齐",
+                 改完用 `abook attach commit <记录> <附件名>` 确认改动，\
+                 或 `attach sync <记录>` 重新对齐清单"
             );
+            if let Some(n) = drift_note(&path) {
+                crate::say_line!("{n}");
+            }
             Ok(0)
         }
         None => notfound(format!(
@@ -766,7 +785,15 @@ fn is_cross_device(e: &std::io::Error) -> bool {
 pub fn render_list(items: &[Item]) -> String {
     let mut out = String::new();
     for (i, it) in items.iter().enumerate() {
-        out.push_str(&format!("{}\t{}\t{}\n", i + 1, it.name, it.bytes));
+        // 四列：序号 / 名字 / 字节 / 指纹。指纹用 16 位十六进制，宽度固定，
+        // 清单因此仍然对齐可读。
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{:016x}\n",
+            i + 1,
+            it.name,
+            it.bytes,
+            it.hash
+        ));
     }
     out.trim_end().to_string()
 }
@@ -934,11 +961,16 @@ pub struct Mismatch {
     pub extra: Vec<String>,
     /// 两边都有但字节数不同
     pub resized: Vec<String>,
+    /// 字节数相同但内容变了（纯文本附件按路径直接编辑后的典型结果）
+    pub edited: Vec<String>,
 }
 
 impl Mismatch {
     pub fn is_empty(&self) -> bool {
-        self.missing.is_empty() && self.extra.is_empty() && self.resized.is_empty()
+        self.missing.is_empty()
+            && self.extra.is_empty()
+            && self.resized.is_empty()
+            && self.edited.is_empty()
     }
     pub fn describe(&self) -> String {
         let mut v: Vec<String> = Vec::new();
@@ -951,34 +983,59 @@ impl Mismatch {
         if !self.resized.is_empty() {
             v.push(format!("字节数变了 {} 个（{}）", self.resized.len(), self.resized.join("、")));
         }
+        if !self.edited.is_empty() {
+            v.push(format!(
+                "内容被改过 {} 个（{}）——字节数没变，是与清单里的指纹对不上",
+                self.edited.len(),
+                self.edited.join("、")
+            ));
+        }
         v.join("；")
     }
 }
 
 /// 解析清单块成 `(名, 字节)`。
-fn parse_list(s: &str) -> Vec<(String, u64)> {
+/// 解析清单块。
+///
+/// 兼容两种行格式，因为旧库里的清单是三列，新写的是四列：
+///
+///   1<TAB>名字<TAB>字节                    ← v1.3.1 及更早
+///   1<TAB>名字<TAB>字节<TAB>指纹(16 位 hex) ← 现在
+///
+/// 指纹缺失记为 0，`verify` 遇到 0 就退回按字节数比对——老库不会因为升级而
+/// 突然报一整批"内容变了"，而它们第一次被 `sync` 时就自动补上指纹。
+fn parse_list(s: &str) -> Vec<(String, u64, u64)> {
     let mut out = Vec::new();
     for line in s.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
+        let mut parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
             continue;
         }
-        // 名字在中间，字节在末尾：名字自己可能含 TAB（极罕见但存在），所以
-        // 取"最后一个字段是字节、其余中间全部是名字"的解析方式。
+        // 判据是"最后一段像不像指纹"，不是"一共有几段"。
+        //
+        // 初版按段数分支：4 段就取第 4 段当指纹、其余当字节。三列老格式于是
+        // 走进了 `parts[..2]`，把名字当成字节去 parse，失败后整行被丢弃——
+        // 一条老记录的全部附件看起来都"磁盘有清单无"。用形状判断才对：指纹
+        // 是定宽 16 位十六进制，字节数是十进制数字，两者不会混淆。
+        let hash = match parts.last() {
+            Some(t) if t.len() == 16 && t.chars().all(|c| c.is_ascii_hexdigit()) => {
+                let v = u64::from_str_radix(t, 16).unwrap_or(0);
+                parts.pop();
+                v
+            }
+            _ => 0,
+        };
         let bytes = match parts.last().and_then(|x| x.parse::<u64>().ok()) {
             Some(b) => b,
             None => continue,
         };
-        let name = if parts.len() == 3 {
-            parts[1].to_string()
-        } else {
-            parts[1..parts.len() - 1].join("\t")
-        };
-        out.push((name, bytes));
+        // 剩下 parts[1..len-1] 全是名字：名字自己可能含 TAB。
+        let name = parts[1..parts.len() - 1].join("\t");
+        out.push((name, bytes, hash));
     }
     out
 }
@@ -988,6 +1045,7 @@ pub fn verify(rec_path: &Path) -> Mismatch {
         missing: Vec::new(),
         extra: Vec::new(),
         resized: Vec::new(),
+        edited: Vec::new(),
     };
     let listed = match crate::rec::Record::parse(rec_path, crate::rec::Lib::Candidate)
         .or_else(|_| crate::rec::Record::parse(rec_path, crate::rec::Lib::Canonical))
@@ -996,12 +1054,22 @@ pub fn verify(rec_path: &Path) -> Mismatch {
         Err(_) => Vec::new(),
     };
     let disk = scan(rec_path);
-    let listed_names: Vec<&String> = listed.iter().map(|(n, _)| n).collect();
-    for (name, bytes) in &listed {
+    let listed_names: Vec<&String> = listed.iter().map(|(n, _, _)| n).collect();
+    for (name, bytes, hash) in &listed {
         match disk.items.iter().find(|i| &i.name == name) {
             None => m.missing.push(name.clone()),
-            Some(it) if it.bytes != *bytes => m.resized.push(name.clone()),
-            _ => {}
+            Some(it) => {
+                if it.bytes != *bytes {
+                    m.resized.push(name.clone());
+                } else if *hash != 0 && it.hash != *hash {
+                    // 字节数相同、指纹不同 = 内容被改过。
+                    //
+                    // 这一支是纯文本附件最常见的改动方式：模型按路径打开、
+                    // 改几个字、存回去，长度一点没变。只比字节数会报"一切正常"，
+                    // 而那正是最危险的情况——清单指着的内容已经不在了。
+                    m.edited.push(name.clone());
+                }
+            }
         }
     }
     for it in &disk.items {
@@ -1131,4 +1199,159 @@ fn refs(a: &Args) -> R<i32> {
         }
     }
     Ok(0)
+}
+
+
+/// 内容指纹：FNV-1a 64。
+///
+/// 选它是因为零依赖、顺序读一遍就能算完，且不需要抗碰撞——这里的对手不是
+/// 攻击者，是"改了文件而没通知工具"这种日常意外。
+///
+/// 大文件抽样：整份算下来在 50 MB 视频上要读完整个文件，而校验会在每次列目录
+/// 时跑。超过 `FULL_HASH_MAX` 就取"头 64KB + 尾 64KB + 长度"，足以发现一次
+/// 真实编辑——没人会只改一个 50 MB 文件的第 20 MB 处还指望不被察觉，而那种
+/// 情况本来就该走重新 `attach add`。
+const FULL_HASH_MAX: u64 = 4 * 1024 * 1024;
+const SAMPLE: usize = 64 * 1024;
+
+fn fingerprint(path: &Path, len: u64) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        // 打不开就返回 0：调用方看到 0 会当作"没有指纹"，退回按字节数比对，
+        // 而不是误报成一整批附件都改了。
+        Err(_) => return 0,
+    };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |bytes: &[u8], h: &mut u64| {
+        for b in bytes {
+            *h ^= *b as u64;
+            *h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+    };
+    if len <= FULL_HASH_MAX {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(k) => mix(&buf[..k], &mut h),
+                Err(_) => return 0,
+            }
+        }
+    } else {
+        let mut head = vec![0u8; SAMPLE];
+        if let Ok(k) = f.read(&mut head) {
+            mix(&head[..k], &mut h);
+        }
+        if f.seek(SeekFrom::Start(len.saturating_sub(SAMPLE as u64))).is_ok() {
+            let mut tail = vec![0u8; SAMPLE];
+            if let Ok(k) = f.read(&mut tail) {
+                mix(&tail[..k], &mut h);
+            }
+        }
+    }
+    // 长度也进指纹：抽样两段相同时，长度不同必须区分开
+    mix(&len.to_le_bytes(), &mut h);
+    h
+}
+
+
+// ---------------------------------------------------------------- 编辑协议
+
+/// `attach edit` — 打开一份附件的编辑窗口。
+///
+/// 为什么要两步（`edit` → 改 → `commit`）：
+///
+/// 附件正文在文件系统里，模型通过路径去改是**唯一现实的做法**——工具把内容
+/// 搬进命令输出再搬回去，既慢又会在二进制上出错。但"给了路径"就意味着工具
+/// 在文件被改的那一刻**看不见**：没人通知它。
+///
+/// 两步协议把不可见变成可核对：
+///
+///   1. `attach edit` 记下当前指纹（只在输出里给出，不落盘）
+///   2. 模型按路径去改
+///   3. `attach commit` 比对指纹，确认真的变了，才回写清单并刷新 `UPDATED`
+///
+/// 模型漏了第 3 步也不会丢数据——清单与磁盘的差异由指纹表记录，
+/// `attach sync` / 下次 `attach list` 都会把它报出来。**协议是让人少犯错，
+/// 不是让人犯错就丢数据。**
+fn edit(a: &Args) -> R<i32> {
+    let (path, rec) = need_record(a)?;
+    let want = a.need_pos(2, "附件名")?;
+    let f = scan(&path);
+    let it = match f
+        .items
+        .iter()
+        .find(|i| i.name == want || i.name.ends_with(&format!("/{want}")))
+    {
+        Some(i) => i.clone(),
+        None => return notfound(format!("{} 没有附件 {want}", rec.file_name())),
+    };
+    let base = path.parent().unwrap_or(Path::new("."));
+    let full = base.join(&it.name);
+    crate::say_line!("{}", full.display());
+    crate::say_line!(
+        "改之前指纹 {:016x}（{}，{}行）。改完执行：abook attach commit {} {}",
+        it.hash,
+        human_bytes(it.bytes),
+        std::fs::read_to_string(&full).map(|t| t.lines().count()).unwrap_or(0),
+        rec.id(),
+        want
+    );
+    crate::say_line!(
+        "只操作这一个文件；同目录其他文件没给你路径就不要动。跳过 commit 不会丢数据，\
+         但清单会与磁盘不一致，下次接触这条记录时会被报出来"
+    );
+    Ok(0)
+}
+
+/// `attach commit` — 确认编辑完成，回写清单并刷新 `UPDATED`。
+///
+/// 只接受"内容确实变了"的情况：没变就直说没变，不制造一条空变更记录。
+fn commit(a: &Args) -> R<i32> {
+    let (path, rec) = need_record(a)?;
+    let want = a.need_pos(2, "附件名")?;
+    let f = scan(&path);
+    let it = match f
+        .items
+        .iter()
+        .find(|i| i.name == want || i.name.ends_with(&format!("/{want}")))
+    {
+        Some(i) => i.clone(),
+        None => return notfound(format!("{} 没有附件 {want}", rec.file_name())),
+    };
+    let m = verify(&path);
+    let touched = m.edited.iter().any(|n| n == &it.name)
+        || m.resized.iter().any(|n| n == &it.name)
+        || m.extra.iter().any(|n| n == &it.name);
+    if !touched {
+        crate::say_line!(
+            "{} 内容没变（指纹 {:016x} 与清单一致），没有要同步的改动",
+            it.name,
+            it.hash
+        );
+        return Ok(0);
+    }
+    commit_manifest(&path)?;
+    crate::say_line!(
+        "已确认 {} 的改动：{}（{}），清单已回写，条目 UPDATED 已刷新",
+        rec.file_name(),
+        it.name,
+        human_bytes(it.bytes)
+    );
+    Ok(0)
+}
+
+/// 记录接触时的漂移提示（供 list/get/show 等顺带调用）。
+///
+/// 这是"什么时候发现"的答案：**不是改的那一刻，是下一次任何命令接触这条记录
+/// 的时候**。路径模式没有别的选择——文件系统不会主动通知。所以把检测放在每次
+/// 接触上，让"漂移存在过但没人知道"这个窗口尽量短。
+pub fn drift_note(rec_path: &Path) -> Option<String> {
+    let m = verify(rec_path);
+    if m.is_empty() {
+        None
+    } else {
+        Some(format!("（附件有改动未同步：{}）", m.describe()))
+    }
 }
