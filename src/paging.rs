@@ -86,28 +86,134 @@ impl Page {
     }
 }
 
-/// Split a long text into `per`-line pages and return the requested page.
+/// Default preview budget for one record, in bytes.
+///
+/// A caller reading a record has to decide whether to read all of it, and the
+/// only way to decide is to know how big it is. Without a budget the choice is
+/// between "read everything" (which blows up on a long record) and "give up"
+/// (which loses the tail). A byte budget makes the first page cheap and the
+/// remainder discoverable.
+pub const PREVIEW_KB: usize = 30;
+
+/// Split a long text into byte-budgeted pages and return the requested page.
+///
+/// Paging by bytes rather than by lines because the cost being controlled is
+/// context, and context is measured in bytes. Ten lines of a dense record and
+/// ten lines of a sparse one differ by an order of magnitude, so a line budget
+/// is a budget that cannot be honoured.
+///
+/// The boundary is moved to a line break at or before the budget, so a page
+/// never ends mid-character and never splits a line in half. That correction
+/// means a page can come back slightly under budget; it never comes back over.
 pub fn text_page(text: &str, a: &Args) -> (String, String) {
-    let lines: Vec<&str> = text.lines().collect();
-    let p = Page::from_args(a, lines.len());
-    if !p.sliced() {
+    let total_bytes = text.len();
+    let total_lines = text.lines().count();
+
+    // `--all` asks for the whole thing. It exists so "show me everything" has a
+    // spelling: without it a caller who needs the full record has to guess a
+    // budget large enough, and guessing is how tails get silently dropped.
+    if a.has("all") || a.has("full") || a.has("whole") {
         return (text.to_string(), String::new());
     }
-    let body = lines[p.start()..p.end()].join("\n");
-    let footer = format!(
-        "第 {}/{} 页  行 {}-{}  共 {} 行{}",
-        p.page,
-        p.pages,
-        p.start() + 1,
-        p.end(),
-        p.total,
-        if p.page < p.pages {
-            format!("  （下一页 --page {}）", p.page + 1)
-        } else {
-            String::new()
+
+    // An explicit per-page count keeps the old line-paging behaviour, so a
+    // caller who already reasons in lines is not forced to convert.
+    if a.num("per-page").or_else(|| a.num("per")).is_some() {
+        let lines: Vec<&str> = text.lines().collect();
+        let p = Page::from_args(a, lines.len());
+        if !p.sliced() {
+            return (text.to_string(), String::new());
         }
+        let body = lines[p.start()..p.end()].join("\n");
+        let footer = format!(
+            "第 {}/{} 页  行 {}-{}  共 {} 行  全文 {}  行分页；下一段 {}",
+            p.page,
+            p.pages,
+            p.start() + 1,
+            p.end(),
+            p.total,
+            crate::util::human_bytes(total_bytes as u64),
+            if p.page < p.pages { format!("--page {}", p.page + 1) } else { "已到末尾".into() }
+        );
+        return (body, footer);
+    }
+
+    let kb: u64 = a.num("kb").or_else(|| a.num("size")).unwrap_or(PREVIEW_KB as u64);
+    let budget = if kb <= 0 { PREVIEW_KB } else { (kb as usize).saturating_mul(1024) };
+
+    // Split the text into page-sized chunks at line boundaries.
+    let mut pages: Vec<(usize, usize)> = Vec::new(); // (byte_start, byte_end)
+    let mut start = 0usize;
+    while start < total_bytes {
+        let mut end = (start + budget).min(total_bytes);
+        // Align before slicing, not after: `text[start..end]` panics on a
+        // non-boundary, so the very first reach for the chunk has to be safe.
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < total_bytes {
+            // Pull the cut back to the last newline at or before the budget, so
+            // a page is always a whole number of lines. Falling back to the hard
+            // cut only when the whole page is a single line longer than the
+            // budget, where honouring the line boundary would mean emitting
+            // nothing at all.
+            match text[start..end].rfind('\n') {
+                Some(rel) => end = start + rel + 1,
+                None => {}
+            }
+            if end == start {
+                end = (start + budget).min(total_bytes);
+            }
+            // A byte budget lands inside a multi-byte character as often as not
+            // in CJK text, and slicing there panics. Pull back to the nearest
+            // character boundary; the page comes out a byte or two under budget,
+            // which is the whole point of moving the cut to a safe place.
+            while end > start && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                // A single character wider than the entire budget. Emit it
+                // anyway: refusing would loop forever.
+                end = (start + budget).min(total_bytes);
+                while end < total_bytes && !text.is_char_boundary(end) {
+                    end += 1;
+                }
+            }
+        }
+        pages.push((start, end));
+        start = end;
+    }
+    if pages.len() <= 1 {
+        return (text.to_string(), String::new());
+    }
+
+    let page = (a.num("page").unwrap_or(1).max(1) as usize).min(pages.len());
+    let (bs, be) = pages[page - 1];
+    let chunk = &text[bs..be];
+
+    // Line number of this chunk's first line, so a caller can jump straight to
+    // a location with a line-addressed tool instead of re-reading.
+    let first_line = text[..bs].matches('\n').count() + 1;
+    let last_line = first_line + chunk.lines().count().saturating_sub(1);
+
+    let mut footer = format!(
+        "第 {}/{} 页  行 {}-{}  本页 {}  全文 {} {}  {} 行",
+        page,
+        pages.len(),
+        first_line,
+        last_line,
+        crate::util::human_bytes(chunk.len() as u64),
+        crate::util::human_bytes(total_bytes as u64),
+        total_bytes,
+        total_lines
     );
-    (body, footer)
+    footer.push_str(&if page < pages.len() {
+        format!("  下一页 --page {}", page + 1)
+    } else {
+        "  （已到末尾）".to_string()
+    });
+    footer.push_str("  全量 --all  改预算 --kb <KB>");
+    (chunk.to_string(), footer)
 }
 
 /// Slice a list of already-rendered rows and tell the caller whether a footer

@@ -148,14 +148,19 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
             .map(|h| {
                 format!(
                     "{{\"lib\":{},\"path\":{},\"title\":{},\"tier\":{},\"score\":{},\
-\"reason\":{},\"body\":{}}}",
+\"reason\":{},\"body\":{},\"created\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
                     jstr(h.lib.name()),
                     jstr(&h.path),
                     jstr(&h.title),
                     jstr(h.tier.label()),
                     h.score,
                     jstr(&h.reason),
-                    jstr(&h.record.as_ref().map(|r| r.body.clone()).unwrap_or_default())
+                    jstr(&h.record.as_ref().map(|r| r.body.clone()).unwrap_or_default()),
+                    h.record.as_ref().map(|r| r.created()).unwrap_or(0),
+                    h.bytes,
+                    h.lines,
+                    h.updated,
+                    jstr(&crate::util::short_when(h.updated))
                 )
             })
             .collect::<Vec<_>>()
@@ -175,8 +180,14 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
         println!("  无命中。");
     }
     for h in &res.hits {
+        // Score order stays; the date rides along so a hit can be placed in
+        // time. Without it a reader cannot tell "this is how it works now" from
+        // "this was how it worked a year ago".
         println!(
-            "  [{}] {} {}  ({} / {})",
+            "  {}  {:>8} {:>7}  [{}] {} {}  ({} / {})",
+            crate::util::short_when(h.updated),
+            human_bytes(h.bytes as u64),
+            format!("{}行", h.lines),
             h.lib.name(),
             h.title,
             h.path,
@@ -217,10 +228,11 @@ pub fn cmd_show(a: &Args) -> R<i32> {
     if a.cmd == "cat" {
         if a.has("json") {
             println!(
-                "{{\"path\":{},\"lib\":{},\"body\":{}}}",
+                "{{\"path\":{},\"lib\":{},\"body\":{},\"updated\":{}}}",
                 jstr(&rel(&root, &path)),
                 jstr(lib.name()),
-                jstr(&rec.body)
+                jstr(&rec.body),
+                rec.updated()
             );
         } else {
             print!("{}", rec.body);
@@ -232,7 +244,7 @@ pub fn cmd_show(a: &Args) -> R<i32> {
     }
     if a.has("json") {
         println!(
-            "{{\"path\":{},\"lib\":{},\"fields\":{{{}}},\"body\":{},\"deviations\":{}}}",
+            "{{\"path\":{},\"lib\":{},\"fields\":{{{}}},\"body\":{},\"deviations\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
             jstr(&rel(&root, &path)),
             jstr(lib.name()),
             rec.fields
@@ -241,7 +253,10 @@ pub fn cmd_show(a: &Args) -> R<i32> {
                 .collect::<Vec<_>>()
                 .join(","),
             jstr(&rec.body),
-            rec.devs.len()
+            rec.devs.len(),
+            rec.created(),
+            rec.updated(),
+            jstr(&crate::util::short_when(rec.updated()))
         );
         return Ok(0);
     }
@@ -287,6 +302,14 @@ pub fn cmd_show(a: &Args) -> R<i32> {
     }
 
     println!("{}  [{}]", rel(&root, &path), lib.name());
+    // Rendered here rather than read out of the header, so records written
+    // before `UPDATED` existed still show a date instead of nothing. The
+    // fallback chain lives in `Record::updated`.
+    println!(
+        "  时间  {}（改动）  {}（建立）",
+        crate::util::short_when(rec.updated()),
+        crate::util::short_when(rec.created())
+    );
     for (k, v) in &rec.fields {
         let vv = if v.chars().count() > 200 && !a.has("verbose") {
             truncate_chars(v, 200)
@@ -300,11 +323,13 @@ pub fn cmd_show(a: &Args) -> R<i32> {
     // said, because the copy that actually honoured paging (`cmd_view::
     // cmd_show`) was never wired into the dispatch table. The two had drifted
     // apart; this is the surviving one, now carrying the paging.
-    let (body, footer) = if a.has("page") || a.has("per-page") {
-        crate::paging::text_page(&rec.body, a)
-    } else {
-        (rec.body.clone(), String::new())
-    };
+    // Always run the budget check, not only when `--page` was passed.
+    //
+    // Requiring a flag meant the default path printed the whole body, so a
+    // 120 KB record came back in full unless the caller already knew it was
+    // long -- and a caller cannot know that before reading it. The budget is
+    // the default; the flags only override it.
+    let (body, footer) = crate::paging::text_page(&rec.body, a);
     println!("{body}");
     if !footer.is_empty() {
         println!("{footer}");
@@ -428,6 +453,49 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
         println!("[{}]", out.join(","));
         return Ok(0);
     }
+    // Same index `tree` builds: one pass over the library, then per-branch sums.
+    // `atlas` and `tree` answering the same question with different numbers
+    // would be worse than either answering it alone.
+    #[derive(Clone, Copy, Default)]
+    struct Meta {
+        updated: i64,
+        bytes: usize,
+        lines: usize,
+    }
+    let mut index: std::collections::HashMap<String, Meta> = std::collections::HashMap::new();
+    for l in [Lib::Canonical, Lib::Candidate] {
+        for r in crate::rec::load_lib(&root, l) {
+            let m = Meta {
+                updated: r.updated(),
+                bytes: r.raw.len(),
+                lines: r.raw.lines().count(),
+            };
+            index.insert(format!("{}/{}", l.dir(), r.file_name()), m);
+            index.insert(r.file_name(), m);
+        }
+    }
+    let agg = |b: &crate::atlas::Branch| -> (usize, i64, usize, usize) {
+        let mut seen: Vec<String> = Vec::new();
+        let (mut latest, mut bytes, mut lines) = (0i64, 0usize, 0usize);
+        for p in b.paths() {
+            let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
+            if seen.contains(&bare) {
+                continue;
+            }
+            let m = index
+                .get(&p)
+                .or_else(|| index.get(&bare))
+                .copied()
+                .unwrap_or_default();
+            seen.push(bare);
+            if m.updated > latest {
+                latest = m.updated;
+            }
+            bytes += m.bytes;
+            lines += m.lines;
+        }
+        (seen.len(), latest, bytes, lines)
+    };
     for lib in libs {
         let p = root.join(lib.atlas());
         if !p.exists() {
@@ -467,10 +535,14 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
                         b.paths().len()
                     )
                 } else {
+                    let (n, ts, by, ln) = agg(b);
                     format!(
-                        "   {:<24} COUNT={:<4} REVISION={:<3} {}",
+                        "   {:<24} {:>4}条 {:>8} {:>7}  {}  REV={}  {}",
                         b.name(),
-                        b.get("COUNT"),
+                        n,
+                        human_bytes(by as u64),
+                        format!("{ln}行"),
+                        crate::util::short_when(ts),
                         b.get("REVISION"),
                         truncate_chars(&b.get("KEYS"), 60)
                     )

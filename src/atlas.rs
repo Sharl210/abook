@@ -15,6 +15,14 @@ use std::path::Path;
 const CARD_KEYS: &[&str] = &[
     "BRANCH", "KEYS", "COUNT", "MAXSIZE", "SUMMARY", "READ_WHEN", "PATH", "REVISION",
     "STATUS", "PROMOTED_TO",
+    // Hierarchy. Both are optional, and a card without them is a top-level
+    // branch -- which is what every card in this library is today, so the
+    // feature arrives without touching existing files.
+    //
+    // PARENT names another BRANCH (not a heading): headings group cards for
+    // display, they are not a tree, and reusing a heading as a parent would
+    // make two unrelated mechanisms look like one.
+    "PARENT", "LEVEL",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -160,6 +168,20 @@ impl Branch {
             }
         }
         self.set("PATH", &out.join(","));
+    }
+
+    /// This branch's parent branch name, or empty for a top-level branch.
+    pub fn parent(&self) -> String {
+        self.get("PARENT")
+    }
+
+    /// Declared depth, or 0 when the card does not say.
+    ///
+    /// Advisory only: `tree` computes real depth by walking PARENT, because a
+    /// hand-written LEVEL can disagree with the chain above it and the chain is
+    /// the thing that actually decides where a card appears.
+    pub fn level(&self) -> usize {
+        self.get("LEVEL").trim().parse().unwrap_or(0)
     }
 
     pub fn count(&self) -> usize {

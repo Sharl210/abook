@@ -41,6 +41,21 @@ pub struct Hit {
     pub reason: String,
     pub rejected: Option<String>,
     pub record: Option<Record>,
+    /// When the record was last touched.
+    ///
+    /// Display only: recall is ordered by match strength, and that stays true.
+    /// But a match with no date cannot be placed in time -- a reader deciding
+    /// whether to trust a hit needs to know if it is from this week or from a
+    /// year ago, and the score says nothing about that.
+    pub updated: i64,
+    /// Size of the record file, so a caller can decide whether to page it.
+    pub bytes: usize,
+    /// Line count of the record file.
+    ///
+    /// Readers navigate by line number ("look at line 40"), so a listing that
+    /// gives size but not lines still leaves them guessing how far in a
+    /// location is. Both are cheap to compute from text already in hand.
+    pub lines: usize,
 }
 
 /// Split a query into terms: whitespace / comma, keep CJK runs intact.
@@ -319,6 +334,9 @@ pub fn recall(
                 reason,
                 rejected: rej.clone(),
                 record: Some(r2),
+                updated: rec.updated(),
+                bytes: rec.raw.len(),
+                lines: rec.raw.lines().count(),
             };
             if rej.is_some() {
                 res.rejected.push(h);
@@ -369,6 +387,9 @@ pub fn recall(
                                     reason: why.join("+"),
                                     rejected: None,
                                     record: Some(r2),
+                                    updated: rec.updated(),
+                                    bytes: rec.raw.len(),
+                                    lines: rec.raw.lines().count(),
                                 });
                             }
                         }

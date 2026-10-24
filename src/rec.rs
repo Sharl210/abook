@@ -18,21 +18,21 @@ pub const CAND_KEYS: &[&str] = &[
     "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
     "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
     "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
-    "SOURCE", "SEQUENCE",
+    "SOURCE", "SEQUENCE", "UPDATED",
 ];
 
 pub const CANON_KEYS: &[&str] = &[
     "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
     "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
     "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
-    "SOURCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "SEQUENCE",
+    "SOURCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "SEQUENCE", "UPDATED",
 ];
 
 pub const KNOWN_KEYS: &[&str] = &[
     "FORMAT", "ID", "PROJECT", "TASK", "SESSION", "KIND", "MATURITY", "AUTHORITY", "TITLE",
     "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
     "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
-    "SOURCE", "SEQUENCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "PROMOTED_TO",
+    "SOURCE", "SEQUENCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "PROMOTED_TO", "UPDATED",
     // Found by reading the real library back (the self-test now does this every
     // run). All twelve appear as genuine `KEY=` at a field boundary, never as
     // continuation prose, so they belong here rather than being absorbed into
@@ -103,6 +103,14 @@ pub struct Record {
     /// Exactly what `raw` parsed into, so a write can splice only the fields
     /// that really changed instead of reformatting the file.
     pub base: Option<Orig>,
+    /// The file's last-modified time, in Unix seconds; 0 when it could not be
+    /// read (a record built from text that was never on disk).
+    ///
+    /// This is what makes "show me the newest first" mean *touched* rather than
+    /// *created*: editing a record from last month should float it to the top,
+    /// because having touched it means it was the most recent thing on your
+    /// mind. A record's own declared time cannot express that.
+    pub mtime: i64,
 }
 
 /// The parsed value of every field as it was read from disk.
@@ -260,7 +268,52 @@ impl Record {
                 body: parsed.body.clone(),
                 promo: parsed.promotion.clone(),
             }),
+            // Read the real file. `parse_str` is also reached from tests with a
+            // path that has no file behind it, so a failure here is normal and
+            // just means "no mtime available" -- never an error.
+            mtime: std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
         })
+    }
+
+    /// The time this record claims for itself: a declared field first, then a
+    /// timestamp leading the filename, else 0.
+    ///
+    /// Deliberately does *not* fall back to mtime, and does not read `UPDATED`
+    /// either: conflating created with touched would make every record that was
+    /// ever edited claim it was written on the day it was last edited, which
+    /// destroys the distinction a reader uses to tell what is new from what was
+    /// merely revisited.
+    /// Falls back to mtime when the record carries no time of its own.
+    ///
+    /// Only for display and for legacy records: the migration-era files
+    /// (`AB2-C-001.md` and friends) have neither a `TIME=` field nor a
+    /// timestamped name, so without this they would show no date at all. mtime
+    /// is an approximation, but "probably around then" beats a blank when a
+    /// reader is trying to place a record in time. Anything the tool writes
+    /// from now on carries a real stamp and never reaches this path.
+    pub fn created(&self) -> i64 {
+        let t = crate::util::record_time(&self.path, &self.raw);
+        if t > 0 { t } else { self.mtime }
+    }
+
+    /// When this record was last touched.
+    ///
+    /// Reads the `UPDATED` field the write path maintains, so the answer
+    /// survives copying the library, restoring a backup, or unpacking an
+    /// archive -- all of which reset every file's mtime at once and would
+    /// otherwise flatten a recency-ordered listing into noise.
+    ///
+    /// Falls back to the pre-`UPDATED` three-source order for records written
+    /// before the field existed. That fallback is what makes this a
+    /// non-migration: old records keep sorting exactly as they did, and each
+    /// one picks up the field the first time it is edited.
+    pub fn updated(&self) -> i64 {
+        crate::util::record_updated(&self.path, &self.raw, &self.get("UPDATED"))
     }
 
     /// Bytes to write for this record.

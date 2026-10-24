@@ -92,16 +92,16 @@ pub fn other<T>(m: impl Into<String>) -> R<T> {
 /// gets rejected, so this list is exercised by selftest.
 pub const KNOWN_PARAMS: &[&str] = &[
     "after", "and", "at", "authority", "body", "body-file", "branch", "by",
-    "card", "concepts", "confidence", "content", "context", "depth", "dest",
-    "dir", "distance", "edits", "entities", "evidence", "field", "file",
-    "for", "format", "from", "id", "ids", "in", "into", "json-depth", "keep",
+    "card", "concepts", "confidence", "content", "context", "depth", "dest", "dir",
+    "distance", "edits", "entities", "evidence", "field", "file", "for", "format",
+    "from", "id", "ids", "in", "into", "json-depth", "kb", "keep",
     "keys", "kind", "level", "lib", "library", "match", "maturity", "max",
     "min-score", "mode", "name", "new", "next", "not-for", "old", "operation",
     "out", "page", "path", "per", "per-page", "project", "purpose", "q",
-    "query", "read-when", "reason", "related", "root", "scope", "session",
-    "show", "since", "slug", "source", "status", "stdin", "summary",
-    "supersedes", "tag", "target", "task", "text", "tier", "title", "to",
-    "token", "uncertainty", "url", "value", "with", "within",
+    "query", "read-when", "reason", "related", "root", "scope", "session", "show",
+    "since", "size", "slug", "source", "status", "stdin", "summary", "supersedes",
+    "tag", "target", "task", "text", "tier", "title", "to", "token",
+    "uncertainty", "url", "value", "with", "within",
 ];
 
 const BOOLS: &[&str] = &[
@@ -114,7 +114,7 @@ const BOOLS: &[&str] = &[
     // authorisation and safety
     "approve", "yes", "force", "hard", "dry-run", "apply",
     // scope switches
-    "all", "include-promoted", "include-deleted", "hide-promoted",
+    "all", "full", "whole", "flat", "no-tree", "include-promoted", "include-deleted", "hide-promoted",
     "no-expand", "no-index", "no-atlas", "no-commit",
     "summary-only", "purpose-only", "deviations", "fields",
     "remove-sources", "rebuild", "fix", "verify", "prune",
@@ -595,6 +595,37 @@ pub fn stamps() -> Stamps {
     stamps_at(now_secs())
 }
 
+/// The current moment in the notation records use for their own timestamps,
+/// e.g. `2026-10-24T15:42:07+08:00[Asia/Shanghai]`.
+///
+/// Records and commits must be spelled the same way: a reader comparing the two
+/// is comparing instants, and a bare `Z` drops the wall clock a human wrote it
+/// in.
+pub fn now_iso_local() -> String {
+    stamps().iso_local
+}
+
+/// Read a record's `UPDATED` field, falling back for records written before the
+/// field existed.
+///
+/// Library compatibility matters here: 500+ records on disk have no `UPDATED`,
+/// and rewriting all of them just to add one field would be a migration the
+/// user never asked for. The fallback is the same three-source order the tool
+/// used before (declared time, then filename stamp, then mtime), so old records
+/// keep sorting exactly as they did and new ones get a portable stamp. A record
+/// gains `UPDATED` the first time it is edited -- lazy, not a bulk rewrite.
+pub fn record_updated(path: &std::path::Path, text: &str, fields_updated: &str) -> i64 {
+    let declared = fields_updated.trim();
+    if !declared.is_empty() {
+        if let Some(n) = parse_stamp(declared) {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    commit_time(path, text)
+}
+
 /// Parse `YYYY-MM-DDTHH:MM:SSZ` or `YYYYMMDDTHHMMSS` into epoch seconds (UTC).
 /// When did this commit happen?
 ///
@@ -607,7 +638,15 @@ pub fn stamps() -> Stamps {
 /// which a `git clone` or a plain directory copy resets wholesale. So resolve
 /// in order: declared field, then a timestamp leading the filename (49 of the
 /// 50 fieldless files carry one), then mtime as the last resort.
-pub fn commit_time(path: &std::path::Path, text: &str) -> i64 {
+/// The time a record claims for itself, without the mtime fallback.
+///
+/// Split out of [`commit_time`] because the two answer different questions.
+/// `commit_time` answers "when did this happen" and wants any answer at all,
+/// so it ends with mtime. A record's own timestamp answers "when does this
+/// *say* it was written", and falling back to mtime there would make a record
+/// edited today claim it was written today -- destroying the very distinction
+/// that lets a reader tell created from touched.
+pub fn record_time(path: &std::path::Path, text: &str) -> i64 {
     const FIELDS: [&str; 5] = ["TIME", "AT", "DATE", "WHEN", "时间"];
     for line in text.lines() {
         let t = line.trim();
@@ -621,19 +660,64 @@ pub fn commit_time(path: &std::path::Path, text: &str) -> i64 {
             }
         }
     }
-    // `<YYYYMMDD>T<HHMMSS>-slug.md`
-    if let Some(name) = path.file_name().map(|s| s.to_string_lossy().to_string()) {
-        if name.len() >= 15 {
-            let b = name.as_bytes();
-            let looks = b[..8].iter().all(u8::is_ascii_digit)
-                && b[8] == b'T'
-                && b[9..15].iter().all(u8::is_ascii_digit);
-            if looks {
-                if let Some(n) = parse_stamp(&name[..15]) {
-                    return n;
-                }
-            }
+    if let Some(n) = stamp_from_name(path) {
+        return n;
+    }
+    0
+}
+
+/// `<YYYYMMDD>T<HHMMSS>-slug.md` carries the creation time even when the header
+/// does not. 49 of the 50 fieldless files in the live library do.
+fn stamp_from_name(path: &std::path::Path) -> Option<i64> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    if name.len() < 15 {
+        return None;
+    }
+    let b = name.as_bytes();
+    // Records are prefixed (`N-`, `C-`), so scan for the first digit run rather
+    // than assuming the stamp starts at byte 0.
+    let mut i = 0usize;
+    while i + 15 <= b.len() {
+        let looks = b[i..i + 8].iter().all(u8::is_ascii_digit)
+            && b[i + 8] == b'T'
+            && b[i + 9..i + 15].iter().all(u8::is_ascii_digit);
+        if looks {
+            return parse_stamp(&name[i..i + 15]);
         }
+        i += 1;
+    }
+    None
+}
+
+/// Compact, human-facing rendering of a moment: `10-24 13:21`, or the year too
+/// when it is not the current one.
+///
+/// Every listing prints this, so it is deliberately short. A full
+/// `2026-10-24T13:21:52+08:00[Asia/Shanghai]` is ~10x the width and carries
+/// information no one scans a list for.
+pub fn short_when(secs: i64) -> String {
+    if secs <= 0 {
+        return "——".to_string();
+    }
+    let now = now_secs();
+    let off = local_offset_secs();
+    let (y, m, d) = civil_from_days((secs + off).div_euclid(86400));
+    let sod = (secs + off).rem_euclid(86400);
+    let (now_y, _, _) = civil_from_days((now + off).div_euclid(86400));
+    if y == now_y {
+        format!("{m:02}-{d:02} {:02}:{:02}", sod / 3600, (sod % 3600) / 60)
+    } else {
+        format!("{y}-{m:02}-{d:02}")
+    }
+}
+
+/// `commit_time` with the mtime fallback left out.
+pub fn commit_time(path: &std::path::Path, text: &str) -> i64 {
+    // Reuse the same three-source order rather than repeating it: two copies of
+    // this rule is how `history` and `recent` drifted apart before.
+    let declared = record_time(path, text);
+    if declared > 0 {
+        return declared;
     }
     std::fs::metadata(path)
         .ok()

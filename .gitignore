@@ -55,3 +55,9 @@ __pycache__/
 /.*.bin
 /.*.rs
 /.*.sh
+
+# 自检/验证用的临时库，永远不入库
+.sb*/
+body.tmp
+big.tmp
+b.tmp

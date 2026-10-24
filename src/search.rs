@@ -83,6 +83,23 @@ pub struct Hit {
     pub where_: String,
     pub snippet: String,
     pub line: usize,
+    /// When the record was last touched, so a hit list can be read in time
+    /// order as well as score order. Ranked search stays sort-by-score -- that
+    /// is what the query asked for -- but a reader still needs to know whether
+    /// a match is from Tuesday or from three months ago.
+    pub updated: i64,
+    /// Size of the record file.
+    ///
+    /// Present so a caller can decide whether to page through it before
+    /// paying to load it. A hit list without sizes forces a guess, and the
+    /// guess is always wrong in the expensive direction.
+    pub bytes: usize,
+    /// Line count of the record file.
+    ///
+    /// Readers navigate by line number ("look at line 40"), so a listing that
+    /// gives size but not lines still leaves them guessing how far in a
+    /// location is. Both are cheap to compute from text already in hand.
+    pub lines: usize,
 }
 
 // ---------------------------------------------------------------- BMH
@@ -468,6 +485,9 @@ fn score_record(m: &Matcher, rec: &Record, root: &Path, opts: &Opts) -> Option<H
             where_,
             snippet,
             line,
+            updated: rec.updated(),
+            bytes: rec.raw.len(),
+            lines: rec.raw.lines().count(),
         });
     }
 
@@ -507,6 +527,9 @@ fn score_record(m: &Matcher, rec: &Record, root: &Path, opts: &Opts) -> Option<H
         where_,
         snippet,
         line,
+        updated: rec.updated(),
+        bytes: rec.raw.len(),
+        lines: rec.raw.lines().count(),
     })
 }
 

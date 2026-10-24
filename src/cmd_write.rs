@@ -36,6 +36,10 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         header_inferred: false,
         // A brand-new record has no bytes on disk yet.
         base: None,
+        // Nothing is on disk to stat, so it counts as touched right now --
+        // which is true, and keeps a fresh record at the top of a newest-first
+        // listing instead of sorting as "never".
+        mtime: crate::util::now_secs(),
     };
     let format = if lib == Lib::Canonical {
         "CANONICAL_MEMORY_V2"
@@ -43,6 +47,11 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         "CANDIDATE_MEMORY_V2"
     };
     rec.set("FORMAT", format);
+    // A brand-new record has no `mtime` to inherit and no earlier `UPDATED`,
+    // so stamp it once here. Without this, every freshly written record would
+    // sort as "never touched" and land at the bottom of a recency listing --
+    // exactly backwards, since it is the newest thing in the library.
+    rec.set("UPDATED", &now_iso_local());
     rec.set(
         "PROJECT",
         &{
@@ -336,8 +345,22 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
         header_inferred: false,
         // A newly promoted record does not exist on disk yet.
         base: None,
+        // Inherit the candidate's timestamp on purpose: promotion is a move,
+        // not an edit, so the promoted copy should keep showing when it was
+        // actually learned. Stamping it `now` would make every promotion look
+        // like new knowledge and bury what it was derived from.
+        mtime: cand.mtime.max(cand.created()),
     };
     canon.set("FORMAT", "CANONICAL_MEMORY_V2");
+    // Inherit the candidate's timestamp: promotion moves a record, it does not
+    // edit it, so the promoted copy should keep showing when it was actually
+    // learned. Stamping `now` here would make every promotion look like brand
+    // new knowledge and bury what it was derived from.
+    let inherited = {
+        let u = cand.updated();
+        if u > 0 { u } else { now_secs() }
+    };
+    canon.set("UPDATED", &crate::util::stamps_at(inherited).iso_local);
     canon.set("ID", &id);
     for (k, v) in &cand.fields {
         if matches!(
@@ -569,6 +592,8 @@ pub fn cmd_restore(a: &Args) -> R<i32> {
         return Ok(0);
     }
     rec.set("STATUS", "ACTIVE");
+    // Reactivating is an edit like any other, so it counts as touched.
+    rec.set("UPDATED", &now_iso_local());
     write_atomic(&path, &rec.render())?;
     let back = Record::parse(&path, lib)?;
     map_record(&root, &back, &opt(a, "branch"))?;

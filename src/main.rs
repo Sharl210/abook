@@ -20,6 +20,7 @@ mod spec_text;
 mod cmd_spec;
 mod cmd_edit;
 mod cmd_audit;
+mod cmd_path;
 mod cmd_view;
 mod cmd_read;
 mod cmd_skill;
@@ -54,7 +55,8 @@ fn help_text() -> String {
   state                     库状态：记录数、地图数、收录时刻、一致性
   stats                     分布：KIND / MATURITY / STATUS，支持 --page
   paths                     打印全部路径
-  tree [--page]             分支 → 条目数
+  tree [--flat]             分支树：条目数 / 体积 / 行数 / 最近活跃（有 PARENT 则缩进）
+  path <记录|分支>          反查：记录所属分支链；给分支名则向下展开子树
   budget [记录]             预载与单条读取的字节预算（对照规则上限）
   audit [--all] [--json]    全库格式审计：纠偏了多少处、有无 ERROR
   lint                      头部完整性与命名规范检查
@@ -912,6 +914,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("get", cmd_view::cmd_get),
         ("diff", cmd_view::cmd_diff),
         ("tree", cmd_view::cmd_tree),
+        ("path", cmd_path::cmd_path),
         ("budget", cmd_view::cmd_budget),
         ("export", cmd_view::cmd_export),
         // -- write

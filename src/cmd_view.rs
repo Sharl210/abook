@@ -35,8 +35,38 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                 }
                 return Ok(0);
             }
+            // `UPDATED`/`CREATED` are answerable even on records that predate
+            // the field, because they are derived. Without this branch a caller
+            // asking for the date on an old record got "记录没有字段", which
+            // reads as a broken record rather than an old one.
+            if canon == "UPDATED" || canon == "CREATED" {
+                let v = if canon == "UPDATED" {
+                    crate::util::short_when(rec.updated())
+                } else {
+                    crate::util::short_when(rec.created())
+                };
+                if want_json {
+                    println!(
+                        "{{\"id\":{},\"path\":{},\"field\":{},\"value\":{}}}",
+                        jstr(&rec.id()),
+                        jstr(&rel(&root, &path)),
+                        jstr(&canon),
+                        jstr(&v)
+                    );
+                } else {
+                    println!("{v}");
+                }
+                return Ok(0);
+            }
             if !rec.has(&canon) {
-                return notfound(format!("记录没有字段 {canon}"));
+                // The field genuinely is absent. Say which record and which
+                // fields it does have -- a bare "not found" leaves the caller
+                // guessing whether the record or the field name was wrong.
+                return notfound(format!(
+                    "记录没有字段 {canon}（{} 共 {} 个字段；时间用 UPDATED/CREATED 查询）",
+                    rec.id(),
+                    rec.fields.len()
+                ));
             }
             if want_json {
                 println!(
@@ -76,14 +106,32 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                     jstr(&truncate_chars(&rec.body, 60))
                 ));
                 println!(
-                    "{{\"id\":{},\"path\":{},\"fields\":[{}]}}",
+                    "{{\"id\":{},\"path\":{},\"created\":{},\"updated\":{},\"when\":{},\"fields\":[{}]}}",
                     jstr(&rec.id()),
                     jstr(&rel(&root, &path)),
+                    rec.created(),
+                    rec.updated(),
+                    jstr(&crate::util::short_when(rec.updated())),
                     items.join(",")
                 );
                 return Ok(0);
             }
             // no field: list every readable field, tail blocks included
+            //
+            // The two time values appear as pseudo-fields so they line up with
+            // the real ones: a caller that greps for `UPDATED` finds a row in
+            // either shape, and a record that predates the field still answers
+            // instead of looking broken.
+            println!(
+                "UPDATED\t{}\t{}",
+                crate::util::short_when(rec.updated()).chars().count(),
+                crate::util::short_when(rec.updated())
+            );
+            println!(
+                "CREATED\t{}\t{}",
+                crate::util::short_when(rec.created()).chars().count(),
+                crate::util::short_when(rec.created())
+            );
             for (k, v) in &rec.fields {
                 println!("{k}\t{}\t{}", v.chars().count(), truncate_chars(v, 60));
             }
@@ -140,7 +188,8 @@ fn note_dir(
         }
         return Ok(0);
     }
-    let mut rows: Vec<(String, String, u64)> = Vec::new();
+    // Carry each note's own time so the list can be ordered by recency.
+    let mut rows: Vec<(String, String, u64, i64)> = Vec::new();
     // Subdirectories are listed as rows, not skipped. `review/` really does
     // contain `abandoned-20260928/`, and silently dropping it made the count
     // disagree with `ls` while looking perfectly healthy -- the same
@@ -176,23 +225,28 @@ fn note_dir(
                 .trim_start_matches('#')
                 .trim()
                 .to_string();
-            rows.push((name, title, txt.len() as u64));
+            let stamp = commit_time(&p, &txt);
+            rows.push((name, title, txt.len() as u64, stamp));
         }
     }
-    rows.sort();
-    rows.reverse();
+    // Newest first. Sorting bare names put the old `0001-...` sequence after
+    // every timestamped name and ordered `-1` before the bare name, so nearly
+    // half a real listing landed in the wrong place. Each note records its own
+    // time; ask the file.
+    rows.sort_by(|x, y| y.3.cmp(&x.3).then_with(|| y.0.cmp(&x.0)));
     let pg = Page::from_args(a, rows.len());
     if a.has("json") {
         let items = rows
             .iter()
             .skip(pg.start())
             .take(pg.per.min(rows.len()))
-            .map(|(n, t, b)| {
+            .map(|(n, t, b, ts)| {
                 format!(
-                    "{{\"name\":{},\"title\":{},\"bytes\":{}}}",
+                    "{{\"name\":{},\"title\":{},\"bytes\":{},\"updated\":{ts},\"when\":{}}}",
                     jstr(n),
                     jstr(t),
-                    b
+                    b,
+                    jstr(&crate::util::short_when(*ts))
                 )
             })
             .collect::<Vec<_>>()
@@ -200,8 +254,8 @@ fn note_dir(
         println!("{{{},\"{json_key}\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for (n, t, b) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-        println!("{n:<56} {:>7}  {t}", human_bytes(*b));
+    for (n, t, b, ts) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+        println!("{}  {n:<52} {:>7}  {t}", crate::util::short_when(*ts), human_bytes(*b));
     }
     println!("{}", pg.bar());
     let sub = if subdirs.is_empty() {
@@ -283,14 +337,14 @@ pub fn cmd_history(a: &Args) -> R<i32> {
             .iter()
             .skip(pg.start())
             .take(pg.per.min(rows.len()))
-            .map(|(_, n, t)| format!("{{\"name\":{},\"title\":{}}}", jstr(n), jstr(t)))
+            .map(|(ts, n, t)| format!("{{\"name\":{},\"title\":{},\"updated\":{ts},\"when\":{}}}", jstr(n), jstr(t), jstr(&crate::util::short_when(*ts))))
             .collect::<Vec<_>>()
             .join(",");
         println!("{{{},\"commits\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for (_, n, t) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-        println!("{n}  {t}");
+    for (ts, n, t) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+        println!("{}  {n}  {t}", crate::util::short_when(*ts));
     }
     println!("{}", pg.bar());
     Ok(0)
@@ -467,6 +521,37 @@ pub fn cmd_export(a: &Args) -> R<i32> {
 /// `tree` — branch -> record counts, paged.
 pub fn cmd_tree(a: &Args) -> R<i32> {
     let root = resolve_root(a);
+    // Load each library's records once and index them by basename, so a branch
+    // can report when it was last active without re-reading its members.
+    //
+    // The alternative (stat every PATH entry per branch) turns one `tree` into
+    // hundreds of syscalls, and the library is loaded here anyway: `tree` is
+    // the "what is in here" command, and "how recently was each branch touched"
+    // is half the answer to that question.
+    // One index of every record, keyed both by full relative path and by bare
+    // filename. Atlas PATH entries mix the two spellings.
+    //
+    // The old version stored only a timestamp and had to be extended twice
+    // (bytes, then lines); a struct keeps the next question from needing
+    // another rewrite of the same block.
+    #[derive(Clone, Copy, Default)]
+    struct Meta {
+        updated: i64,
+        bytes: usize,
+        lines: usize,
+    }
+    let mut index: std::collections::HashMap<String, Meta> = std::collections::HashMap::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        for r in load_lib(&root, lib) {
+            let m = Meta {
+                updated: r.updated(),
+                bytes: r.raw.len(),
+                lines: r.raw.lines().count(),
+            };
+            index.insert(format!("{}/{}", lib.dir(), r.file_name()), m);
+            index.insert(r.file_name(), m);
+        }
+    }
     let mut js: Vec<String> = Vec::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         let ap = root.join(lib.atlas());
@@ -474,23 +559,76 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             continue;
         }
         let at = crate::atlas::Atlas::load(&ap)?;
-        let mut rows: Vec<(String, usize, String)> = at
+        // (name, member_count, status, newest, bytes, lines)
+        let mut rows: Vec<(String, usize, String, i64, usize, usize)> = at
             .branches
             .iter()
-            .map(|b| (b.name(), b.count(), b.get("STATUS")))
+            .map(|b| {
+                // Deduplicate by basename before summing: one record may be
+                // listed twice under different spellings, and counting it twice
+                // would inflate the branch. The same set backs `count()`, so the
+                // member count and the totals always agree.
+                let mut seen: Vec<String> = Vec::new();
+                let mut latest = 0i64;
+                let mut bytes = 0usize;
+                let mut lines = 0usize;
+                for p in b.paths() {
+                    let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
+                    if seen.contains(&bare) {
+                        continue;
+                    }
+                    let m = match index.get(&p).or_else(|| index.get(&bare)) {
+                        Some(m) => *m,
+                        // A PATH entry whose file is missing is real in this
+                        // library (records get renamed). Count it as a member --
+                        // it is still claimed -- but contribute no bytes.
+                        None => Meta::default(),
+                    };
+                    seen.push(bare);
+                    if m.updated > latest {
+                        latest = m.updated;
+                    }
+                    bytes += m.bytes;
+                    lines += m.lines;
+                }
+                (b.name(), seen.len(), b.get("STATUS"), latest, bytes, lines)
+            })
             .collect();
         rows.sort_by(|x, y| y.1.cmp(&x.1));
+        let _ = &rows;
+
+        // Hierarchy, computed from PARENT rather than from LEVEL.
+        //
+        // A card's declared LEVEL can disagree with its PARENT chain -- one of
+        // them is then simply wrong, and the chain is what a reader can verify
+        // by following lines upward. Walking PARENT also finds orphans (a
+        // parent name that no card carries); those are reported rather than
+        // silently promoted to top level, because a branch that vanishes from
+        // the tree is exactly the disappearance this tool exists to catch.
+        let parents: std::collections::HashMap<String, String> = at
+            .branches
+            .iter()
+            .map(|b| (b.name(), b.parent()))
+            .collect();
+        let names: Vec<String> = at.branches.iter().map(|b| b.name()).collect();
+        let orphans: Vec<String> = parents
+            .iter()
+            .filter(|(_, par)| !par.is_empty() && !names.contains(par))
+            .map(|(n, par)| format!("{n} -> {par}"))
+            .collect();
+        let flat = a.has("flat") || a.has("no-tree");
         let pg = Page::from_args(a, rows.len());
         if a.has("json") {
             let items = rows
                 .iter()
                 .skip(pg.start())
                 .take(pg.per.min(rows.len()))
-                .map(|(name, n, st)| {
+                .map(|(name, n, st, ts, by, ln)| {
                     format!(
-                        "{{\"branch\":{},\"count\":{n},\"status\":{}}}",
+                        "{{\"branch\":{},\"count\":{n},\"status\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
                         jstr(name),
-                        jstr(st)
+                        jstr(st),
+                        jstr(&crate::util::short_when(*ts))
                     )
                 })
                 .collect::<Vec<_>>()
@@ -503,8 +641,81 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             continue;
         }
         println!("== {}", lib.name());
-        for (name, n, st) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-            println!("  {name:<28} {n:>4}  {st}");
+        let stat = |n: usize, by: usize, ln: usize, st: &str, ts: i64| {
+            format!(
+                "{n:>4}条 {:>8} {:>7}  {st:<8} {}",
+                human_bytes(by as u64),
+                format!("{ln}行"),
+                crate::util::short_when(ts)
+            )
+        };
+        if flat || parents.values().all(|p| p.is_empty()) {
+            // No hierarchy declared: print the flat list exactly as before.
+            // The tree is an addition, not a replacement -- an existing library
+            // with no PARENT fields must read the same way it always did.
+            for (name, n, st, ts, by, ln) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+                println!("  {name:<28} {}", stat(*n, *by, *ln, st, *ts));
+            }
+        } else {
+            // Depth-first walk. Children are ordered by size so the biggest
+            // subtree is read first -- the point of a tree view is deciding
+            // where to look next, and that decision is made on volume.
+            fn emit(
+                name: &str,
+                depth: usize,
+                parents: &std::collections::HashMap<String, String>,
+                rows: &[(String, usize, String, i64, usize, usize)],
+                out: &mut Vec<String>,
+            ) {
+                if let Some((_, n, st, ts, by, ln)) = rows.iter().find(|r| r.0 == name) {
+                    let pad = "  ".repeat(depth);
+                    let mark = if depth == 0 { "▸" } else { "·" };
+                    out.push(format!(
+                        "{pad}{mark} {name:<28} {n:>4}条 {:>8} {:>7}  {st:<8} {}",
+                        human_bytes(*by as u64),
+                        format!("{ln}行"),
+                        crate::util::short_when(*ts)
+                    ));
+                }
+                let mut kids: Vec<&String> = parents
+                    .iter()
+                    .filter(|(_, par)| *par == name)
+                    .map(|(k, _)| k)
+                    .collect();
+                kids.sort_by(|x, y| {
+                    let bx = rows.iter().find(|r| &r.0 == *x).map(|r| r.4).unwrap_or(0);
+                    let by_ = rows.iter().find(|r| &r.0 == *y).map(|r| r.4).unwrap_or(0);
+                    by_.cmp(&bx)
+                });
+                for k in kids {
+                    emit(k, depth + 1, parents, rows, out);
+                }
+            }
+            let mut out: Vec<String> = Vec::new();
+            let mut roots: Vec<&String> = names
+                .iter()
+                .filter(|n| parents.get(*n).map(|p| p.is_empty()).unwrap_or(true))
+                .collect();
+            roots.sort_by(|x, y| {
+                let bx = rows.iter().find(|r| &r.0 == *x).map(|r| r.4).unwrap_or(0);
+                let by_ = rows.iter().find(|r| &r.0 == *y).map(|r| r.4).unwrap_or(0);
+                by_.cmp(&bx)
+            });
+            for r in roots {
+                emit(r, 0, &parents, &rows, &mut out);
+            }
+            // Paging applies to the rendered lines, not to branches: a subtree
+            // is several lines, and slicing branches would cut a parent off its
+            // children.
+            let pg2 = Page::from_args(a, out.len());
+            for line in out.iter().skip(pg2.start()).take(pg2.per.min(out.len())) {
+                println!("{line}");
+            }
+            if !orphans.is_empty() {
+                println!("  [悬挂 PARENT {} 处] {}", orphans.len(), orphans.join("、"));
+            }
+            println!("  {}", pg2.bar());
+            continue;
         }
         println!("  {}", pg.bar());
     }
@@ -600,13 +811,17 @@ pub fn cmd_search(a: &Args) -> R<i32> {
             .take(pg.per.min(hits.len()))
             .map(|h| {
                 format!(
-                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{}}}",
+                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
                     jstr(&h.path),
                     h.score,
                     jstr(&h.where_),
                     h.line,
                     jstr(&h.title),
-                    jstr(&h.snippet)
+                    jstr(&h.snippet),
+                    h.bytes,
+                    h.lines,
+                    h.updated,
+                    jstr(&crate::util::short_when(h.updated))
                 )
             })
             .collect::<Vec<_>>()
@@ -619,7 +834,8 @@ pub fn cmd_search(a: &Args) -> R<i32> {
         return Ok(if hits.is_empty() { 3 } else { 0 });
     }
     for h in hits.iter().skip(pg.start()).take(pg.per.min(hits.len())) {
-        println!("{:>4}  {}  [{}] {}", h.score, h.path, h.where_, truncate_chars(&h.title, 60));
+        // Ranked by score, as asked; the date rides along for placement in time.
+        println!("{:>4}  {:>8}  {:>7}  {}  {}  [{}] {}", h.score, human_bytes(h.bytes as u64), format!("{}行", h.lines), crate::util::short_when(h.updated), h.path, h.where_, truncate_chars(&h.title, 60));
         if !h.snippet.is_empty() {
             println!("       行{}  {}", h.line, h.snippet);
         }
@@ -797,7 +1013,22 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             }
         }
     }
-    rows.sort_by(|x, y| y.file_name().cmp(&x.file_name()));
+    // Newest *touched* first, not newest created and not newest filename.
+    //
+    // Sorting by filename put a record edited five minutes ago below every
+    // record created after it, so the list answered "what exists" but not
+    // "what have I been working on" -- the question a reader actually has when
+    // they open a listing. Editing a record is the strongest available signal
+    // that it was the most recent thing on someone's mind.
+    //
+    // The name stays as the tie-break so equal timestamps keep a stable order;
+    // without it, two records written in the same second could swap places
+    // between runs and a paged read would skip or repeat rows.
+    rows.sort_by(|x, y| {
+        y.updated()
+            .cmp(&x.updated())
+            .then_with(|| y.file_name().cmp(&x.file_name()))
+    });
     let pg = Page::from_args(a, rows.len());
     if a.has("json") {
         // A caller that asked for JSON and got a table would silently parse
@@ -808,7 +1039,7 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             .take(pg.per.min(rows.len()))
             .map(|rec| {
                 format!(
-                    "{{\"path\":{},\"lib\":{},\"id\":{},\"title\":{},\"status\":{},\"kind\":{},\"maturity\":{},\"bytes\":{}}}",
+                    "{{\"path\":{},\"lib\":{},\"id\":{},\"title\":{},\"status\":{},\"kind\":{},\"maturity\":{},\"bytes\":{},\"lines\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
                     jstr(&rel(&root, &rec.path)),
                     jstr(rec.lib.name()),
                     jstr(&rec.id()),
@@ -816,7 +1047,11 @@ pub fn cmd_list(a: &Args) -> R<i32> {
                     jstr(&rec.status()),
                     jstr(&rec.kind()),
                     jstr(&rec.get("MATURITY")),
-                    rec.raw.len()
+                    rec.raw.len(),
+                    rec.raw.lines().count(),
+                    rec.created(),
+                    rec.updated(),
+                    jstr(&crate::util::short_when(rec.updated()))
                 )
             })
             .collect::<Vec<_>>()
@@ -826,7 +1061,10 @@ pub fn cmd_list(a: &Args) -> R<i32> {
     }
     for rec in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
         println!(
-            "{}  [{}] {}",
+            "{:>8}  {:>7}  {}  {}  [{}] {}",
+            crate::util::short_when(rec.updated()),
+            human_bytes(rec.raw.len() as u64),
+            format!("{}行", rec.raw.lines().count()),
             rel(&root, &rec.path),
             rec.lib.name(),
             truncate_chars(&rec.title(), 70)

@@ -52,9 +52,43 @@ pub fn render_dry_run_for_test(rec: &Record, op: &str, target: &str, verbose: bo
 /// test pass. A write that changes nothing must not claim to have changed
 /// anything.
 pub fn save(root: &Path, rec: &mut Record, a: &Args, op: &str) -> R<bool> {
+    // Decide whether anything really changed *before* stamping the time.
+    //
+    // Stamping first made every no-op edit look like a change, because the
+    // stamp itself differed -- and a no-op then produced a write, a map
+    // refresh, an index bump and a commit record announcing a change that
+    // never happened. That is the phantom-commit bug this function was
+    // originally built to prevent (286 of them in one normalise pass). The
+    // order matters: compare content, then stamp only if there is something to
+    // stamp for.
+    //
+    // Stamp the moment before rendering, and only here.
+    //
+    // Every write path in the tool funnels through this function, so this is
+    // the one place a record's "last touched" can be maintained without any
+    // command having to remember to do it. Reading it back out of the file
+    // instead (mtime) was the earlier design and it fails exactly when it
+    // matters: copying the library to another machine, restoring a backup, or
+    // unpacking an archive rewrites every mtime at once, so every record loses
+    // its age and a listing ordered by recency becomes meaningless noise.
+    // A field inside the file travels with the file.
+    //
+    // Set before the dry-run branch so `--dry-run` reports the same bytes it
+    // would write, and before the `unchanged` comparison so that a real edit
+    // always registers as a change (a stamp that moved *is* a change).
     // Splice from the original bytes, not a re-render: a change to one field
     // must not reformat the rest of the file. Falls back to a full render when
     // the layout cannot be matched.
+    let probe = rec.render_for_write();
+    if probe == rec.raw {
+        // Nothing to do. Verified before any side effect, so a no-op cannot
+        // touch the record, the map, the index or the change log.
+        if a.has("dry-run") {
+            print!("{}", render_dry_run(rec, op, &rel(root, &rec.path), a.has("verbose")));
+        }
+        return Ok(false);
+    }
+    rec.set("UPDATED", &now_iso_local());
     let body = rec.render_for_write();
     if std::env::var_os("ABOOK_SPLICE_DEBUG").is_some() {
         eprintln!(
@@ -493,6 +527,7 @@ pub fn cmd_merge(a: &Args) -> R<i32> {
         header_inferred: false,
         // A brand-new record has no bytes on disk yet, so there is nothing to
         // splice: this one is written by rendering it in full.
+        mtime: crate::util::now_secs(),
         base: None,
     };
     out.set(
