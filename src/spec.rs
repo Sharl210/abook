@@ -82,7 +82,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("lint", "lib", "json", "风格检查", ""),
     ("doctor", "lib,fix", "fix,apply,json", "诊断，--fix 就地修", "--fix --dry-run"),
     ("reconcile", "lib", "fix,apply,json", "地图与磁盘对账", "--dry-run"),
-    ("repair", "lib,apply,dry-run,page,per-page", "apply,dry-run,json", "按校验结果修", "--apply"),
+    ("repair", "lib,apply,dry-run,page,per-page,only", "apply,dry-run,json", "按校验结果修，--only 限定类别", "--apply --only refs"),
     ("leftover", "apply,lib,json", "json", "残留文件", "abook leftover --apply"),
     ("branch", "branch,keys,read-when,page,per-page", "json,dry-run,force", "分支卡片增删改", "abook branch list"),
     ("describe", "page,per-page", "json", "命令契约（本表）", "list"),
@@ -91,7 +91,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("version", "", "json", "版本", ""),
     ("detect", "", "json", "安装位置探测", ""),
     ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到 PATH", "--dry-run"),
-    ("selftest", "all", "json", "内置用例", "--only 1"),
+    ("selftest", "only", "all,json,verbose", "内置用例；--only N 只跑第 N 条", "selftest --only 1"),
 
 ];
 

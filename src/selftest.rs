@@ -191,12 +191,21 @@ const FUZZY_CASES: &[(&str, &str, usize, bool)] = &[
     ("abc", "xyz", 1, false),
 ];
 
-pub fn run(verbose: bool) -> (usize, usize, usize, Vec<String>) {
+pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<String>) {
     let mut pass = 0usize;
     let mut fail = 0usize;
     let mut skip = 0usize;
     let mut msgs = Vec::new();
+    // `--only N` 只跑第 N 条（1 起）。调试单个用例时不必等全部跑完——
+    // 完整自检有几千个子检查，改一处要等一分多钟。
+    let mut idx = 0usize;
     for c in CASES {
+        idx += 1;
+        if let Some(n) = only {
+            if idx != n {
+                continue;
+            }
+        }
         let p = parse(c.text, Some(Lib::Candidate));
         let got = p.get(c.want_key);
         let ok = if p.has_error() {
@@ -224,6 +233,15 @@ pub fn run(verbose: bool) -> (usize, usize, usize, Vec<String>) {
                 if p.has_error() { "（解析报错）" } else { "" }
             ));
         }
+    }
+
+    // `--only N` 到此为止：它只跑第 N 条解析用例，不跑后面那一百多个检查块。
+    //
+    // 不在这里返回会变成"看起来限定了、其实全跑了"——参数说了只跑一条，
+    // 结果该等的一分钟还是等一分钟，那这个参数就是在骗人。要么做到，要么
+    // 别广告它。
+    if only.is_some() {
+        return (pass, fail, skip, msgs);
     }
 
     // Schema layer: a record missing an identifying field must be an ERROR,
@@ -1431,6 +1449,69 @@ pub fn run(verbose: bool) -> (usize, usize, usize, Vec<String>) {
         } else {
             fail += 1;
             msgs.push(format!("FAIL  写类命令的写入边界不对:{detail}"));
+        }
+
+        // repair --only 必须真的限定范围。
+        //
+        // 这门的由来：`repair` 一执行就是"能修的全修"，于是想修 3 条记录的引用
+        // 前缀，顺手给 248 条加 SIZE、给 242 条派生 KEYS——改的是没有版本控制的
+        // 真库。加 `--only` 后必须验证它真的收窄了，而不只是日志少打几行：
+        // 写盘按 `p.fields` 全量落地，只不记录的话字段照样被改。
+        {
+            let tmp = std::env::temp_dir().join(format!("abook-st-only-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let mut detail = String::new();
+            let mut ok = true;
+            let dir0 = tmp.join("candidate").join("records");
+            let _ = std::fs::create_dir_all(&dir0);
+            if true {
+                let f = dir0.join("N-20260101T000000-aaaaaaaa.md");
+                let raw = "TITLE=限定测试\nREAD_WHEN=测试\nCONCEPTS=甲,乙\nBODY_MARK\n正文\n";
+                if std::fs::write(&f, raw).is_ok() {
+                    let run = |only: &str| -> String {
+                        let _ = std::process::Command::new(&exe)
+                            .args([
+                                "repair", "--root", &tmp.to_string_lossy(), "--apply", "--only", only,
+                            ])
+                            .output();
+                        std::fs::read_to_string(&f).unwrap_or_default()
+                    };
+                    // 只修 refs 类别，一条缺 SIZE/KEYS/FORMAT 的记录不该被补任何字段
+                    let after_refs = run("refs");
+                    let added = ["SIZE=", "KEYS=", "FORMAT="]
+                        .iter()
+                        .filter(|k| after_refs.contains(*k))
+                        .count();
+                    if added != 0 {
+                        ok = false;
+                        detail.push_str(&format!("--only refs 补了 {added} 个无关字段;"));
+                    }
+                    // 只修 size，应当只补 SIZE
+                    let after_size = run("size");
+                    if !after_size.contains("SIZE=") {
+                        ok = false;
+                        detail.push_str("--only size 没补 SIZE;");
+                    }
+                    if after_size.contains("KEYS=") || after_size.contains("FORMAT=") {
+                        ok = false;
+                        detail.push_str("--only size 越界补了别的;");
+                    }
+                } else {
+                    ok = false;
+                    detail.push_str("建不出测试记录;");
+                }
+            } else {
+                ok = false;
+                detail.push_str("建不出测试库;");
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+            if ok {
+                pass += 1;
+                msgs.push("PASS  repair --only 真的只修该类别，不多动一个字段".into());
+            } else {
+                fail += 1;
+                msgs.push(format!("FAIL  repair --only 没限定住范围:{detail}"));
+            }
         }
     } else {
         skip += 1;
@@ -3256,7 +3337,13 @@ fn vet_commit_for_test(name: &str, block: &str) -> Result<(), String> {
 }
 
 pub fn cmd_selftest(a: &crate::util::Args) -> crate::util::R<i32> {
-    let (pass, fail, skip, msgs) = run(a.has("verbose") || a.has("all"));
+    // `--only N` 只跑第 N 条用例。
+    //
+    // 这个参数以前只在帮助示例里出现过，参数表里没有，于是 `selftest --only 1`
+    // 直接被"不接受 --only"拒掉——**帮助里宣传的参数必须真的能用**，否则
+    // 文档就是错的。示例文字也是契约的一部分。
+    let only = a.num("only").map(|n| n as usize);
+    let (pass, fail, skip, msgs) = run(a.has("verbose") || a.has("all"), only);
     // `--json` reports the tally, not the transcript. The per-case lines stay on
     // stderr because they are the human view; a caller that asked for JSON is
     // deciding pass/fail on the counts, and wrapping 145 prose lines into an

@@ -281,7 +281,11 @@ pub fn cmd_repair(a: &Args) -> R<i32> {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let done = schema::autofix(&mut p2, lib, Some(&fname));
+        let only: Vec<String> = match a.get("only") {
+            Some(v) => v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+            None => Vec::new(),
+        };
+        let done = schema::autofix(&mut p2, lib, Some(&fname), &only);
         if done.is_empty() {
             continue;
         }

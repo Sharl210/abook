@@ -329,13 +329,44 @@ impl Args {
     /// Every parameter name the tool understands anywhere. A name outside this
     /// set is almost always a typo, and a typo used to be ignored silently --
     /// `--limt 5` returned the whole library and looked like success.
+    /// 这个参数名在工具里是否存在（任何命令）。
+    ///
+    /// 除了两张手写清单，还要看每命令的参数表——这是本轮踩到的坑：
+    /// `--only` 已经写进 `spec::SPEC` 的 repair 条目，但 `known()` 只查
+    /// `KNOWN_PARAMS` 和 `BOOLS`，两张手写清单都没它，于是它在分发之前就被
+    /// 当成"无法识别的参数"拒掉，而 `validate_for` 那层根本没机会跑到。
+    ///
+    /// 同一信息存两处，迟早不一致。现在以参数表为准，手写清单只作为
+    /// 表里尚未收录的补充。
     pub fn known(k: &str) -> bool {
-        KNOWN_PARAMS.binary_search(&k).is_ok() || BOOLS.contains(&k)
+        KNOWN_PARAMS.binary_search(&k).is_ok()
+            || BOOLS.contains(&k)
+            || crate::spec::SPEC.iter().any(|(_, params, flags, _, _)| {
+                params.split(',').any(|x| x.trim() == k) || flags.split(',').any(|x| x.trim() == k)
+            })
     }
 
     /// All recognised parameter names, for typo suggestions.
+    ///
+    /// 去重是必须的：这里的三来源（手写参数名、手写布尔名、每命令参数表）大量
+    /// 重叠——参数表本来就是把"这个命令读哪些"再写一遍，它必然与手写清单重复。
+    /// 不去重的话调用方（自检、拼写建议）会看到同一个名字出现好几次。
+    ///
+    /// 返回 Owned 而非 `&'static str`，因为去重需要一次收集；调用方只遍历一次，
+    /// 这点分配可以忽略。
     pub fn all_known() -> impl Iterator<Item = &'static str> {
-        KNOWN_PARAMS.iter().copied().chain(BOOLS.iter().copied())
+        let mut set: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+        set.extend(KNOWN_PARAMS.iter().copied());
+        set.extend(BOOLS.iter().copied());
+        for (_, params, flags, _, _) in crate::spec::SPEC {
+            for x in params.split(',').chain(flags.split(',')) {
+                let x = x.trim();
+                if !x.is_empty() {
+                    set.insert(x);
+                }
+            }
+        }
+        set.into_iter()
     }
 
     /// Reject a parameter this particular command does not read.

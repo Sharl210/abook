@@ -295,27 +295,59 @@ pub fn validate(p: &Parsed, lib: Lib, filename: Option<&str>) -> Report {
 
 /// Apply the fixes the validator can perform without judgement.
 /// Returns the list of things changed.
-pub fn autofix(p: &mut Parsed, lib: Lib, filename: Option<&str>) -> Vec<String> {
+/// `only` 限定只做哪一类修复；空表示全做。
+///
+/// 为什么要这个：`repair` 原本一执行就是"能修的全修"，于是想修 3 条记录的
+/// 引用前缀，顺手给 248 条加上了 `SIZE`、给 242 条从 `CONCEPTS` 派生了 `KEYS`。
+/// 那些派生值本身没算错，但**用户没有要求**——一次核对变成一次批量改写，而且
+/// 改的是真库（没有版本控制，没有备份）。
+///
+/// 批量写入必须能把范围说清楚，否则"它会修什么"就只能靠读完整个 autofix 猜。
+/// `--only` 让调用方表达意图，也让日志与改动一一对应。
+///
+/// 注意每个类别必须连 `set()` 一起跳过，不能只过滤日志——写盘是按 `p.fields`
+/// 全量落地的，只不记录的话字段照样被改。
+fn wanted(only: &[String], tag: &str) -> bool {
+    only.is_empty() || only.iter().any(|x| x == tag)
+}
+
+/// 可用类别，供 `--only` 提示。
+pub const FIX_CLASSES: &[(&str, &str)] = &[
+    ("id", "ID 对齐文件名"),
+    ("format", "补 FORMAT"),
+    ("enum", "KIND/MATURITY/AUTHORITY/STATUS/SIZE 枚举大小写归正"),
+    ("refs", "引用值还原为规范身份"),
+    ("sep", "列表字段的半角分号改为逗号"),
+    ("trim", "字段值去首尾空白"),
+    ("size", "按正文长度补 SIZE"),
+    ("keys", "KEYS 与 CONCEPTS 互为派生"),
+];
+
+pub fn autofix(p: &mut Parsed, lib: Lib, filename: Option<&str>, only: &[String]) -> Vec<String> {
     let mut done = Vec::new();
+
     // ID 先对齐，因为身份错了后面所有引用都跟着错。
     //
     // 只在一个方向动：文件名是规范形态、而 ID 字段不是。反过来不动——
     // 文件名是磁盘上的位置，改它等于搬家；改 ID 字段只是把标签写对。
     // 带分号的老式复合行（`ID=x;PROJECT=y;...`）不碰，那是旧库字段打包写法。
-    if let Some(f) = filename {
-        let raw = p.get("ID");
-        if !raw.contains(';') {
-            let cur = raw.trim();
-            let stem = f.trim_end_matches(".md");
-            if crate::rec::Record::is_scheme_name(f)
-                && !crate::rec::Record::is_scheme_name(&format!("{cur}.md"))
-            {
-                set(p, "ID", stem);
-                done.push(format!("ID={stem}（对齐文件名）"));
+    if wanted(only, "id") {
+        if let Some(f) = filename {
+            let raw = p.get("ID");
+            if !raw.contains(';') {
+                let cur = raw.trim();
+                let stem = f.trim_end_matches(".md");
+                if crate::rec::Record::is_scheme_name(f)
+                    && !crate::rec::Record::is_scheme_name(&format!("{cur}.md"))
+                {
+                    set(p, "ID", stem);
+                    done.push(format!("ID={stem}（对齐文件名）"));
+                }
             }
         }
     }
-    if p.get("FORMAT").trim().is_empty() {
+
+    if wanted(only, "format") && p.get("FORMAT").trim().is_empty() {
         let v = if lib == Lib::Canonical {
             "CANONICAL_MEMORY_V2"
         } else {
@@ -324,97 +356,106 @@ pub fn autofix(p: &mut Parsed, lib: Lib, filename: Option<&str>) -> Vec<String> 
         set(p, "FORMAT", v);
         done.push(format!("FORMAT={v}"));
     }
-    // enum casing
-    for (k, allowed) in [
-        ("KIND", KINDS),
-        ("MATURITY", MATURITIES),
-        ("AUTHORITY", AUTHORITIES),
-        ("STATUS", STATUSES),
-        ("SIZE", SIZES),
-    ] {
-        let v = p.get(k);
-        if v.trim().is_empty() {
-            continue;
+
+    if wanted(only, "enum") {
+        for (k, allowed) in [
+            ("KIND", KINDS),
+            ("MATURITY", MATURITIES),
+            ("AUTHORITY", AUTHORITIES),
+            ("STATUS", STATUSES),
+            ("SIZE", SIZES),
+        ] {
+            let v = p.get(k);
+            if v.trim().is_empty() {
+                continue;
+            }
+            if let Some(hit) = allowed.iter().find(|x| x.eq_ignore_ascii_case(v.trim())) {
+                if *hit != v {
+                    set(p, k, hit);
+                    done.push(format!("{k}={hit}"));
+                }
+            }
         }
-        if let Some(hit) = allowed.iter().find(|x| x.eq_ignore_ascii_case(v.trim())) {
-            if *hit != v {
-                set(p, k, hit);
-                done.push(format!("{k}={hit}"));
+        if lib == Lib::Canonical && p.get("STATUS").trim().is_empty() {
+            set(p, "STATUS", "ACTIVE");
+            done.push("STATUS=ACTIVE".into());
+        }
+    }
+
+    // 引用值里的坏形态：从任意字符串里取出真正的身份。
+    //
+    // 判定纯语法，不需要看别的记录，所以不存在"猜错目标"的风险；而修复不了的
+    // 那些（目标真被删了、指向旧库 References 路径）留着不动，由 `abook refs`
+    // 报告——**能纯语法修的就修，需要判断的绝不猜**。
+    if wanted(only, "refs") {
+        for k in ["PROMOTED_FROM", "PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"] {
+            let v = p.get(k);
+            if v.trim().is_empty() {
+                continue;
+            }
+            let mut changed = false;
+            let fixed: Vec<String> = v
+                .split([',', '，'])
+                .map(|x| x.trim())
+                .filter(|x| !x.is_empty())
+                .map(|one| match crate::rec::Record::canonical_ref(one) {
+                    Some(good) if good != one => {
+                        changed = true;
+                        good
+                    }
+                    _ => one.to_string(),
+                })
+                .collect();
+            if changed {
+                set(p, k, &fixed.join(","));
+                done.push(format!("{k} 引用值还原为规范身份"));
             }
         }
     }
-    if lib == Lib::Canonical && p.get("STATUS").trim().is_empty() {
-        set(p, "STATUS", "ACTIVE");
-        done.push("STATUS=ACTIVE".into());
-    }
-    // 引用值里的坏形态：从任意字符串里取出真正的身份。
-    //
-    // 判定纯语法，不需要看别的记录，所以不存在"猜错目标"的风险；而修复不了
-    // 的那些（目标真被删了、指向旧库 References 路径）留着不动，由 `abook refs`
-    // 报告——**能纯语法修的就修，需要判断的绝不猜**。
-    //
-    // 已知坏形态都来自 `update` 改写 ID 的那个 bug：ID 变成
-    // `N-<旧ID>-<新哈希>`，随后所有从 `id()` 写出的引用都继承了它。
-    for k in ["PROMOTED_FROM", "PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"] {
-        let v = p.get(k);
-        if v.trim().is_empty() {
-            continue;
-        }
-        let mut changed = false;
-        let fixed: Vec<String> = v
-            .split([',', '，'])
-            .map(|x| x.trim())
-            .filter(|x| !x.is_empty())
-            .map(|one| match crate::rec::Record::canonical_ref(one) {
-                Some(good) if good != one => {
-                    changed = true;
-                    good
-                }
-                _ => one.to_string(),
-            })
-            .collect();
-        if changed {
-            set(p, k, &fixed.join(","));
-            done.push(format!("{k} 引用值还原为规范身份"));
+
+    // 只有 ASCII 分号是结构性的；全角分号是内容，不动。
+    if wanted(only, "sep") {
+        for k in ["KEYS", "CONCEPTS", "ENTITIES", "RELATED_IDS"] {
+            let v = p.get(k);
+            if v.contains(';') {
+                let fixed = v.replace(';', ",");
+                set(p, k, &fixed);
+                done.push(format!("{k} 半角分号改逗号"));
+            }
         }
     }
-    // SEMICOLON lists -> commas, but only when it cannot be a field separator
-    // Only the ASCII semicolon is structural; the full-width one is content.
-    for k in ["KEYS", "CONCEPTS", "ENTITIES", "RELATED_IDS"] {
-        let v = p.get(k);
-        if v.contains(';') {
-            let fixed = v.replace(';', ",");
-            set(p, k, &fixed);
-            done.push(format!("{k} 半角分号改逗号"));
+
+    if wanted(only, "trim") {
+        for (_, v) in p.fields.iter_mut() {
+            let t = v.trim().to_string();
+            if *v != t {
+                *v = t;
+            }
         }
     }
-    // trim values
-    for (_, v) in p.fields.iter_mut() {
-        let t = v.trim().to_string();
-        if *v != t {
-            *v = t;
-        }
-    }
-    // derive SIZE from body length when missing
-    if p.get("SIZE").trim().is_empty() {
-        let n = p.body.len();
-        let v = size_for(n);
+
+    if wanted(only, "size") && p.get("SIZE").trim().is_empty() {
+        let v = size_for(p.body.len());
         set(p, "SIZE", v);
         done.push(format!("SIZE={v}"));
     }
-    // KEYS and CONCEPTS stand in for each other
-    if p.get("KEYS").trim().is_empty() && !p.get("CONCEPTS").trim().is_empty() {
-        let v = p.get("CONCEPTS");
-        set(p, "KEYS", &v);
-        done.push("KEYS 由 CONCEPTS 派生".into());
+
+    if wanted(only, "keys") {
+        if p.get("KEYS").trim().is_empty() && !p.get("CONCEPTS").trim().is_empty() {
+            let v = p.get("CONCEPTS");
+            set(p, "KEYS", &v);
+            done.push("KEYS 由 CONCEPTS 派生".into());
+        }
+        if p.get("CONCEPTS").trim().is_empty() && !p.get("KEYS").trim().is_empty() {
+            let v = p.get("KEYS");
+            set(p, "CONCEPTS", &v);
+            done.push("CONCEPTS 由 KEYS 派生".into());
+        }
     }
-    if p.get("CONCEPTS").trim().is_empty() && !p.get("KEYS").trim().is_empty() {
-        let v = p.get("KEYS");
-        set(p, "CONCEPTS", &v);
-        done.push("CONCEPTS 由 KEYS 派生".into());
-    }
+
     done
 }
+
 
 /// Body length -> SIZE bucket. Shared so write and re-derive agree.
 pub fn size_for(n: usize) -> &'static str {
