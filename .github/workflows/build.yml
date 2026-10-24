@@ -744,6 +744,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
+      # This job used to never check out the repository -- it only downloaded
+      # artifacts and published them. That was fine until the same-origin check
+      # arrived, which needs build.rs and the sources to produce a fingerprint
+      # to compare against: without a checkout `cargo build` dies with exit 101
+      # ("could not find Cargo.toml") and blocks the whole publish.
+      - uses: actions/checkout@v4
+      # 探针要用 build.rs 现场算指纹，所以这个 job 也需要 Rust。runner 自带
+      # 的那个版本不保证，显式装一个稳定的，免得哪天镜像变了校验就开始飘。
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -833,8 +842,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}"
-          # This job never checks out the repository, and `gh` infers the repo
-          # from git remotes. Without -R it died with "not a git repository",
+          # `gh` infers the repo from git remotes, and this job used to never
+          # check out the repository at all, so the inference failed. -R is
+          # kept even though a checkout now happens: the same-origin check
+          # needs sources, but this step should not depend on that. Without -R
+          # it died with "not a git repository",
           # the empty listing was swallowed by `|| true`, the loop deleted
           # nothing -- and the step still reported success while a stale
           # riscv64gc-unknown-linux-musl stayed published for a day.
