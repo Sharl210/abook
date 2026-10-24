@@ -295,8 +295,26 @@ pub fn validate(p: &Parsed, lib: Lib, filename: Option<&str>) -> Report {
 
 /// Apply the fixes the validator can perform without judgement.
 /// Returns the list of things changed.
-pub fn autofix(p: &mut Parsed, lib: Lib) -> Vec<String> {
+pub fn autofix(p: &mut Parsed, lib: Lib, filename: Option<&str>) -> Vec<String> {
     let mut done = Vec::new();
+    // ID 先对齐，因为身份错了后面所有引用都跟着错。
+    //
+    // 只在一个方向动：文件名是规范形态、而 ID 字段不是。反过来不动——
+    // 文件名是磁盘上的位置，改它等于搬家；改 ID 字段只是把标签写对。
+    // 带分号的老式复合行（`ID=x;PROJECT=y;...`）不碰，那是旧库字段打包写法。
+    if let Some(f) = filename {
+        let raw = p.get("ID");
+        if !raw.contains(';') {
+            let cur = raw.trim();
+            let stem = f.trim_end_matches(".md");
+            if crate::rec::Record::is_scheme_name(f)
+                && !crate::rec::Record::is_scheme_name(&format!("{cur}.md"))
+            {
+                set(p, "ID", stem);
+                done.push(format!("ID={stem}（对齐文件名）"));
+            }
+        }
+    }
     if p.get("FORMAT").trim().is_empty() {
         let v = if lib == Lib::Canonical {
             "CANONICAL_MEMORY_V2"
@@ -328,6 +346,37 @@ pub fn autofix(p: &mut Parsed, lib: Lib) -> Vec<String> {
     if lib == Lib::Canonical && p.get("STATUS").trim().is_empty() {
         set(p, "STATUS", "ACTIVE");
         done.push("STATUS=ACTIVE".into());
+    }
+    // 引用值里的坏形态：从任意字符串里取出真正的身份。
+    //
+    // 判定纯语法，不需要看别的记录，所以不存在"猜错目标"的风险；而修复不了
+    // 的那些（目标真被删了、指向旧库 References 路径）留着不动，由 `abook refs`
+    // 报告——**能纯语法修的就修，需要判断的绝不猜**。
+    //
+    // 已知坏形态都来自 `update` 改写 ID 的那个 bug：ID 变成
+    // `N-<旧ID>-<新哈希>`，随后所有从 `id()` 写出的引用都继承了它。
+    for k in ["PROMOTED_FROM", "PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"] {
+        let v = p.get(k);
+        if v.trim().is_empty() {
+            continue;
+        }
+        let mut changed = false;
+        let fixed: Vec<String> = v
+            .split([',', '，'])
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .map(|one| match crate::rec::Record::canonical_ref(one) {
+                Some(good) if good != one => {
+                    changed = true;
+                    good
+                }
+                _ => one.to_string(),
+            })
+            .collect();
+        if changed {
+            set(p, k, &fixed.join(","));
+            done.push(format!("{k} 引用值还原为规范身份"));
+        }
     }
     // SEMICOLON lists -> commas, but only when it cannot be a field separator
     // Only the ASCII semicolon is structural; the full-width one is content.

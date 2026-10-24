@@ -277,7 +277,11 @@ pub fn cmd_repair(a: &Args) -> R<i32> {
             continue;
         }
         let mut p2 = parsed.clone();
-        let done = schema::autofix(&mut p2, lib);
+        let fname = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let done = schema::autofix(&mut p2, lib, Some(&fname));
         if done.is_empty() {
             continue;
         }
@@ -356,4 +360,311 @@ pub fn cmd_repair(a: &Args) -> R<i32> {
         )?;
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------- 引用完整性
+
+/// `abook refs` — 全库检查引用是否指得着。
+///
+/// 为什么必须由工具做：`PROMOTED_FROM`、`RELATED_IDS`、`SUPERSEDES` 这些字段
+/// 写的是**另一条记录的身份**。身份一旦对不上（记录被删、ID 被写坏、改名没
+/// 同步），字段本身还是合法的非空字符串，逐条校验永远看不出问题——只有把全
+/// 库的身份集建起来对一遍才能发现。
+///
+/// 这类悬空以前只能靠临时脚本核对，脚本还会因为不认旧库的
+/// `ID=x;PROJECT=y` 打包写法而误报一大片。工具知道所有的历史形态，所以由它
+/// 来判断，并且只报告不改写：**替换成什么是人的决定，不是工具的猜测**。
+/// 值是否长得像一条记录的身份。
+///
+/// 身份形态：`<N|C|AB2-N|AB2-C>-<时间戳或序号>-<哈希或语义尾巴>`，无空格、
+/// 无路径分隔符、无中文标点。旧库的语义尾巴（`quotepair`/`imeassist`）也算身份，
+/// 因为它确实是记录名。
+fn id_shaped(v: &str) -> bool {
+    if v.contains('/') || v.contains(' ') || v.contains('.') {
+        return false;
+    }
+    if v.chars().any(|c| c == '（' || c == '）' || c == '，' || c == '；' || c == '、') {
+        return false;
+    }
+    let parts: Vec<&str> = v.split('-').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let head_ok = matches!(parts[0], "N" | "C" | "AB2");
+    let body_ok = parts[1..].iter().all(|p| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == 'T')
+    });
+    head_ok && body_ok
+}
+
+pub fn cmd_refs(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let libs: Vec<Lib> = match a.get("lib").unwrap_or("both") {
+        "canonical" | "c" => vec![Lib::Canonical],
+        "candidate" | "n" => vec![Lib::Candidate],
+        _ => vec![Lib::Canonical, Lib::Candidate],
+    };
+
+    // 身份集：文件名干 + ID 字段的全部别名。
+    //
+    // 必须两个来源都收：旧库靠 ID 字段认身（文件名是 `AB2-C-001` 这种顺序号），
+    // 新库靠文件名认身。只认一个方向都会把另一半判成悬空。
+    let mut known: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut all = Vec::new();
+    for lib in &libs {
+        for rec in load_lib(&root, *lib) {
+            let stem = rec.file_name().trim_end_matches(".md").to_string();
+            known.insert(stem.clone());
+            // ID 字段可能是 `x` 也可能是 `x;PROJECT=y;TASK=z` 一整个打包行。
+            let raw = rec.get("ID");
+            for part in raw.split(';') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                match part.strip_prefix("ID=") {
+                    Some(v) => {
+                        known.insert(v.trim().to_string());
+                    }
+                    None if !part.contains('=') => {
+                        known.insert(part.to_string());
+                    }
+                    None => {}
+                }
+            }
+            all.push((rec, stem));
+        }
+    }
+
+    // 会被当作"指向别处"的字段。前两个是晋升链，中间两个是替代链，
+    // RELATED_IDS 是通用关联——它们的共同点是：值必须是另一条记录的身份。
+    const REF_FIELDS: [&str; 5] =
+        ["PROMOTED_FROM", "PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"];
+
+    let mut dangling: Vec<(String, String, String)> = Vec::new(); // (记录, 字段, 悬空值)
+    let mut checked = 0usize;
+    let mut other = 0usize; // 非身份值（文档路径/描述文本），不计入悬空
+    for (rec, stem) in &all {
+        for f in REF_FIELDS {
+            let v = rec.get(f);
+            if v.trim().is_empty() {
+                continue;
+            }
+            for one in v.split([',', '，']) {
+                let one = one.trim();
+                if one.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                if known.contains(one) {
+                    continue;
+                }
+                // 不是所有非空值都是身份。
+                //
+                // 旧库的 `PROMOTED_FROM` 存的是**来源文档路径**
+                // （`References/core/prompt-engineering.md#某节`），
+                // `SUPERSEDES` 存的是**被取代内容的自然语言描述**
+                // （`旧按Agent与复杂度默认激活的Aurorix行为`）。这两类值本来就
+                // 不该拿去查记录，把它们报成"悬空"是分类错误，不是数据错误——
+                // 初版就是这样多报了 117 处，让人以为库坏得很厉害。
+                //
+                // 判据按形状：身份是 `<前缀>-<时间戳>-<尾巴>` 的无空格三段结构；
+                // 含路径分隔符、含空格、含中文标点的都是另一种东西。
+                if !id_shaped(one) {
+                    other += 1;
+                    continue;
+                }
+                dangling.push((stem.clone(), f.to_string(), one.to_string()));
+            }
+        }
+    }
+
+    // ---- --fix：只在能唯一推导时改写，推不出来就留着
+    //
+    // 改名而不改引用是这类悬空的主因：旧身份带着语义尾巴
+    // （`N-20260930T160500-quotepair`），改名后变成内容哈希
+    // （`N-20260930T160500-3a969b6d`）。两者的**时间戳部分完全相同**——
+    // 时间戳是建档那一刻，同前缀同时间戳就是同一条记录。
+    //
+    // 所以映射是可以推出来的，但只在唯一时才算数：同一秒建两条记录会让时间戳
+    // 撞车，那时任何选择都是猜。**能推的不问、推不出的不猜**，是这个修复的
+    // 全部原则。
+    // `--json` 时所有人类可读的行都不能出现：调用方要把输出当 JSON 解析，
+    // 混进一行 `C-xxx: PROMOTED_FROM → ...` 整个结果就废了。所以 --fix 的
+    // 逐条报告在 json 模式下推迟到最后一起输出。
+    let quiet = a.has("json");
+    // `--fix` 本身即表示"要写"，只用 `--dry-run` 拦。
+    //
+    // `dry_run()` 的判定是「没有 apply/write/yes 就算预演」，它不认 `--fix`，
+    // 于是 `refs --fix --approve` 被自己的预演分支当成"没说要写"而跳过——
+    // 参数齐全却什么都不做，还打印 `[dry-run]`，等于告诉调用方"我在预演"。
+    // 这类"参数名没被自己的开关函数认识"的坑，与 `--dry-run` 当初被忽略同源。
+    let fix_dry = a.has("dry-run") || a.has("dryrun");
+    if a.has("fix") && !dangling.is_empty() {
+        use std::collections::BTreeMap;
+        let mut by_stamp: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for (_, stem) in &all {
+            let parts: Vec<&str> = stem.split('-').collect();
+            if parts.len() == 3 {
+                by_stamp
+                    .entry((parts[0].to_string(), parts[1].to_string()))
+                    .or_default()
+                    .push(stem.clone());
+            }
+        }
+        let dry = fix_dry;
+        let mut planned: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+        let mut unresolved: Vec<(String, String, String, &str)> = Vec::new();
+        for (rec, field, val) in &dangling {
+            let parts: Vec<&str> = val.split('-').collect();
+            if parts.len() != 3 {
+                unresolved.push((rec.clone(), field.clone(), val.clone(), "形态无法解析"));
+                continue;
+            }
+            let key = (parts[0].to_string(), parts[1].to_string());
+            match by_stamp.get(&key).map(|v| v.as_slice()) {
+                Some([one]) => {
+                    // 大小写不同的哈希尾巴也归到这一条
+                    planned
+                        .entry(rec.clone())
+                        .or_default()
+                        .push((field.clone(), val.clone(), one.clone()));
+                }
+                Some(many) if many.len() > 1 => {
+                    unresolved.push((rec.clone(), field.clone(), val.clone(), "同时间戳有多条，无法判定"));
+                }
+                _ => {
+                    unresolved.push((rec.clone(), field.clone(), val.clone(), "目标记录不存在"));
+                }
+            }
+        }
+
+        let total_fix: usize = planned.values().map(|v| v.len()).sum();
+        if !quiet {
+            for (rec, subs) in &planned {
+                for (field, old, new) in subs {
+                    crate::say_line!("{rec}: {field} {old} → {new}");
+                }
+            }
+            for (rec, field, val, why) in &unresolved {
+                crate::say_line!("{rec}: {field} → {val}（{why}，保持原样）");
+            }
+            crate::say_line!(
+                "\n可修 {} 处，无法判定 {} 处。",
+                total_fix,
+                unresolved.len()
+            );
+        }
+        if dry {
+            if quiet {
+                crate::say_line!(
+                    "{{\"planned\":{},\"unresolved\":{},\"applied\":0}}",
+                    total_fix,
+                    unresolved.len()
+                );
+            } else {
+                crate::say_line!("[dry-run] 未写入。去掉 --dry-run 执行。");
+            }
+            return Ok(if total_fix > 0 { 5 } else { 0 });
+        }
+        if total_fix == 0 {
+            return Ok(0);
+        }
+        if libs.contains(&Lib::Canonical) && !a.has("approve") {
+            return blocked("修复正式库引用需要 --approve。");
+        }
+        let mut wrote = 0usize;
+        for (rec, subs) in &planned {
+            let path = match libs.iter().find_map(|l| {
+                // `Lib::dir()` 返回的就是 `canonical/records`,别再拼一次
+                let p = root.join(l.dir()).join(format!("{rec}.md"));
+                if p.exists() {
+                    Some((p, *l))
+                } else {
+                    None
+                }
+            }) {
+                Some(x) => x,
+                None => continue,
+            };
+            let mut r = crate::rec::Record::parse(&path.0, path.1)?;
+            for (field, old, new) in subs {
+                let cur = r.get(field);
+                let rebuilt: Vec<String> = cur
+                    .split([',', '，'])
+                    .map(|x| x.trim())
+                    .filter(|x| !x.is_empty())
+                    .map(|x| if x == old { new.clone() } else { x.to_string() })
+                    .collect();
+                r.set(field, &rebuilt.join(","));
+            }
+            write_atomic(&path.0, &r.render())?;
+            let back = crate::rec::Record::parse(&path.0, path.1)?;
+            if back.get("TITLE").is_empty() {
+                return integrity(format!("修复后复读失败: {rec}"));
+            }
+            wrote += 1;
+        }
+        if quiet {
+            crate::say_line!(
+                "{{\"planned\":{},\"unresolved\":{},\"applied\":{}}}",
+                total_fix,
+                unresolved.len(),
+                wrote
+            );
+        } else {
+            crate::say_line!("已修复 {wrote} 条记录的引用。");
+        }
+        return Ok(0);
+    }
+
+    if a.has("json") {
+        let items = dangling
+            .iter()
+            .map(|(r, f, v)| {
+                format!(
+                    "{{\"record\":{},\"field\":{},\"target\":{}}}",
+                    jstr(r),
+                    jstr(f),
+                    jstr(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::say_line!(
+            "{{\"records\":{},\"refs_checked\":{},\"dangling\":{},\"items\":[{items}]}}",
+            all.len(),
+            checked,
+            dangling.len()
+        );
+    } else {
+        if dangling.is_empty() {
+            crate::say_line!(
+                "引用完整性通过：{} 条记录、{} 个引用，全部指得着",
+                all.len(),
+                checked
+            );
+        } else {
+            for (r, f, v) in &dangling {
+                crate::say_line!("{r}: {f} → {v}");
+            }
+            crate::say_line!(
+                "\n{} 条记录、{} 个引用中有 {} 个悬空。",
+                all.len(),
+                checked,
+                dangling.len()
+            );
+            crate::say_line!(
+                "悬空的常见成因：目标记录已删除、ID 被写坏（`abook repair --apply` 可对齐）、\
+                 改名后引用未同步（`abook rename` 会自动改，手改文件名不会）。"
+            );
+            crate::say_line!(
+                "工具只报告不改写：替换成哪一条是人的判断，猜错比留着更坏。\
+                 确认目标后可用 `abook set <记录> <字段> <正确身份>` 修正。"
+            );
+        }
+    }
+    Ok(if dangling.is_empty() { 0 } else { 5 })
 }

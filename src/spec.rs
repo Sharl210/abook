@@ -72,6 +72,13 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("commit", "text,file,slug,body,body-file", "json,dry-run", "写变更记录", "--slug t --body x"),
     ("audit", "lib,all", "all,json", "全面体检", ""),
     ("check", "lib", "json", "格式校验，不改文件", ""),
+    (
+        "refs",
+        "lib",
+        "fix,approve,dry-run,json",
+        "检查引用是否指得着；--fix 只修能唯一推导的",
+        "--fix --dry-run",
+    ),
     ("lint", "lib", "json", "风格检查", ""),
     ("doctor", "lib,fix", "fix,apply,json", "诊断，--fix 就地修", "--fix --dry-run"),
     ("reconcile", "lib", "fix,apply,json", "地图与磁盘对账", "--dry-run"),

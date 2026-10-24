@@ -999,7 +999,7 @@ pub fn run(verbose: bool) -> (usize, usize, usize, Vec<String>) {
             }
             let unknown: Vec<&String> = seen
                 .iter()
-                .filter(|k| !crate::rec::KNOWN_KEYS.contains(&k.as_str()))
+                .filter(|k| !crate::rec::is_known_key(k))
                 .collect();
             // A handful of container/structural names are not record fields.
             const STRUCTURAL: &[&str] = &[

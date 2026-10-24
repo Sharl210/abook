@@ -40,7 +40,25 @@ pub const KNOWN_KEYS: &[&str] = &[
     "AT", "AUTHORIZED_BY", "CANDIDATE_SOURCE", "DECISION", "EFFECT", "NOTE",
     "NOTE_UNCERTAINTY", "PATH_CORRECTION", "PROMOTION_RECORD", "REVISION_ID",
     "TITLE_ALT", "VERIFIED_BY",
+    // 版本标记：真库里有些记录用 `V262=` 这种形式标注它属于哪一版。
+    // 自检每次读真库都会重新发现它们——不认识就会被当成上一字段的续行，
+    // 那一条字段值会莫名其妙变长，而头部看不出问题。按前缀认，不逐个列。
 ];
+
+/// 这个大写标识是不是一个已知的记录字段。
+///
+/// 单独的 `V<数字>` 不在常量表里：它是版本标记，形态固定但会随版本增长，
+/// 逐个列进表等于每出一版就改一次代码。按形态认，形态本身足够严——全大写
+/// 字母加数字，不会与正文里的大写单词混淆（后者不会恰好是 `V` + 纯数字）。
+pub fn is_known_key(k: &str) -> bool {
+    if KNOWN_KEYS.contains(&k) {
+        return true;
+    }
+    match k.strip_prefix('V') {
+        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lib {
@@ -203,11 +221,28 @@ impl Record {
     }
     pub fn id(&self) -> String {
         let v = self.get("ID");
-        if v.contains(';') {
+        let first = if v.contains(';') {
             v.split(';').next().unwrap_or("").trim().to_string()
         } else {
-            v
+            v.trim().to_string()
+        };
+        // 身份必须可解析，否则一切引用都会悬空。
+        //
+        // `ID` 是头部字段，能被写坏（曾经 `update` 就把 ID 改成了
+        // `N-<旧ID>-<新哈希>`，套两层前缀）。而文件名是磁盘上的规范位置，
+        // 写不坏。所以当 ID 字段不成形、文件名却是规范形态时，以文件名为准。
+        //
+        // 这一层兜底会让 `PROMOTED_FROM`/`RELATED_IDS` 这类由 `id()` 写出的
+        // 引用天然可解析，不必依赖每个调用点各自小心。
+        if !Self::is_scheme_name(&format!("{first}.md")) {
+            if let Some(stem) = self.path.file_stem() {
+                let stem = stem.to_string_lossy().to_string();
+                if Self::is_scheme_name(&format!("{stem}.md")) {
+                    return stem;
+                }
+            }
         }
+        first
     }
     pub fn title(&self) -> String {
         self.get("TITLE")
@@ -451,6 +486,60 @@ impl Record {
     /// Filename stem derived from this record's own content.
     pub fn id_for(&self, stamp: &str) -> String {
         format!("{}-{}-{}", self.lib.prefix(), stamp, self.content_hash())
+    }
+
+    /// 从任意字符串里找出第一个合法的身份形态，返回它本身。
+    ///
+    /// 用途是**修复被写坏的引用**。坏值有几种已知形态，而它们共同点是：
+    /// 真正的身份作为子串仍然完整地留在里面。
+    ///
+    ///   `N-N-20261024T124521-1a2c1f34-8aa8f744`   ← 双前缀 + 尾部多余哈希
+    ///   `N-20261024T124521-1a2c1f34-8aa8f744`      ← 尾部多余哈希
+    ///   `N-20261024T124521-1a2c1f34`               ← 正常
+    ///
+    /// 三者都含 `N-20261024T124521-1a2c1f34` 这个子串。所以不去猜"该剥几层"，
+    /// 而是找出最早出现的合法身份——合法形态恰好是定长的三段结构，扫描判定
+    /// 不存在歧义，也不需要看到其他记录。
+    pub fn canonical_ref(s: &str) -> Option<String> {
+        if Self::is_scheme_name(&format!("{s}.md")) {
+            return Some(s.to_string());
+        }
+        let b = s.as_bytes();
+        let n = b.len();
+        // 最短合法身份：前缀(1) + '-' + 时间(15) + '-' + 哈希(8) = 26
+        if n < 26 {
+            return None;
+        }
+        let stamp_ok = |i: usize| -> bool {
+            // ddddddddTdddddd
+            (0..15).all(|k| {
+                let c = b[i + k];
+                if k == 8 {
+                    c == b'T'
+                } else {
+                    c.is_ascii_digit()
+                }
+            })
+        };
+        for i in 0..=n.saturating_sub(26) {
+            if b[i] != b'N' && b[i] != b'C' {
+                continue;
+            }
+            if b[i + 1] != b'-' || !stamp_ok(i + 2) || b[i + 17] != b'-' {
+                continue;
+            }
+            if !(0..8).all(|k| b[i + 18 + k].is_ascii_hexdigit()) {
+                continue;
+            }
+            // 哈希 8 位之后不能再紧跟十六进制字符，否则我们只截到了一半
+            if let Some(next) = b.get(i + 26) {
+                if next.is_ascii_hexdigit() {
+                    continue;
+                }
+            }
+            return Some(s[i..i + 26].to_string());
+        }
+        None
     }
 
     pub fn is_scheme_name(name: &str) -> bool {

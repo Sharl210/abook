@@ -390,6 +390,18 @@ impl Args {
     /// Opt-in via `--apply` is the only shape that survives being called by
     /// mistake, and it matches how `leftover` already behaved.
     pub fn dry_run(&self) -> bool {
+        // `--dry-run` 无条件优先：显式说了"别写"就必须别写。
+        //
+        // 初版只判断"有没有 --apply"：`has("apply") || has("write") || has("yes")`
+        // 全不成立才算预演，`--dry-run` 这个参数从头到尾没被读过。于是
+        // `repair --apply --dry-run`（"先预演看看"的自然写法）会**真的写入**——
+        // 一次本该只读的核对把库改了。实测踩到：三条记录的 RELATED_IDS 被
+        // 静默剥掉一层前缀。
+        //
+        // 预演是安全侧，安全侧参数必须在最前面短路，不能与写入开关并列判断。
+        if self.has("dry-run") || self.has("dryrun") {
+            return true;
+        }
         !(self.has("apply") || self.has("write") || self.has("yes"))
     }
 

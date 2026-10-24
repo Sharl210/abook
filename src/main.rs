@@ -125,6 +125,7 @@ fn help_text() -> String {
 
 ═══ 修：格式问题 ═══
   check [记录|-]            检查一条（或 stdin），只报不改
+  refs [--fix]              全库检查引用是否指得着；--fix 只修能唯一推导的
   repair [记录] [--apply]   按校验器自动修复，默认预演
   normalize [lib] [--dry-run]   旧命名升级为新方案
   refresh [lib]             按磁盘重建地图并推进收录时刻
@@ -945,6 +946,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         // -- audit
         ("audit", cmd_audit::cmd_audit),
         ("check", cmd_audit::cmd_check),
+        ("refs", cmd_audit::cmd_refs),
         ("repair", cmd_audit::cmd_repair),
         ("fix", cmd_audit::cmd_repair),
         // -- admin
