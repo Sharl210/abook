@@ -783,6 +783,47 @@ jobs:
             exit 1
           fi
           echo "产物齐全: $COUNT/$EXPECTED"
+      # 数量对了不等于内容对了。上面只检查「有 15 个文件」；某个平台完全可能
+      # 是上一轮的旧二进制，其余 14 个是新的——文件数齐整，实际有一个平台在跑
+      # 几个月前的代码，而固定下载地址让用户无从察觉。
+      #
+      # build.rs 把所有 src/**/*.rs 的 FNV-1a 指纹编进二进制（--version 的 src=），
+      # 与架构无关，所以「同源」可以直接证明：每个文件里都要出现同一个指纹串。
+      # 用 grep -F 定点匹配而不是执行目标文件——15 个里有 Windows/macOS/异架构，
+      # 在这台 runner 上根本跑不起来，非要执行就等于永远验不了它们。
+      - name: 校验 15 个产物同源
+        if: env.COUNT != '0' && inputs.only == ''
+        run: |
+          set -eu
+          # 期望指纹：从 runner 原生平台（linux x86_64 host）编一个探针出来，
+          # 而不是从 build.rs 重算——重算要在 CI 里再复制一份 FNV 实现，两份
+          # 迟早漂，漂了之后这个校验会得出完全错误的结论。
+          cargo build --release --quiet
+          EXPECT=$(./target/release/abook version | sed -n 's/.*src=\([0-9a-f]\{16\}\).*/\1/p')
+          if [ -z "$EXPECT" ]; then
+            echo "::error::无法从本机探针取得源码指纹"
+            ./target/release/abook version
+            exit 1
+          fi
+          echo "期望指纹: $EXPECT"
+          DIFFER=""
+          MISSING=""
+          for f in dist/abook-*; do
+            [ -e "$f" ] || continue
+            if grep -aq -F "$EXPECT" "$f"; then
+              echo "同源: $(basename "$f")"
+            else
+              echo "::error::不同源: $(basename "$f")"
+              DIFFER="$DIFFER $(basename "$f")"
+            fi
+          done
+          if [ -n "$DIFFER" ]; then
+            echo "::error::以下产物不是当前源码编出来的:$DIFFER"
+            echo "必须整体重编这 15 个，不能只补跑出问题的那几个——补跑出来的必然与其余不同源"
+            exit 1
+          fi
+          echo "15 个产物全部同源"
+
       # Assets for targets that no longer exist would otherwise stay published
       # forever (a stale riscv64gc-unknown-linux-musl did exactly this), so a
       # full run prunes anything the current matrix does not produce.

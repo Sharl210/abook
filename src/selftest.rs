@@ -1809,11 +1809,17 @@ pub fn run(verbose: bool) -> (usize, usize, usize, Vec<String>) {
                     }
                 }
             }
-            // the summary line spells them space-separated after a colon
+            // The summary line spells them space-separated after a colon.
+            // Scope it to the vault line itself: `skill` now has its own
+            // `子命令：` summary, and matching on the colon alone swept its
+            // subcommands into the vault list and reported six of them missing.
             if let Some(idx) = t.find("子命令：") {
-                for word in t[idx + "子命令：".len()..].split_whitespace() {
-                    if word.chars().all(|c| c.is_ascii_lowercase()) && word.len() > 1 {
-                        listed.push(word.to_string());
+                let head = t[..idx].trim();
+                if head == "vault" {
+                    for word in t[idx + "子命令：".len()..].split_whitespace() {
+                        if word.chars().all(|c| c.is_ascii_lowercase()) && word.len() > 1 {
+                            listed.push(word.to_string());
+                        }
                     }
                 }
             }

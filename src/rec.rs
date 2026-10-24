@@ -140,14 +140,38 @@ pub fn fold_to_one_line(v: &str) -> String {
 
 impl Record {
     pub fn get(&self, k: &str) -> String {
-        self.fields
-            .iter()
+        if let Some((_, v)) = self.fields.iter().find(|(kk, _)| kk == k) {
+            return v.clone();
+        }
+        self.promo_fields()
+            .into_iter()
             .find(|(kk, _)| kk == k)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v)
             .unwrap_or_default()
     }
+    /// True if the key is readable by `get` -- a header field or a key inside a
+    /// tail block.
+    ///
+    /// Tail blocks used to be invisible to `get`: the promotion marker written
+    /// by `promote` lives in `[PROMOTION]` after the body, so `get <rec>
+    /// PROMOTED_TO` answered "no such field" for a field that was plainly on
+    /// disk in the same file. That is a trap, not a distinction -- a caller
+    /// asking for a field should not have to know which block holds it.
     pub fn has(&self, k: &str) -> bool {
         self.fields.iter().any(|(kk, _)| kk == k)
+            || self.promo_fields().into_iter().any(|(kk, _)| kk == k)
+    }
+    /// The `[PROMOTION]` block parsed into key/value pairs.
+    pub fn promo_fields(&self) -> Vec<(String, String)> {
+        let Some(p) = &self.promotion else {
+            return Vec::new();
+        };
+        p.lines()
+            .filter_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                Some((k.trim().to_string(), v.trim().to_string()))
+            })
+            .collect()
     }
     /// Set a header field. Field values occupy exactly one line: a newline
     /// inside a value silently breaks every reader that walks the file line by

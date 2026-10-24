@@ -44,6 +44,8 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("review", "page,per-page,show", "json", "晋升记录", "--limit 2"),
     ("tree", "lib,page,per-page,depth", "json", "目录树", "--depth 1"),
     ("stats", "lib", "json", "统计", ""),
+    ("skill", "root,title,body,body-file,reason", "approve,force,dry-run,json", "Skill 约定与候选管理；子命令见 skill guide", "guide"),
+    ("spec", "root", "json", "取回被抽离的规范全文；不带名字列目录", "plan"),
     ("state", "", "json", "库状态", ""),
     ("paths", "", "json", "各目录绝对路径", ""),
     ("budget", "", "json", "读取量估算", ""),

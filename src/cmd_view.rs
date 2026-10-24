@@ -62,6 +62,14 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                         jstr(&truncate_chars(v, 60))
                     ));
                 }
+                for (k, v) in rec.promo_fields() {
+                    items.push(format!(
+                        "{{\"field\":{},\"chars\":{},\"preview\":{}}}",
+                        jstr(&k),
+                        v.chars().count(),
+                        jstr(&truncate_chars(&v, 60))
+                    ));
+                }
                 items.push(format!(
                     "{{\"field\":\"BODY\",\"chars\":{},\"preview\":{}}}",
                     rec.body.chars().count(),
@@ -75,9 +83,12 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                 );
                 return Ok(0);
             }
-            // no field: list the field names only
+            // no field: list every readable field, tail blocks included
             for (k, v) in &rec.fields {
                 println!("{k}\t{}\t{}", v.chars().count(), truncate_chars(v, 60));
+            }
+            for (k, v) in rec.promo_fields() {
+                println!("{k}\t{}\t{}", v.chars().count(), truncate_chars(&v, 60));
             }
             println!("BODY\t{}\t{}", rec.body.chars().count(), truncate_chars(&rec.body, 60));
             Ok(0)

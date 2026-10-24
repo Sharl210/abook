@@ -16,10 +16,13 @@ mod selftest;
 mod cmd_admin;
 mod cmd_branch;
 mod spec;
+mod spec_text;
+mod cmd_spec;
 mod cmd_edit;
 mod cmd_audit;
 mod cmd_view;
 mod cmd_read;
+mod cmd_skill;
 mod cmd_vault;
 mod cmd_write;
 mod cmd_write_sync;
@@ -206,6 +209,10 @@ fn help_text() -> String {
 
   vault      子命令：ls get put rm ledger export import verify rekey
                      lint（名册对账） repair（重建名册） names（只列文件名）
+  skill      子命令：guide new candidate candidates read decide lint path
+                     Skill 约定与候选反哺；候选落 ~/AgentSkills/<名>/candidates/
+  spec       不带名字列目录；spec <名> 取回该规范全文
+                     可用：plan ulw security compaction maintenance magic skill
   detect  install  version  selftest  help
 
 ═══ 参数拼写容错 ═══
@@ -870,6 +877,9 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("-h", cmd_help),
         ("commands", cmd_commands),
         ("version", cmd_version),
+        // -- skill
+        ("skill", cmd_skill::cmd_skill),
+        ("spec", cmd_spec::cmd_spec),
         ("--version", cmd_version),
         ("-V", cmd_version),
         ("describe", cmd_branch::cmd_describe),
