@@ -15,11 +15,13 @@ impl Page {
         // `--per-page 0` means "no pagination". It used to be clamped to 1, so
         // a caller asking for everything got a single row and no error -- the
         // worst kind of wrong answer, because it looks like the library only
-        // holds one record. The default also disagreed with the documented 30.
+        // holds one record. The default row count is deliberately generous
+        // (200): a modern caller can read a few hundred rows in one reply, and
+        // paging that early costs an extra round trip for no benefit.
         let per = match a.num("per-page").or_else(|| a.num("per")) {
             Some(0) => usize::MAX,
             Some(n) => n.clamp(1, 5000) as usize,
-            None => 30,
+            None => 200,
         };
         // Guard the ceiling forms: with `per == usize::MAX` (the "no
         // pagination" sentinel) `total + per - 1` overflows and pages collapses

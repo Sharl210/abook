@@ -167,7 +167,7 @@ fn help_text() -> String {
   version                   版本
 
 ═══════ 通用参数 ═══
-  --page N --per-page N     所有列表命令都分页（默认 30，0=不分页）
+  --page N --per-page N     所有列表命令都分页（默认 200，0=不分页）
   --json                    机器可读输出
   --dry-run                 预演，不写盘
   --approve                 授权写正式库

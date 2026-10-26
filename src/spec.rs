@@ -161,7 +161,7 @@ pub fn spec_for(cmd: &str) -> Option<(String, String, String)> {
         // It used to be, on the theory that every list command pages. Only 15 of
         // 70 actually read the flags; the other 55 accepted them in silence and
         // ignored them, and `describe set` cheerfully advertised "--page /
-        // --per-page（默认 30）" for a command that writes one field and has
+        // --per-page（默认 200）" for a command that writes one field and has
         // nothing to page. A caller who trusts that line adds `--per-page 5` to
         // a `set` and cannot tell from the exit code that it did nothing.
         // Rows that page list `page,per-page` themselves; the rest now reject

@@ -1933,12 +1933,12 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
         let a5 = mk(&["list", "--per-page", "5"]);
         let p5 = crate::paging::Page::from_args(&a5, 507);
         let ok = p0.per == usize::MAX && p0.start() == 0 && p0.end() == 507
-            && dflt.per == 30
+            && dflt.per == 200
             && p5.per == 5 && p5.pages == 102;
         if ok {
             pass += 1;
             if verbose {
-                msgs.push("PASS  分页：per-page 0 返回全部、默认 30、5 条分 102 页".to_string());
+                msgs.push("PASS  分页：per-page 0 返回全部、默认 200、5 条分 102 页".to_string());
             }
         } else {
             fail += 1;

@@ -599,7 +599,7 @@ pub fn cmd_describe(a: &Args) -> R<i32> {
                     .any(|p| p.trim().trim_start_matches("--") == n)
             };
             if has("page") || has("per-page") {
-                crate::say_line!("分页: 支持 --page / --per-page（默认 30，0=不分页）");
+                crate::say_line!("分页: 支持 --page / --per-page（默认 200，0=不分页）");
             } else {
                 crate::say_line!("分页: 此命令不分页");
             }
