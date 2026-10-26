@@ -71,7 +71,18 @@ pub fn all_dirs(rec_path: &Path) -> Vec<PathBuf> {
     RECOGNISED
         .iter()
         .map(|suf| rec_path.with_file_name(format!("{stem}-{suf}")))
-        .filter(|p| p.is_dir())
+        // 用 symlink_metadata 判定，不跟随链接。
+        //
+        // `is_dir()` 会跟随符号链接，于是 `-refs -> /tmp/whatever` 被当成
+        // 本记录的附件目录，`scan()` 进去把目标目录里的文件列成"附件"，
+        // `attach rm` 再按这个名字去删。删除那一侧已经有规范化前缀校验兜底，
+        // 但列表也不该把别人的文件算成自己的：那会让 `attach list`、
+        // 记录的附件统计、`attach sync` 全部报出不存在的关联。
+        .filter(|p| {
+            fs::symlink_metadata(p)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false)
+        })
         .collect()
 }
 
@@ -145,7 +156,23 @@ pub fn scan(rec_path: &Path) -> Files {
         };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            // 用 symlink_metadata，不用 metadata。
+            //
+            // `metadata` 会跟随符号链接，于是 `-refs/victim.txt -> /tmp/x`
+            // 会被当成一个正常附件列出来，随后 `attach rm` 就把它删了——
+            // 删的是 `/tmp/x`，记录目录外面那个文件。同理，一个指向外部的
+            // `-refs` 目录符号链接会让 add/commit 写到目标之外。
+            //
+            // 附件是本记录携带的文件，符号链接不是：它指向的东西属于别处，
+            // 不在这个记录的所有权范围内，扫的时候直接跳过。
+            let lmd = match fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if lmd.file_type().is_symlink() {
+                continue;
+            }
+            if lmd.is_dir() {
                 stack.push(p);
                 continue;
             }
@@ -468,6 +495,20 @@ fn add(a: &Args) -> R<i32> {
         }
         return Ok(0);
     }
+    // 附件目录本身若是符号链接，写进去等于写到别处。
+    //
+    // `-refs -> /somewhere/else` 时 `dir.is_dir()` 为真（跟随链接），随后
+    // 复制文件就落到目标目录里；`commit_manifest` 也会去改那边的清单。附件
+    // 目录必须是我自己建的真实目录，不接受别人预先摆好的链接。
+    match fs::symlink_metadata(&dir) {
+        Ok(md) if md.file_type().is_symlink() => {
+            return blocked(format!(
+                "附件目录 {} 是符号链接，不是本记录自己的目录，拒绝写入",
+                dir.display()
+            ))
+        }
+        _ => {}
+    }
     if !dir.is_dir() {
         fs::create_dir_all(&dir)?;
     }
@@ -554,6 +595,30 @@ fn remove(a: &Args) -> R<i32> {
     };
     let base = path.parent().unwrap_or(Path::new("."));
     let full = base.join(&i.name);
+    // 删除是唯一不可逆的附件操作，落盘前必须确认这个路径真的在附件目录里。
+    //
+    // 名字来自扫描结果，而扫描结果来自磁盘——磁盘上可以有 `..`、可以是符号
+    // 链接。`base.join("../../etc/x")` 会得到目录外的路径，`remove_file`
+    // 照删不误。这里用规范化后的前缀比对，并额外拒绝符号链接本身。
+    if let Ok(md) = fs::symlink_metadata(&full) {
+        if md.file_type().is_symlink() {
+            return blocked(format!(
+                "{} 是符号链接，不是本记录的附件，拒绝删除",
+                i.name
+            ));
+        }
+    }
+    let inrefs = match (fs::canonicalize(&full), fs::canonicalize(base)) {
+        (Ok(f), Ok(b)) => f.starts_with(&b),
+        // 规范化失败（文件已不在等）交给下面的 remove_file 报原始错误。
+        _ => true,
+    };
+    if !inrefs {
+        return blocked(format!(
+            "{} 规范化后落在记录目录之外，拒绝删除",
+            i.name
+        ));
+    }
     if a.has("dry-run") {
         crate::say_line!("[dry-run] 将删除 {}", rel_cwd(&full));
         return Ok(0);
