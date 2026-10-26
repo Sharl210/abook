@@ -299,9 +299,12 @@ pub fn ledger_body(root: &Path) -> String {
 }
 
 /// Sync the ledger entry with the actual directory contents.
-pub fn sync_ledger(root: &Path) -> R<(bool, usize)> {
+/// 名册与保险箱是否已经分叉——纯读，不写盘。
+///
+/// 抽出来是为了让 `--dry-run` 能回答"要不要重建"而不动库：写路径和预演
+/// 必须共用同一套判定，否则预演说的和真做的是两件事。
+pub fn diff_ledger(root: &Path) -> R<(bool, usize)> {
     let entries = list_entries(root);
-    // count real files excluding the ledger itself
     let others = entries.iter().filter(|e| e.ident != LEDGER_ID).count();
     let want = ledger_body(root);
     let cur = read_entry(root, LEDGER_ID).ok();
@@ -318,10 +321,16 @@ pub fn sync_ledger(root: &Path) -> R<(bool, usize)> {
             have != want
         }
     };
+    Ok((need, others + 1))
+}
+
+pub fn sync_ledger(root: &Path) -> R<(bool, usize)> {
+    let (need, total) = diff_ledger(root)?;
     if need {
+        let want = ledger_body(root);
         write_entry(root, LEDGER_ID, "凭据名册：逐行列出库内各条目的标识与用途，不含任何凭据值", want.trim_end())?;
     }
-    Ok((need, others + 1))
+    Ok((need, total))
 }
 
 /// Vault accounting: files on disk vs ledger rows.

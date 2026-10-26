@@ -114,6 +114,17 @@ pub fn run(a: &Args) -> R<i32> {
         "ledger" | "repair" => {
             let e = read_entry(&root, LEDGER_ID)?;
             if a.has("rebuild") || sub == "repair" {
+                // dry-run 必须是只读的。这条路径原来忽略 --dry-run，名册有漂移
+                // 时照样写盘——而 `--dry-run` 存在的意义就是让人先看清要不要
+                // 修，而不是先修了再说。
+                if a.has("dry-run") {
+                    let (changed, n) = diff_ledger(&root)?;
+                    crate::say_line!(
+                        "[dry-run] 名册{}（共 {n} 条），未写入",
+                        if changed { "与保险箱不一致，需要重建" } else { "已是最新" }
+                    );
+                    return Ok(0);
+                }
                 let (changed, n) = sync_ledger(&root)?;
                 if a.has("json") {
                     crate::say_line!(
@@ -151,9 +162,48 @@ pub fn run(a: &Args) -> R<i32> {
             Ok(0)
         }
         "verify" => {
+            // 先看磁盘上到底有哪些文件，再和"能解出来的条目"对账。
+            //
+            // 原实现只遍历 `list_entries`，而那个函数会把解不开的文件**静默
+            // 跳过**（读失败、解密失败、名字不合规都只是 `continue`）。于是
+            // 一份损坏的凭据条目在 verify 眼里根本不存在：它自检剩下的条目，
+            // 全部通过，报告"0 失败"。自检用一个会把问题藏起来的列表去查问题，
+            // 结构上就不可能发现问题。
+            let mut unreadable: Vec<String> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(crate::vault::vault_dir(&root)) {
+                let mut on_disk: Vec<String> = rd
+                    .flatten()
+                    .filter(|e| e.path().is_file())
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .filter(|n| !n.starts_with('.'))
+                    .collect();
+                on_disk.sort();
+                let known: std::collections::HashSet<String> =
+                    list_entries(&root).iter().map(|e| entry_name(&e.ident)).collect();
+                for n in on_disk {
+                    if !known.contains(&n) {
+                        // 解不开、或者解出来但没有标识。两种都属于"这个文件
+                        // 里的凭据现在拿不到了"，必须报出来。
+                        unreadable.push(n);
+                    }
+                }
+            }
             let entries = list_entries(&root);
-            let mut bad = 0;
+            let mut bad = unreadable.len();
             let mut rows: Vec<String> = Vec::new();
+            for n in &unreadable {
+                if a.has("json") {
+                    rows.push(format!(
+                        "{{\"file\":{},\"ok\":false,\"bytes\":0,\"reason\":{}}}",
+                        jstr(n),
+                        jstr("文件存在但解不出条目：种子不对、内容损坏或名字不合规")
+                    ));
+                } else {
+                    crate::say_line!(
+                        "FAIL {n} 文件存在但解不出条目（种子不对、内容损坏或名字不合规）"
+                    );
+                }
+            }
             for e in &entries {
                 match read_entry(&root, &e.ident) {
                     Ok(full) => {
@@ -209,7 +259,10 @@ pub fn run(a: &Args) -> R<i32> {
                     rows.join(",")
                 );
             } else {
-                crate::say_line!("自检 {} 条，失败 {} 条", entries.len(), bad);
+                // 分母要算上解不出来的文件，否则"自检 2 条"会让人以为库里就
+                // 只有 2 份凭据——磁盘上明明是 3 份，第 3 份才是要查的那个。
+                let total = entries.len() + unreadable.len();
+                crate::say_line!("自检 {} 条，失败 {} 条", total, bad);
             }
             Ok(if bad > 0 { 5 } else { 0 })
         }

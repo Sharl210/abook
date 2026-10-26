@@ -411,12 +411,26 @@ fn add(a: &Args) -> R<i32> {
         return notfound(format!("{src} 不是文件"));
     }
     let dir = dir_for(&path);
-    if !dir.is_dir() {
-        fs::create_dir_all(&dir)?;
-    }
+    // 目录的创建放在 dry-run 判定之后。
+    //
+    // 原来先 `create_dir_all` 再判 dry-run，于是"只看不动"的预演会在记录旁边
+    // 留下一个空的 `-refs` 目录——真正的写盘副作用，只是它不写文件，所以
+    // 一眼看不出来。预演就该在任何改动之前返回。
     let name = {
         let n = a.get("name").unwrap_or("").to_string();
         if !n.is_empty() {
+            // `--name` 必须是文件名，不能是路径。
+            //
+            // 原样 `dir.join(name)` 时，`--name /tmp/victim` 会写到附件目录
+            // **外面**（`join` 遇绝对路径直接替换整个前缀），`--name ../x`
+            // 同样逃逸。附件只能落在本记录的 `-refs/` 里，这是这个命令的
+            // 全部语义。
+            let np = Path::new(&n);
+            if n.contains('/') || n.contains('\\') || np.is_absolute()
+                || np.components().count() != 1 || n == "." || n == ".."
+            {
+                return usage(format!("--name 必须是文件名，不能含路径：{n}"));
+            }
             n
         } else {
             sp.file_name()
@@ -449,7 +463,13 @@ fn add(a: &Args) -> R<i32> {
         if a.has("move") {
             crate::say_line!("          --move：源文件会被搬走（原位置不再存在）");
         }
+        if !dir.is_dir() {
+            crate::say_line!("          目录 {} 会被创建", dir.display());
+        }
         return Ok(0);
+    }
+    if !dir.is_dir() {
+        fs::create_dir_all(&dir)?;
     }
     // `--move` 是唯一会让源文件消失的开关：语义上"搬进来"而不是"加一份"。
     let moved = place(&sp, &dst, a.has("move"), a.has("force"))?;

@@ -324,7 +324,20 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
             ensure_dir(&cdir)?;
             let st = stamps();
             let slug = slugify(&title);
-            let fname = format!("{}-{slug}.md", st.compact);
+            // 候选文件名不能只靠秒级时间戳 + slug 定。
+            //
+            // 同一秒内用同一标题写两条候选（`--force` 或两条命令并发）会算出
+            // 同一个路径，第二条覆盖第一条——而 `write_atomic` 是成功的，
+            // 退出码 0，第一条候选就这么没了，没有任何提示。
+            //
+            // 加一个内容哈希后缀：内容不同则路径必然不同，内容相同则覆盖是
+            // 幂等而不是丢失。
+            let mut hh: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in title.as_bytes().iter().chain(body.as_bytes()) {
+                hh ^= *b as u64;
+                hh = hh.wrapping_mul(0x1000_0000_01b3);
+            }
+            let fname = format!("{}-{slug}-{:08x}.md", st.compact, (hh & 0xffff_ffff) as u32);
             let p = cdir.join(&fname);
             if p.exists() && !a.has("force") {
                 return blocked(format!("{} 已存在", p.display()));
