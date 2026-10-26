@@ -1022,7 +1022,11 @@ jobs:
             esac
           }
 
-          echo '{"schema":"abook-downloads/1","files":[' > "$out/manifest.json"
+          # version 放进 manifest 顶层:升级命令要能在下载 1.6MB 之前就回答
+          # "已经是最新了"。没有它,每次检查更新都要白下一份完整二进制再比。
+          # 版本号从 tag 取,与 build.rs 同源,不会出现"manifest 说 A、二进制报 B"。
+          ver="${GITHUB_REF_NAME#v}"
+          echo "{\"schema\":\"abook-downloads/1\",\"version\":\"$ver\",\"files\":[" > "$out/manifest.json"
           first=1
           : > "$out/SHA256SUMS"
           for f in $(ls abook-* 2>/dev/null | sort); do
@@ -1052,6 +1056,8 @@ jobs:
           import json
           d=json.load(open('$out/manifest.json'))
           assert len(d['files'])==15, len(d['files'])
+              assert d.get('version'), 'manifest 缺 version 字段'
+              assert d['version'].count('.')>=2, d['version']
           for e in d['files']:
               assert e['os']!='unknown' and e['arch']!='unknown' and e['libc']!='unknown', e
           print('manifest 15 条，分类字段齐全')

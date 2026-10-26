@@ -31,7 +31,29 @@ pub fn run(a: &Args) -> R<i32> {
             }
             for e in &entries {
                 let mark = if e.ident == LEDGER_ID { " (名册)" } else { "" };
-                crate::say_line!("{}{}\n    {}", e.ident, mark, e.purpose);
+                // 时间用密文文件的 mtime，体积用它占的字节；行数给 `-`。
+                //
+                // 明文行数不解密就算不出来，而 `ls` 的契约是"不解值"。填 0 会被
+                // 读成"这个条目是空的"——那是对数据的错误陈述；`-` 表示"这一维度
+                // 在不解密的前提下不可得"，与行数缺失的其余命令保持同一写法。
+                let (by, ts) = std::fs::metadata(&e.path)
+                    .map(|m| {
+                        let t = m
+                            .modified()
+                            .ok()
+                            .and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        (m.len(), t)
+                    })
+                    .unwrap_or((0, 0));
+                crate::say_line!(
+                    "  {}  {}{}\n    {}",
+                    crate::util::row_meta(ts, Some(by), None),
+                    e.ident,
+                    mark,
+                    e.purpose
+                );
             }
             crate::say_line!("共 {} 条", entries.len());
             Ok(0)

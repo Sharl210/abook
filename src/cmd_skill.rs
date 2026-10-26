@@ -195,7 +195,8 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 crate::say_line!("{} 还不存在，用 `abook skill new <名>` 建第一份", root.display());
                 return Ok(0);
             }
-            let mut rows: Vec<(String, usize, usize)> = Vec::new();
+            // (名称, 有无 SKILL.md, 候选数, 字节, 行数, 最近改动)
+            let mut rows: Vec<(String, usize, usize, u64, usize, i64)> = Vec::new();
             if let Ok(rd) = fs::read_dir(&root) {
                 for e in rd.flatten() {
                     let p = e.path();
@@ -210,19 +211,34 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                         continue;
                     }
                     let have = if p.join("SKILL.md").is_file() { 1 } else { 0 };
-                    rows.push((name, have, count_md(&p.join("candidates"))));
+                    // 体积与行数按 SKILL.md 本体算——那才是读者真正要打开的文件；
+                    // 整个目录的字节数会把 references/ 里的大附件算进来，读者据此
+                    // 判断"这篇长不长"就会错。
+                    let skill_md = p.join("SKILL.md");
+                    let (by, ln) = match std::fs::read(&skill_md) {
+                        Ok(b) => (b.len() as u64, b.iter().filter(|c| **c == b'\n').count()),
+                        Err(_) => (0, 0),
+                    };
+                    let ts = std::fs::metadata(&skill_md)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    rows.push((name, have, count_md(&p.join("candidates")), by, ln, ts));
                 }
             }
             rows.sort();
             if a.has("json") {
                 let arr = rows
                     .iter()
-                    .map(|(n, h, c)| {
+                    .map(|(n, h, c, by, ln, ts)| {
                         format!(
-                            "{{\"name\":{},\"has_skill_md\":{},\"candidates\":{}}}",
+                            "{{\"name\":{},\"has_skill_md\":{},\"candidates\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
                             jstr(n),
                             h == &1,
-                            c
+                            c,
+                            jstr(&crate::util::short_when(*ts))
                         )
                     })
                     .collect::<Vec<_>>()
@@ -231,9 +247,12 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 return Ok(0);
             }
             crate::say_line!("{}  共 {} 个", root.display(), rows.len());
-            for (n, h, c) in &rows {
+            for (n, h, c, by, ln, ts) in &rows {
                 let mark = if *h == 1 { "有SKILL.md" } else { "缺SKILL.md" };
-                crate::say_line!("  {n:<28} {mark}  候选 {c}");
+                crate::say_line!(
+                    "  {}  {n:<26} {mark}  候选 {c}",
+                    crate::util::row_meta(*ts, Some(*by), Some(*ln))
+                );
             }
             Ok(0)
         }

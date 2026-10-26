@@ -68,6 +68,39 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                 // `branch list` advertised `--page`/`--per-page` and ignored
                 // them: 33 branch lines came back no matter what the caller
                 // asked for. Both forms page now.
+                // 分支行也要带 时间/体积/行数：它是"这个分支值不值得进去"的
+                // 判断依据，而只有条数并不够——20 条小记录和 20 条大记录对读者的
+                // 代价完全不同。聚合口径与 `tree`/`index` 一致（按 basename 去重
+                // 后求和），三个命令给出同一组数字。
+                let mut meta: std::collections::HashMap<String, (u64, usize, i64)> =
+                    std::collections::HashMap::new();
+                for l2 in [Lib::Canonical, Lib::Candidate] {
+                    let d = root.join(l2.dir());
+                    if let Ok(rd) = std::fs::read_dir(&d) {
+                        for e in rd.flatten() {
+                            let fp = e.path();
+                            if !fp.is_file() {
+                                continue;
+                            }
+                            let nm = fp
+                                .file_name()
+                                .map(|x| x.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let ts = e
+                                .metadata()
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|x| x.as_secs() as i64)
+                                .unwrap_or(0);
+                            let (by, ln) = match std::fs::read(&fp) {
+                                Ok(b) => (b.len() as u64, b.iter().filter(|c| **c == b'\n').count()),
+                                Err(_) => (0, 0),
+                            };
+                            meta.insert(nm, (by, ln, ts));
+                        }
+                    }
+                }
                 let rows: Vec<String> = at
                     .branches
                     .iter()
@@ -79,7 +112,28 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                         } else {
                             "  <-- COUNT 与实际不符"
                         };
-                        format!("   {:<28} {n:>4} 条{flag}  {}", b.name(), b.get("KEYS"))
+                        let (mut by, mut ln, mut ts) = (0u64, 0usize, 0i64);
+                        let mut seen: Vec<String> = Vec::new();
+                        for p in b.paths() {
+                            let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
+                            if seen.contains(&bare) {
+                                continue;
+                            }
+                            seen.push(bare.clone());
+                            if let Some((x, y, z)) = meta.get(&bare) {
+                                by += x;
+                                ln += y;
+                                if *z > ts {
+                                    ts = *z;
+                                }
+                            }
+                        }
+                        format!(
+                            "  {} {n:>4}条{flag}  {:<26} {}",
+                            crate::util::row_meta(ts, Some(by), Some(ln)),
+                            b.name(),
+                            b.get("KEYS")
+                        )
                     })
                     .collect();
                 let (shown, footer) = crate::paging::page_rows(a, rows);

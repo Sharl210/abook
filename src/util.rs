@@ -1331,6 +1331,29 @@ pub fn human_bytes(n: u64) -> String {
     }
 }
 
+/// 列表行的统一元信息前缀：`时间  体积  行数`。
+///
+/// 每条记录的输出都自带这三样，是为了让人判断"要不要整篇读、要不要翻页"——
+/// 体积和行数不是装饰，是决定下一步动作的依据。此前各命令各写一套：`list` 是
+/// `时间 体积 行数`，`path` 是 `体积 行数 时间`，而 `index`/`branch`/`recent`/
+/// `skill`/`vault` 干脆一样都没有。同一份数据在不同命令里长成不同形状，读者每
+/// 换一条命令就得重新认一次列，靠记忆去对齐。
+///
+/// 缺席的维度用 `-` 明示，不用空白或 0：`vault` 的明文行数不解密就不知道，写 0
+/// 会被读成"这个条目是空的"。
+pub fn row_meta(when: i64, bytes: Option<u64>, lines: Option<usize>) -> String {
+    let t = if when > 0 { short_when(when) } else { "-".to_string() };
+    let b = match bytes {
+        Some(n) => human_bytes(n),
+        None => "-".to_string(),
+    };
+    let l = match lines {
+        Some(n) => format!("{n}行"),
+        None => "-".to_string(),
+    };
+    format!("{t:>8}  {b:>7} {l:>5}")
+}
+
 /// Truncate a string to at most `n` chars, appending an ellipsis marker.
 pub fn truncate_chars(s: &str, n: usize) -> String {
     let mut out = String::new();

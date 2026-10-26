@@ -91,6 +91,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("version", "", "json", "版本", ""),
     ("detect", "", "json", "安装位置探测", ""),
     ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到 PATH", "--dry-run"),
+    ("upgrade", "url,dir,check", "check,force,dry-run,json", "自更新到最新版", "--check"),
     ("selftest", "only", "all,json,verbose", "内置用例；--only N 只跑第 N 条", "selftest --only 1"),
 
 ];
@@ -188,6 +189,7 @@ pub fn canonical(cmd: &str) -> String {
         "fix" => "repair",
         "where" => "detect",
         "self-install" => "install",
+        "self-update" => "upgrade",
         "mv" => "move",
         "rm" => "delete",
         // Aliases that were dispatched but not mapped here: parameter

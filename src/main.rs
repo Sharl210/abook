@@ -35,6 +35,7 @@ mod splice;
 mod sha256;
 mod util;
 mod vault;
+mod selfupdate;
 mod out;
 
 use util::*;
@@ -153,7 +154,11 @@ fn help_text() -> String {
 
 ═══ 安装与平台 ═══
   detect                    平台识别 + PATH 自检
-  install [--url URL]       下载本机架构的二进制并放入 PATH
+  install [--url URL]       首次安装：下载本机架构的二进制并放入 PATH
+  upgrade [--check]         自我更新：按当前架构取最新版并替换正在运行的这个文件
+                            源按序回退（GitHub → 三个镜像 → jsDelivr），
+                            下来先校验 sha256 再跑自检，不过就回滚
+                            --check 只查询不安装；--url 指向镜像或本地目录
   commands                  机器可读：本二进制真正分派的全部命令名（每行一条）
   describe [命令]           查询某个命令允许的参数（AI 调用前先用它核对，别猜）
   branch <列出|加|改名|删> 管理地图分支卡
@@ -228,7 +233,7 @@ fn help_text() -> String {
                      Skill 约定与候选反哺；候选落 ~/AgentSkills/<名>/candidates/
   spec       不带名字列目录；spec <名> 取回该规范全文
                      可用：plan ulw security compaction maintenance magic skill
-  detect  install  version  selftest  help
+  detect  install  upgrade  self-update  version  selftest  help
 
 ═══ 参数拼写容错 ═══
   --limit / --size 会被当成 --per-page；--offset 当成 --page。
@@ -256,7 +261,7 @@ L3/L4/L5 都要先建整库索引，所以三者耗时接近；差别在扩展�
 /// The single source of truth for platform -> release artifact name.
 /// `detect` and `install` both call this so they can never drift apart, and
 /// the names here must match `.github/workflows/build.yml` exactly.
-fn target_triple(os: &str, arch: &str) -> Option<&'static str> {
+pub(crate) fn target_triple(os: &str, arch: &str) -> Option<&'static str> {
     Some(match (os, arch) {
         ("android", "aarch64") => "aarch64-linux-android",
         ("android", "arm") => "armv7-linux-androideabi",
@@ -1016,6 +1021,8 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("where", cmd_detect),
         ("install", cmd_install),
         ("self-install", cmd_install),
+        ("upgrade", selfupdate::cmd_upgrade),
+        ("self-update", selfupdate::cmd_upgrade),
     ]
 }
 

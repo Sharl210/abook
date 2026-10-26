@@ -214,7 +214,7 @@ fn note_dir(
         return Ok(0);
     }
     // Carry each note's own time so the list can be ordered by recency.
-    let mut rows: Vec<(String, String, u64, i64)> = Vec::new();
+    let mut rows: Vec<(String, String, u64, i64, usize)> = Vec::new();
     // Subdirectories are listed as rows, not skipped. `review/` really does
     // contain `abandoned-20260928/`, and silently dropping it made the count
     // disagree with `ls` while looking perfectly healthy -- the same
@@ -251,7 +251,10 @@ fn note_dir(
                 .trim()
                 .to_string();
             let stamp = commit_time(&p, &txt);
-            rows.push((name, title, txt.len() as u64, stamp));
+            // 行数与体积、时间一起构成列表行的固定三件套：体积回答"要不要读",
+            // 行数回答"读起来有多长",时间回答"还新不新"。少了行数这一列,
+            // 读者只能按体积猜篇幅,而中文字节数与原行数不成比例。
+            rows.push((name, title, txt.len() as u64, stamp, txt.lines().count()));
         }
     }
     // Newest first. Sorting bare names put the old `0001-...` sequence after
@@ -265,9 +268,9 @@ fn note_dir(
             .iter()
             .skip(pg.start())
             .take(pg.per.min(rows.len()))
-            .map(|(n, t, b, ts)| {
+            .map(|(n, t, b, ts, ln)| {
                 format!(
-                    "{{\"name\":{},\"title\":{},\"bytes\":{},\"updated\":{ts},\"when\":{}}}",
+                    "{{\"name\":{},\"title\":{},\"bytes\":{},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
                     jstr(n),
                     jstr(t),
                     b,
@@ -279,8 +282,11 @@ fn note_dir(
         println!("{{{},\"{json_key}\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for (n, t, b, ts) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-        println!("{}  {n:<52} {:>7}  {t}", crate::util::short_when(*ts), human_bytes(*b));
+    for (n, t, b, ts, ln) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+        println!(
+            "{}  {n:<48}  {t}",
+            crate::util::row_meta(*ts, Some(*b), Some(*ln))
+        );
     }
     println!("{}", pg.bar());
     let sub = if subdirs.is_empty() {
@@ -331,7 +337,7 @@ pub fn cmd_history(a: &Args) -> R<i32> {
     // timestamps, and within one timestamp put `-1` before the bare name --
     // 44 of 76 rows landed in the wrong position. The file already records
     // when it happened, so ask the file.
-    let mut rows: Vec<(i64, String, String)> = Vec::new();
+    let mut rows: Vec<(i64, String, String, usize, u64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -351,7 +357,7 @@ pub fn cmd_history(a: &Args) -> R<i32> {
                 .trim_start_matches('#')
                 .trim()
                 .to_string();
-            rows.push((stamp, name, first));
+            rows.push((stamp, name, first, txt.lines().count(), txt.len() as u64));
         }
     }
     // Newest first; the name is the tie-break so equal timestamps stay stable.
@@ -362,14 +368,17 @@ pub fn cmd_history(a: &Args) -> R<i32> {
             .iter()
             .skip(pg.start())
             .take(pg.per.min(rows.len()))
-            .map(|(ts, n, t)| format!("{{\"name\":{},\"title\":{},\"updated\":{ts},\"when\":{}}}", jstr(n), jstr(t), jstr(&crate::util::short_when(*ts))))
+            .map(|(ts, n, t, ln, by)| format!("{{\"name\":{},\"title\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}", jstr(n), jstr(t), jstr(&crate::util::short_when(*ts))))
             .collect::<Vec<_>>()
             .join(",");
         println!("{{{},\"commits\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for (ts, n, t) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-        println!("{}  {n}  {t}", crate::util::short_when(*ts));
+    for (ts, n, t, ln, by) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+        println!(
+            "{}  {n:<48}  {t}",
+            crate::util::row_meta(*ts, Some(*by), Some(*ln))
+        );
     }
     println!("{}", pg.bar());
     Ok(0)

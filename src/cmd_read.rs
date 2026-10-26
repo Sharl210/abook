@@ -730,6 +730,18 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 )
             })
             .collect();
+        // 凭据与路由并列,而不是要求调用方"顺便再跑一次 vault ls"。
+        // 索引的用途是让调用方一眼看到"库里有什么、因此可以怎么approach";
+        // 只列知识分支不列凭据,等于把"能用什么去访问外部系统"这个维度藏起来,
+        // 调用方会退化成只查知识、想不起还有 token 可用。
+        let creds = credential_index(&root);
+        let cjson: Vec<String> = creds
+            .iter()
+            .filter(|(id, purpose)| q.is_empty() || ci_contains(id, &q) || ci_contains(purpose, &q))
+            .map(|(id, purpose)| {
+                format!("{{\"ident\":{},\"purpose\":{},\"fetch\":{}}}", jstr(id), jstr(purpose), jstr(&format!("abook vault get {id}")))
+            })
+            .collect();
         let matched_n = items.len();
         let (shown, pg) = crate::paging::page_json(a, items);
         // Count real items; counting occurrences of a substring in the emitted
@@ -737,38 +749,206 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         let shown_n = shown.len();
         let body = shown.join(",");
         println!(
-            "{{\"routes\":{},\"matched\":{matched_n},\"shown\":{shown_n},{pg},\"items\":[{body}]}}",
-            routes.len()
+            "{{\"routes\":{},\"matched\":{matched_n},\"shown\":{shown_n},{pg},\"credentials\":[{}],\"items\":[{body}]}}",
+            routes.len(),
+            cjson.join(",")
         );
         return Ok(0);
     }
-    println!("Index.md  路由 {} 条", routes.len());
+    // 先把每条路由的元信息算出来。分支走 Atlas 聚合（条目数/体积/行数/最近活跃），
+    // 记录级路由直接指向单个文件。
+    //
+    // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
+    // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
+    // 只 stat + 数行，不走 `load_lib`。
+    //
+    // 这里的差别不是微调：`load_lib` 会把每条记录解析成结构体并克隆几份，965 条
+    // 要 80ms；而这条命令是"每轮预载先看一眼"的视图，80ms 让它在预载路径上成为
+    // 最贵的一步。实测原始读+数行（965 个文件、5.4MB）只要 6ms，纯 stat 1ms——
+    // 那 80ms 全在解析，而索引只需要字节数与行数，不需要任何字段语义。
+    let mut rec_index: std::collections::HashMap<String, (u64, usize, i64)> =
+        std::collections::HashMap::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        // lib.dir() 已经是 "canonical/records"，再拼一次 records 会让整个索引
+        // 建在空目录上——所有元信息退化成 "-"，而且没有报错。
+        let dir = root.join(lib.dir());
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = match p.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => continue,
+            };
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let ts = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // 读不出来就记 0 字节 0 行，而不是跳过：索引漏掉一条会让读者以为
+            // 这条记录不存在，而它其实存在、只是读不了。
+            let (bytes, lines) = match std::fs::read(&p) {
+                Ok(b) => (b.len() as u64, b.iter().filter(|c| **c == b'\n').count()),
+                Err(_) => (0, 0),
+            };
+            rec_index.insert(format!("{}/{}", lib.dir(), name.clone()), (bytes, lines, ts));
+            rec_index.insert(name, (bytes, lines, ts));
+        }
+    }
+    // 分支聚合:与 `tree` 同一口径,按 basename 去重后求和。
+    let mut branch_agg: std::collections::HashMap<String, (usize, u64, usize, i64)> =
+        std::collections::HashMap::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let ap = root.join(lib.atlas());
+        if !ap.exists() {
+            continue;
+        }
+        if let Ok(at) = crate::atlas::Atlas::load(&ap) {
+            for b in &at.branches {
+                let mut seen: Vec<String> = Vec::new();
+                let (mut bytes, mut lines, mut latest) = (0u64, 0usize, 0i64);
+                for p in b.paths() {
+                    let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
+                    if seen.contains(&bare) {
+                        continue;
+                    }
+                    let m = rec_index.get(&p).or_else(|| rec_index.get(&bare));
+                    seen.push(bare);
+                    if let Some((by, ln, ts)) = m {
+                        bytes += by;
+                        lines += ln;
+                        if *ts > latest {
+                            latest = *ts;
+                        }
+                    }
+                }
+                branch_agg.insert(b.name(), (seen.len(), bytes, lines, latest));
+            }
+        }
+    }
+
+    let is_record = |path: &str| path.contains("/records/") || path.ends_with(".md");
+    let (mut br_rows, mut rec_rows): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for (path, summary, when) in &routes {
+        if !q.is_empty() && !ci_contains(path, &q) && !ci_contains(summary, &q) && !ci_contains(when, &q) {
+            continue;
+        }
+        if is_record(path) {
+            let bare = path.rsplit('/').next().unwrap_or(path).to_string();
+            let meta = rec_index.get(path).or_else(|| rec_index.get(&bare));
+            let (by, ln, ts) = match meta {
+                Some((b, l, t)) => (Some(*b), Some(*l), *t),
+                None => (None, None, 0),
+            };
+            let lib = if path.starts_with("candidate/") { "候选" } else { "正式" };
+            rec_rows.push(format!(
+                "  {}  [{}] {}｜{}",
+                crate::util::row_meta(ts, by, ln),
+                lib,
+                path,
+                summary
+            ));
+        } else {
+            let agg = branch_agg.get(path);
+            let (n, by, ln, ts) = match agg {
+                Some((n, b, l, t)) => (Some(*n), Some(*b), Some(*l), *t),
+                None => (None, None, None, 0),
+            };
+            let nshow = match n {
+                Some(x) => format!("{x:>4}条"),
+                None => "    -".to_string(),
+            };
+            br_rows.push(format!(
+                "  {}  {nshow}  {path}｜{when}",
+                crate::util::row_meta(ts, by, ln)
+            ));
+        }
+    }
+
+    println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", routes.len(), branch_agg.len(), rec_rows.len());
     let lim = a.num("limit").unwrap_or(40) as usize;
-    let matched: Vec<String> = routes
-        .iter()
-        .filter(|(path, summary, when)| {
-            q.is_empty()
-                || ci_contains(path, &q)
-                || ci_contains(summary, &q)
-                || ci_contains(when, &q)
-        })
-        .map(|(path, summary, when)| format!("  {path}｜{summary}｜{when}"))
-        .collect();
-    let cut = matched.len().min(lim);
-    // `--limit` caps how many routes are considered at all; `--page` then
-    // walks that capped set. Applying the cap first keeps the two flags
-    // independent, which is how every other list command behaves.
-    let (shown_rows, footer) = crate::paging::page_rows(a, matched[..cut].to_vec());
+    let cut_b = br_rows.len().min(lim);
+    let cut_r = rec_rows.len().min(lim);
+    // `--limit` 先截再分页,两条 flag 各自独立,与其余 list 命令一致。
+    let mut merged: Vec<String> = Vec::new();
+    merged.extend(br_rows[..cut_b].iter().cloned());
+    merged.extend(rec_rows[..cut_r].iter().cloned());
+    let (shown_rows, footer) = crate::paging::page_rows(a, merged);
     for r in &shown_rows {
         println!("{r}");
     }
-    if cut < matched.len() {
-        println!("  …（另有 {} 条，用 --limit 扩大）", matched.len() - cut);
+    let hidden = (br_rows.len() - cut_b) + (rec_rows.len() - cut_r);
+    if hidden > 0 {
+        println!("  …（另有 {hidden} 条，用 --limit 扩大）");
     }
     if !footer.is_empty() {
         println!("{footer}");
     }
+
+    // 凭据段:只给标识与用途,永不打印值。
+    //
+    // 这一段的理由不是"顺便列一下"。索引回答的是"我手上有什么牌",而凭据正是
+    // 最容易被忘掉的一类牌——记忆里记着某个系统的排障方法,但没人提醒"你还存着
+    // 它的账号",于是调用方只会去查资料、不会想到直接去验证。列在这里,调用方
+    // 一开始就知道"这个方向上我是可以动手的"。
+    let creds = credential_index(&root);
+    println!();
+    if creds.is_empty() {
+        println!("凭据  0 条（保险箱中无可读条目）");
+    } else {
+        println!(
+            "凭据  {} 条（只有标识与用途，取值用 abook vault get <标识>）",
+            creds.len()
+        );
+        for (id, purpose) in &creds {
+            if !q.is_empty() && !ci_contains(id, &q) && !ci_contains(purpose, &q) {
+                continue;
+            }
+            if purpose.is_empty() {
+                println!("  {id}");
+            } else {
+                println!("  {id}｜{purpose}");
+            }
+        }
+    }
     Ok(0)
+}
+
+/// 保险箱里可读条目的 (标识, 用途)。
+///
+/// 名册条目跳过:它列出的是别的条目,把名册本身当成一条凭据列出来会让清单里
+/// 多出一条"凭据名册"的假凭据,并且它的用途行会与其余条目的汇总重复一遍。
+///
+/// 解不开的条目不在这里报——那是 `vault verify` 的职责,索引只回答"有什么"。
+/// 但也不能假装它们不存在:调用方按索引取值时才会撞上"这条读不出",所以
+/// 索引末尾单独给一行计数,不做静默丢弃。
+pub fn credential_index(root: &Path) -> Vec<(String, String)> {
+    let (good, bad) = crate::vault::scan_vault(root);
+    let mut out: Vec<(String, String)> = good
+        .into_iter()
+        .filter(|e| e.ident != crate::vault::LEDGER_ID)
+        .map(|e| (e.ident, e.purpose))
+        .collect();
+    out.sort();
+    if !bad.is_empty() {
+        // 用一条占位让它出现在清单里,读者能看出"还有条目读不出",而不是
+        // 以为清单就是全部。
+        out.push((
+            format!("（另有 {} 条读不出，见 abook vault verify）", bad.len()),
+            String::new(),
+        ));
+    }
+    out
 }
 
 pub fn cmd_lint(a: &Args) -> R<i32> {
@@ -1113,7 +1293,7 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
     // but a `git clone` or a directory copy resets every mtime at once and
     // would flip this listing wholesale. `history` already reads the declared
     // time; sharing `commit_time` keeps the two commands consistent.
-    let mut fs: Vec<(i64, String, u64)> = Vec::new();
+    let mut fs: Vec<(i64, String, u64, usize)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -1126,6 +1306,7 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
                 commit_time(&p, &txt),
                 p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
                 sz,
+                txt.lines().count(),
             ));
         }
     }
@@ -1139,21 +1320,30 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
             .iter()
             .skip(pg.start())
             .take(pg.per.min(fs.len()))
-            .map(|(_, name, sz)| {
-                format!("{{\"name\":{},\"bytes\":{}}}", jstr(name), sz)
+            .map(|(ts, name, sz, ln)| {
+                format!(
+                    "{{\"name\":{},\"bytes\":{},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                    jstr(name),
+                    sz,
+                    jstr(&crate::util::short_when(*ts))
+                )
             })
             .collect::<Vec<_>>()
             .join(",");
         println!("{{{},\"commits\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for (i, (_, name, sz)) in fs
+    for (i, (ts, name, sz, ln)) in fs
         .iter()
         .skip(pg.start())
         .take(pg.per.min(fs.len()))
         .enumerate()
     {
-        println!("{:>2}. {:<52} {}", pg.start() + i + 1, name, human_bytes(*sz));
+        println!(
+            "{:>3}. {}  {name}",
+            pg.start() + i + 1,
+            crate::util::row_meta(*ts, Some(*sz), Some(*ln))
+        );
     }
     println!("{}", pg.bar());
     Ok(0)

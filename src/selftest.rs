@@ -809,9 +809,26 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
                 }
                 let _ = std::fs::write(lib.join(format!("{name}/Atlas.md")), atlas);
             }
+            // 用真实的 `BRANCH` 表格式。原来这里是 `| 主题 | 位置｜`,而 `routes()`
+            // 只认表头含 BRANCH/分支的表格——于是这个测试库一条路由都解析不出,
+            // `index` 只打一行标题。分页核对在"零行可翻"的数据上永远通过,它测的
+            // 是数据不是代码,直到别处给输出多添两行才暴露出它一直没在真的检查。
+            // 用真实的 `BRANCH` 表格式，而且必须包在 `[MEMORY_CONTENT]` 里。
+            //
+            // 这里原来写的是 `| 主题 | 位置｜` 且没有正文标记，两处都不对：`routes()`
+            // 只认表头含 BRANCH/分支的表格，而 `BookFile::load` 只取
+            // `[MEMORY_CONTENT]` 与 `[/MEMORY_CONTENT]` 之间的内容。于是这个测试库
+            // 从建成起就解析出零条路由，`index` 只打一行标题——分页核对在"没有行可
+            // 翻"的数据上永远通过，它测的是数据不是代码。
             let _ = std::fs::write(
                 lib.join("Index.md"),
-                "| 主题 | 位置｜\n|---|---｜\n| a | b｜\n| c | d｜\n| e | f｜\n",
+                "[MEMORY_FILE_CONTENTS]\nFORMAT=AGENTSBOOK_V2_EXPERIMENT\nFILE=Index.md\n[/MEMORY_FILE_CONTENTS]\n\
+                 [MEMORY_CONTENT]\n\
+                 | BRANCH | 正式 / 候选 | READ_WHEN | 地图 |\n|---|---|---|---|\n\
+                 | `b0` | 2 / 0 | always | `canonical/Atlas.md` |\n\
+                 | `b1` | 2 / 0 | always | `canonical/Atlas.md` |\n\
+                 | `b2` | 2 / 0 | always | `canonical/Atlas.md` |\n\
+                 [/MEMORY_CONTENT]\n",
             );
             let _ = std::fs::write(lib.join("Global.md"), "# Global\n\n测试库\n");
         }
@@ -1879,7 +1896,7 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
         // Spellings that intentionally share another command's help entry.
         const ALIASES: &[&str] = &[
             "cp", "ls", "rm", "find", "where", "add", "c", "n", "candidate",
-            "canonical", "self-install", "index-search", "repair",
+            "canonical", "self-install", "self-update", "index-search", "repair",
         ];
         let hidden: Vec<&str> = crate::known_commands()
             .iter()
