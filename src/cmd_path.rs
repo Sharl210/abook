@@ -11,6 +11,7 @@
 //! given a branch it walks downward.
 
 use crate::atlas::Atlas;
+use crate::cmd_view::{count_lines, meta_json};
 use crate::rec::{Lib, Record};
 use crate::util::*;
 use std::collections::HashMap;
@@ -21,8 +22,10 @@ struct Node {
     name: String,
     parent: String,
     members: Vec<String>,
-    bytes: usize,
-    lines: usize,
+    /// `None` = 这条分支的成员一条都没量到（PATH 指向已改名的文件）。
+    /// 不是 0 字节 0 行——那是"这条分支是空的"，与"量不出来"是两件事。
+    bytes: Option<u64>,
+    lines: Option<usize>,
     updated: i64,
     attach_count: usize,
     attach_bytes: u64,
@@ -41,7 +44,7 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
         let a = crate::attach::scan(&r.path);
         let v = (
             r.raw.len(),
-            r.raw.lines().count(),
+            count_lines(&r.raw),
             r.updated(),
             a.count(),
             a.bytes,
@@ -53,20 +56,22 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
         .iter()
         .map(|b| {
             let mut seen: Vec<String> = Vec::new();
-            let (mut bytes, mut lines, mut updated) = (0usize, 0usize, 0i64);
+            let (mut bytes, mut lines, mut updated) = (0u64, 0usize, 0i64);
+            let mut measured = 0usize;
             let (mut ac, mut ab) = (0usize, 0u64);
             for p in b.paths() {
                 let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
                 if seen.contains(&bare) {
                     continue;
                 }
-                let (by, ln, ts, c, b2) = index
-                    .get(&p)
-                    .or_else(|| index.get(&bare))
-                    .copied()
-                    .unwrap_or((0, 0, 0, 0, 0));
-                seen.push(bare);
-                bytes += by;
+                seen.push(bare.clone());
+                // PATH 指向的文件不在盘上（记录改过名）：仍是成员，但量不出体积。
+                let (by, ln, ts, c, b2) = match index.get(&p).or_else(|| index.get(&bare)) {
+                    Some(v) => *v,
+                    None => continue,
+                };
+                measured += 1;
+                bytes += by as u64;
                 lines += ln;
                 ac += c;
                 ab += b2;
@@ -74,12 +79,13 @@ fn collect(root: &Path, lib: Lib) -> Vec<Node> {
                     updated = ts;
                 }
             }
+            let unmeasured = measured == 0 && !seen.is_empty();
             Node {
                 name: b.name(),
                 parent: b.parent(),
                 members: seen,
-                bytes,
-                lines,
+                bytes: if unmeasured { None } else { Some(bytes) },
+                lines: if unmeasured { None } else { Some(lines) },
                 updated,
                 attach_count: ac,
                 attach_bytes: ab,
@@ -167,15 +173,12 @@ pub fn cmd_path(a: &Args) -> R<i32> {
                         let node = nodes.iter().find(|x| x.name == *n);
                         match node {
                             Some(x) => format!(
-                                "{{\"branch\":{},\"count\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
+                                "{{\"branch\":{},\"count\":{},{},\"attach_count\":{},\"attach_bytes\":{}}}",
                                 jstr(&x.name),
                                 x.members.len(),
-                                x.bytes,
-                                x.lines,
+                                meta_json(x.updated, x.bytes, x.lines),
                                 x.attach_count,
-                                x.attach_bytes,
-                                x.updated,
-                                jstr(&short_when(x.updated))
+                                x.attach_bytes
                             ),
                             None => format!("{{\"branch\":{},\"missing\":true}}", jstr(n)),
                         }
@@ -187,15 +190,12 @@ pub fn cmd_path(a: &Args) -> R<i32> {
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "{{\"record\":{},\"id\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{},\"chains\":[{}]}}",
+            "{{\"record\":{},\"id\":{},{},\"attach_count\":{},\"attach_bytes\":{},\"chains\":[{}]}}",
             jstr(&bare),
             jstr(&rec.id()),
-            rec.raw.len(),
-            rec.raw.lines().count(),
+            meta_json(rec.updated(), Some(rec.raw.len() as u64), Some(count_lines(&rec.raw))),
             own.count(),
             own.bytes,
-            rec.updated(),
-            jstr(&short_when(rec.updated())),
             arr
         );
         return Ok(0);
@@ -206,11 +206,11 @@ pub fn cmd_path(a: &Args) -> R<i32> {
         bare,
         rec.id()
     );
+    // 列序统一成 `时间 体积 行数`（与 `row_meta` 一致），附件这类命令特有列
+    // 接在后面。这里原来是 `体积 行数 时间`，四个命令四种排列。
     println!(
-        "  {}  {}  {}  {}{}",
-        human_bytes(rec.raw.len() as u64),
-        format!("{}行", rec.raw.lines().count()),
-        short_when(rec.updated()),
+        "  {}  {}{}",
+        row_meta(rec.updated(), Some(rec.raw.len() as u64), Some(count_lines(&rec.raw))),
         if own.is_empty() {
             String::new()
         } else {
@@ -240,14 +240,15 @@ pub fn cmd_path(a: &Args) -> R<i32> {
         // record most directly.
         for (depth, name) in c.iter().enumerate() {
             let node = nodes.iter().find(|x| x.name == *name);
-            let pad = "  ".repeat(depth + 1);
+            // 前缀占第 0 列，缩进放在它右边，叶子行的层数从 0 起算，与 `tree` 一致。
+            let pad = "  ".repeat(depth);
             match node {
+                // 元信息前缀从第 0 列起，缩进放到它右边：`path` 与 `tree`/`list`
+                // 并排看时前三列对得齐。
                 Some(x) => println!(
-                    "{pad}{name}  {}条  {}  {}  {}  {}",
+                    "{}  {pad}{name}  {}条  {}",
+                    row_meta(x.updated, x.bytes, x.lines),
                     x.members.len(),
-                    human_bytes(x.bytes as u64),
-                    format!("{}行", x.lines),
-                    short_when(x.updated),
                     if x.attach_count == 0 {
                         String::new()
                     } else {
@@ -290,14 +291,11 @@ fn show_subtree(a: &Args, nodes: &[Node], start: &Node) -> R<i32> {
             .iter()
             .map(|(d, n)| {
                 format!(
-                    "{{\"branch\":{},\"depth\":{d},\"parent\":{},\"count\":{},\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}}}",
+                    "{{\"branch\":{},\"depth\":{d},\"parent\":{},\"count\":{},{}}}",
                     jstr(&n.name),
                     jstr(&n.parent),
                     n.members.len(),
-                    n.bytes,
-                    n.lines,
-                    n.updated,
-                    jstr(&short_when(n.updated))
+                    meta_json(n.updated, n.bytes, n.lines)
                 )
             })
             .collect::<Vec<_>>()
@@ -310,12 +308,10 @@ fn show_subtree(a: &Args, nodes: &[Node], start: &Node) -> R<i32> {
         let pad = "  ".repeat(*d);
         let mark = if *d == 0 { "▸" } else { "·" };
         println!(
-            "{pad}{mark} {:<28} {}条  {}  {}  {}  {}",
+            "{}  {pad}{mark} {:<28} {}条  {}",
+            row_meta(n.updated, n.bytes, n.lines),
             n.name,
             n.members.len(),
-            human_bytes(n.bytes as u64),
-            format!("{}行", n.lines),
-            short_when(n.updated),
             if n.attach_count == 0 {
                 String::new()
             } else {

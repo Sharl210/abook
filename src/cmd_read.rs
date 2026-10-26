@@ -3,6 +3,7 @@
 
 use crate::atlas::Atlas;
 use crate::book::BookFile;
+use crate::cmd_view::{count_lines, count_lines_bytes, count_lines_from, jopt, meta_json};
 use crate::query::*;
 use crate::paging::Page;
 use crate::rec::{load_lib, resolve_record, Lib, Record};
@@ -510,7 +511,7 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
             let m = Meta {
                 updated: r.updated(),
                 bytes: r.raw.len(),
-                lines: r.raw.lines().count(),
+                lines: count_lines(&r.raw),
                 attach_count: a.count(),
                 attach_bytes: a.bytes,
             };
@@ -518,30 +519,42 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
             index.insert(r.file_name(), m);
         }
     }
-    let agg = |b: &crate::atlas::Branch| -> (usize, i64, usize, usize, usize, u64) {
+    let agg = |b: &crate::atlas::Branch| -> (usize, i64, Option<u64>, Option<usize>, usize, u64) {
         let mut seen: Vec<String> = Vec::new();
-        let (mut latest, mut bytes, mut lines) = (0i64, 0usize, 0usize);
+        let (mut latest, mut bytes, mut lines) = (0i64, 0u64, 0usize);
+        let mut measured = 0usize;
         let (mut ac, mut ab) = (0usize, 0u64);
         for p in b.paths() {
             let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
             if seen.contains(&bare) {
                 continue;
             }
-            let m = index
-                .get(&p)
-                .or_else(|| index.get(&bare))
-                .copied()
-                .unwrap_or_default();
-            seen.push(bare);
+            seen.push(bare.clone());
+            let m = match index.get(&p).or_else(|| index.get(&bare)) {
+                Some(m) => *m,
+                // PATH 指向的文件不在盘上（记录改过名）。它仍然是这条分支声明
+                // 的成员，但量不出体积——不能按 0 计入，否则"每条成员都丢了"和
+                // "这条分支本来就是空的"会显示成同一个样子。
+                None => continue,
+            };
+            measured += 1;
             if m.updated > latest {
                 latest = m.updated;
             }
-            bytes += m.bytes;
+            bytes += m.bytes as u64;
             lines += m.lines;
             ac += m.attach_count;
             ab += m.attach_bytes;
         }
-        (seen.len(), latest, bytes, lines, ac, ab)
+        let unmeasured = measured == 0 && !seen.is_empty();
+        (
+            seen.len(),
+            latest,
+            if unmeasured { None } else { Some(bytes) },
+            if unmeasured { None } else { Some(lines) },
+            ac,
+            ab,
+        )
     };
     for lib in libs {
         let p = root.join(lib.atlas());
@@ -583,14 +596,14 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
                     )
                 } else {
                     let (n, ts, by, ln, ac, ab) = agg(b);
+                    // 列序跟 `row_meta` 一致：时间 / 体积 / 行数 在最前，条目数
+                    // 这类命令特有列接在后面。这里原来是「条目数 体积 行数 附件
+                    // 时间」，正是"同一份数据四种排列"里的反例。
                     format!(
-                        "   {:<24} {:>4}条 {:>8} {:>7} {:>11}  {}  REV={}  {}",
+                        "{}  {n:>4}条  {:<24}  {:<11} REV={}  {}",
+                        crate::util::row_meta(ts, by, ln),
                         b.name(),
-                        n,
-                        human_bytes(by as u64),
-                        format!("{ln}行"),
                         if ac == 0 { String::new() } else { format!("{}件{}", ac, human_bytes(ab)) },
-                        crate::util::short_when(ts),
                         b.get("REVISION"),
                         truncate_chars(&b.get("KEYS"), 60)
                     )
@@ -694,6 +707,19 @@ pub fn cmd_identity(a: &Args) -> R<i32> {
     Ok(0)
 }
 
+/// `Index.md` 里一条路由是"单条记录"还是"分支卡"。
+///
+/// 判据只此一份。此前 JSON 侧用 `path.contains("/records/")`、文本侧用
+/// `contains("/records/") || ends_with(".md")`——同一条路由可能在文本里进"记录"
+/// 段、在 JSON 里被标成 `branch`。两个说法同时存在时，总有一个在骗人。
+fn index_kind(path: &str) -> &'static str {
+    if path.contains("/records/") || path.ends_with(".md") {
+        "record"
+    } else {
+        "branch"
+    }
+}
+
 pub fn cmd_index(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     let p = root.join("Index.md");
@@ -709,7 +735,9 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 要 80ms；而这条命令是"每轮预载先看一眼"的视图，80ms 让它在预载路径上成为
     // 最贵的一步。实测原始读+数行（965 个文件、5.4MB）只要 6ms，纯 stat 1ms——
     // 那 80ms 全在解析，而索引只需要字节数与行数，不需要任何字段语义。
-    let mut rec_index: std::collections::HashMap<String, (u64, usize, i64)> =
+    // 元信息三件套。缺的维度是 `None`，不是 0：JSON 里写 0 会被读成"这条
+    // 记录是空的"，而真相是"这一维度量不出来"。
+    let mut rec_index: std::collections::HashMap<String, (Option<u64>, Option<usize>, i64)> =
         std::collections::HashMap::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         // lib.dir() 已经是 "canonical/records"，再拼一次 records 会让整个索引
@@ -738,18 +766,25 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            // 读不出来就记 0 字节 0 行，而不是跳过：索引漏掉一条会让读者以为
-            // 这条记录不存在，而它其实存在、只是读不了。
+            // 读不出来不跳过：索引漏掉一条会让读者以为这条记录不存在，而它其实
+            // 存在、只是读不了。但也**不能记成 0 字节 0 行**——那是对数据的错误
+            // 陈述，读者会判断成"这条是空的"而不是"读不了"。给 `None`，文本侧打
+            // `-`、JSON 侧写 null。
             let (bytes, lines) = match std::fs::read(&p) {
-                Ok(b) => (b.len() as u64, b.iter().filter(|c| **c == b'\n').count()),
-                Err(_) => (0, 0),
+                Ok(b) => (
+                    Some(b.len() as u64),
+                    Some(count_lines_bytes(&b)),
+                ),
+                Err(_) => (None, None),
             };
-            rec_index.insert(format!("{}/{}", lib.dir(), name.clone()), (bytes, lines, ts));
+            let full = format!("{}/{}", lib.dir(), name);
+            rec_index.insert(full, (bytes, lines, ts));
             rec_index.insert(name, (bytes, lines, ts));
         }
     }
     // 分支聚合:与 `tree` 同一口径,按 basename 去重后求和。
-    let mut branch_agg: std::collections::HashMap<String, (usize, u64, usize, i64)> =
+    // `(条目数, 体积, 行数, 最近活跃)`；体积/行数是 `None` = 成员一条都没量到。
+    let mut branch_agg: std::collections::HashMap<String, (usize, Option<u64>, Option<usize>, i64)> =
         std::collections::HashMap::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         let ap = root.join(lib.atlas());
@@ -760,22 +795,36 @@ pub fn cmd_index(a: &Args) -> R<i32> {
             for b in &at.branches {
                 let mut seen: Vec<String> = Vec::new();
                 let (mut bytes, mut lines, mut latest) = (0u64, 0usize, 0i64);
+                let mut measured = 0usize;
                 for p in b.paths() {
                     let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
                     if seen.contains(&bare) {
                         continue;
                     }
+                    seen.push(bare.clone());
                     let m = rec_index.get(&p).or_else(|| rec_index.get(&bare));
-                    seen.push(bare);
                     if let Some((by, ln, ts)) = m {
-                        bytes += by;
-                        lines += ln;
+                        if let (Some(by), Some(ln)) = (by, ln) {
+                            measured += 1;
+                            bytes += by;
+                            lines += ln;
+                        }
                         if *ts > latest {
                             latest = *ts;
                         }
                     }
                 }
-                branch_agg.insert(b.name(), (seen.len(), bytes, lines, latest));
+                // 一条成员都量不到时给 `None`，不要拿 0 冒充"这条分支是空的"。
+                let unmeasured = measured == 0 && !seen.is_empty();
+                branch_agg.insert(
+                    b.name(),
+                    (
+                        seen.len(),
+                        if unmeasured { None } else { Some(bytes) },
+                        if unmeasured { None } else { Some(lines) },
+                        latest,
+                    ),
+                );
             }
         }
     }
@@ -806,11 +855,12 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 // 来,只能靠 path 里有没有 "/records/" 去猜——那是字符串形状的
                 // 巧合,不是契约。`status` 再分出 candidate,让"候选只可参考"这条
                 // 语义在机器侧同样成立。
-                let kind = if path.contains("/records/") {
-                    "record"
-                } else {
-                    "branch"
-                };
+                //
+                // 判据只有一份（`index_kind`）:这里原来是 `path.contains(
+                // "/records/")`，文本侧是 `|| path.ends_with(".md")`，于是同一条
+                // 路由可能在文本里进"记录"段、在 JSON 里被标成 branch。两种说法
+                // 同时存在时，总有一个在骗人。
+                let kind = index_kind(path);
                 let status = if path.starts_with("candidate/") {
                     "candidate"
                 } else if kind == "record" {
@@ -826,23 +876,25 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 let bare = path.rsplit('/').next().unwrap_or(path).to_string();
                 let (by, ln, ts, cnt) = if kind == "record" {
                     match rec_index.get(path).or_else(|| rec_index.get(&bare)) {
-                        Some((b, l, t)) => (*b, *l, *t, 1usize),
-                        None => (0, 0, 0, 0),
+                        Some((b, l, t)) => (*b, *l, *t, Some(1usize)),
+                        // 路由指向的文件不在盘上：量不出来，不是 0 字节。
+                        None => (None, None, 0, None),
                     }
                 } else {
                     match branch_agg.get(path) {
-                        Some((n, b, l, t)) => (*b, *l, *t, *n),
-                        None => (0, 0, 0, 0),
+                        Some((n, b, l, t)) => (*b, *l, *t, Some(*n)),
+                        None => (None, None, 0, None),
                     }
                 };
                 format!(
-                    "{{\"path\":{},\"kind\":{},\"status\":{},\"summary\":{},\"read_when\":{},\"count\":{cnt},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                    "{{\"path\":{},\"kind\":{},\"status\":{},\"summary\":{},\"read_when\":{},\"count\":{},{}}}",
                     jstr(path),
                     jstr(kind),
                     jstr(status),
                     jstr(summary),
                     jstr(when),
-                    jstr(&crate::util::short_when(ts))
+                    jopt(cnt),
+                    meta_json(ts, by, ln)
                 )
             })
             .collect();
@@ -876,7 +928,8 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     //
     // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
     // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
-    let is_record = |path: &str| path.contains("/records/") || path.ends_with(".md");
+    // 记录与分支走同一个分类判据，理由见 JSON 分支里 `index_kind` 的注释。
+    let is_record = |path: &str| index_kind(path) == "record";
     let (mut br_rows, mut rec_rows): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for (path, summary, when) in &routes {
         if !q.is_empty() && !ci_contains(path, &q) && !ci_contains(summary, &q) && !ci_contains(when, &q) {
@@ -886,12 +939,12 @@ pub fn cmd_index(a: &Args) -> R<i32> {
             let bare = path.rsplit('/').next().unwrap_or(path).to_string();
             let meta = rec_index.get(path).or_else(|| rec_index.get(&bare));
             let (by, ln, ts) = match meta {
-                Some((b, l, t)) => (Some(*b), Some(*l), *t),
+                Some((b, l, t)) => (*b, *l, *t),
                 None => (None, None, 0),
             };
             let lib = if path.starts_with("candidate/") { "候选" } else { "正式" };
             rec_rows.push(format!(
-                "  {}  [{}] {}｜{}",
+                "{}  [{}] {}｜{}",
                 crate::util::row_meta(ts, by, ln),
                 lib,
                 path,
@@ -900,7 +953,7 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         } else {
             let agg = branch_agg.get(path);
             let (n, by, ln, ts) = match agg {
-                Some((n, b, l, t)) => (Some(*n), Some(*b), Some(*l), *t),
+                Some((n, b, l, t)) => (Some(*n), *b, *l, *t),
                 None => (None, None, None, 0),
             };
             let nshow = match n {
@@ -908,7 +961,7 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 None => "    -".to_string(),
             };
             br_rows.push(format!(
-                "  {}  {nshow}  {path}｜{when}",
+                "{}  {nshow}  {path}｜{when}",
                 crate::util::row_meta(ts, by, ln)
             ));
         }
@@ -1377,20 +1430,21 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
     // but a `git clone` or a directory copy resets every mtime at once and
     // would flip this listing wholesale. `history` already reads the declared
     // time; sharing `commit_time` keeps the two commands consistent.
-    let mut fs: Vec<(i64, String, u64, usize)> = Vec::new();
+    let mut fs: Vec<(i64, String, Option<u64>, Option<usize>)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
             if !p.is_file() {
                 continue;
             }
-            let sz = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
-            let txt = read_str(&p).unwrap_or_default();
+            // 读不出来 = 量不出来，不是 0 字节 0 行。
+            let raw = read_str(&p).ok();
+            let txt = raw.clone().unwrap_or_default();
             fs.push((
                 commit_time(&p, &txt),
                 p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
-                sz,
-                txt.lines().count(),
+                raw.as_ref().map(|t| t.len() as u64),
+                raw.as_ref().and_then(|t| count_lines_from(t.as_bytes())),
             ));
         }
     }
@@ -1406,10 +1460,9 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
             .take(pg.per.min(fs.len()))
             .map(|(ts, name, sz, ln)| {
                 format!(
-                    "{{\"name\":{},\"bytes\":{},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                    "{{\"name\":{},{}}}",
                     jstr(name),
-                    sz,
-                    jstr(&crate::util::short_when(*ts))
+                    meta_json(*ts, *sz, *ln)
                 )
             })
             .collect::<Vec<_>>()
@@ -1423,10 +1476,12 @@ pub fn cmd_recent(a: &Args) -> R<i32> {
         .take(pg.per.min(fs.len()))
         .enumerate()
     {
+        // 元信息前缀从第 0 列起，序号接在后面：`recent` 原来把序号顶在最前，
+        // 于是它的三列相对 `list`/`history` 整体右移五个字符，并排看就错位。
         println!(
-            "{:>3}. {}  {name}",
-            pg.start() + i + 1,
-            crate::util::row_meta(*ts, Some(*sz), Some(*ln))
+            "{}  {:>3}. {name}",
+            crate::util::row_meta(*ts, *sz, *ln),
+            pg.start() + i + 1
         );
     }
     println!("{}", pg.bar());

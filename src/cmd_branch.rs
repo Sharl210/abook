@@ -10,11 +10,86 @@
 //! lean on once the whole memory chapter is replaced by a call sheet.
 
 use crate::atlas::{Atlas, Branch};
+use crate::cmd_view::{count_lines_from, meta_json};
 use crate::paging::Page;
 use crate::rec::{Lib, Record};
 use crate::util::*;
 use std::path::Path;
 
+
+/// 每个记录文件的 `(体积, 行数, 时间)`；读不出来的文件两项都是 `None`。
+///
+/// 原来这里写的是 `Err(_) => (0, 0)`，于是一个读不出内容的记录在分支汇总里
+/// 表现为"0 字节 0 行"——读者会判断成"这条是空的"，真相是"读不了"。两者对
+/// 后续动作的含义完全相反：空记录可以跳过，读不了的要去看权限或编码。
+type FileMeta = std::collections::HashMap<String, (Option<u64>, Option<usize>, i64)>;
+
+fn branch_meta(root: &Path) -> FileMeta {
+    let mut meta: FileMeta = std::collections::HashMap::new();
+    for lib in [Lib::Canonical, Lib::Candidate] {
+        let d = root.join(lib.dir());
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let fp = e.path();
+            if !fp.is_file() {
+                continue;
+            }
+            let nm = fp
+                .file_name()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ts = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|x| x.as_secs() as i64)
+                .unwrap_or(0);
+            // 行数用统一实现（`count_lines_from`），不再自己数 `\n`：文件末尾
+            // 没有换行时两种算法差 1，同一条记录会在不同命令里显示成两个行数。
+            let (by, ln) = match std::fs::read(&fp) {
+                Ok(b) => (
+                    Some(b.len() as u64),
+                    count_lines_from(b.as_slice()),
+                ),
+                Err(_) => (None, None),
+            };
+            meta.insert(nm, (by, ln, ts));
+        }
+    }
+    meta
+}
+
+/// 一条分支的 `(体积, 行数, 最近活跃)`，按 basename 去重后求和。
+///
+/// 成员一条都量不到时体积/行数是 `None`：那不是"0 字节 0 行"，是"量不出来"。
+fn aggregate(meta: &FileMeta, b: &Branch) -> (Option<u64>, Option<usize>, i64) {
+    let (mut by, mut ln, mut ts) = (0u64, 0usize, 0i64);
+    let mut seen: Vec<String> = Vec::new();
+    let mut measured = 0usize;
+    for p in b.paths() {
+        let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
+        if seen.contains(&bare) {
+            continue;
+        }
+        seen.push(bare.clone());
+        let Some((x, y, z)) = meta.get(&bare) else { continue };
+        if let (Some(x), Some(y)) = (x, y) {
+            by += x;
+            ln += y;
+            measured += 1;
+        }
+        if *z > ts {
+            ts = *z;
+        }
+    }
+    let unmeasured = measured == 0 && !seen.is_empty();
+    (
+        if unmeasured { None } else { Some(by) },
+        if unmeasured { None } else { Some(ln) },
+        ts,
+    )
+}
 
 /// `branch` — inspect and edit the branch cards of a map.
 pub fn cmd_branch(a: &Args) -> R<i32> {
@@ -25,6 +100,11 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
     match sub.as_str() {
         "list" | "ls" | "" => {
             let mut js: Vec<String> = Vec::new();
+            // 元信息只扫一遍库，`--json` 与文本共用同一份，两个分支不各算一遍；
+            // 也不为每个库重扫。（原来 JSON 只给
+            // `name/count/declared/paths/revision/keys`，文本却带着时间与体积——
+            // 机器调用方拿不到"要不要读这条分支"的依据，只能盲取。）
+            let meta = branch_meta(&root);
             for lib in &libs {
                 let p = root.join(lib.atlas());
                 if !p.exists() {
@@ -36,8 +116,9 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                         .branches
                         .iter()
                         .map(|b| {
+                            let (by, ln, ts) = aggregate(&meta, b);
                             format!(
-                                "{{\"name\":{},\"count\":{},\"declared\":{},\"paths\":{},\"revision\":{},\"keys\":{}}}",
+                                "{{\"name\":{},\"count\":{},\"declared\":{},\"paths\":{},\"revision\":{},\"keys\":{},{}}}",
                                 jstr(&b.name()),
                                 b.count(),
                                 // `COUNT` can be present with an empty value in
@@ -52,7 +133,8 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                                 },
                                 b.paths().len(),
                                 jstr(&b.get("REVISION")),
-                                jstr(&b.get("KEYS"))
+                                jstr(&b.get("KEYS")),
+                                meta_json(ts, by, ln)
                             )
                         })
                         .collect();
@@ -72,35 +154,6 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                 // 判断依据，而只有条数并不够——20 条小记录和 20 条大记录对读者的
                 // 代价完全不同。聚合口径与 `tree`/`index` 一致（按 basename 去重
                 // 后求和），三个命令给出同一组数字。
-                let mut meta: std::collections::HashMap<String, (u64, usize, i64)> =
-                    std::collections::HashMap::new();
-                for l2 in [Lib::Canonical, Lib::Candidate] {
-                    let d = root.join(l2.dir());
-                    if let Ok(rd) = std::fs::read_dir(&d) {
-                        for e in rd.flatten() {
-                            let fp = e.path();
-                            if !fp.is_file() {
-                                continue;
-                            }
-                            let nm = fp
-                                .file_name()
-                                .map(|x| x.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            let ts = e
-                                .metadata()
-                                .ok()
-                                .and_then(|m| m.modified().ok())
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|x| x.as_secs() as i64)
-                                .unwrap_or(0);
-                            let (by, ln) = match std::fs::read(&fp) {
-                                Ok(b) => (b.len() as u64, b.iter().filter(|c| **c == b'\n').count()),
-                                Err(_) => (0, 0),
-                            };
-                            meta.insert(nm, (by, ln, ts));
-                        }
-                    }
-                }
                 let rows: Vec<String> = at
                     .branches
                     .iter()
@@ -112,25 +165,10 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                         } else {
                             "  <-- COUNT 与实际不符"
                         };
-                        let (mut by, mut ln, mut ts) = (0u64, 0usize, 0i64);
-                        let mut seen: Vec<String> = Vec::new();
-                        for p in b.paths() {
-                            let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
-                            if seen.contains(&bare) {
-                                continue;
-                            }
-                            seen.push(bare.clone());
-                            if let Some((x, y, z)) = meta.get(&bare) {
-                                by += x;
-                                ln += y;
-                                if *z > ts {
-                                    ts = *z;
-                                }
-                            }
-                        }
+                        let (by, ln, ts) = aggregate(&meta, b);
                         format!(
-                            "  {} {n:>4}条{flag}  {:<26} {}",
-                            crate::util::row_meta(ts, Some(by), Some(ln)),
+                            "{}  {n:>4}条{flag}  {:<26} {}",
+                            crate::util::row_meta(ts, by, ln),
                             b.name(),
                             b.get("KEYS")
                         )

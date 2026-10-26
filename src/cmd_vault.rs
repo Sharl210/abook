@@ -1,9 +1,31 @@
 //! Vault commands. Credential values are returned verbatim; the vault only
 //! governs storage form, not disclosure policy.
 
+use crate::cmd_view::meta_json;
 use crate::util::*;
 use crate::vault::*;
 use std::path::Path;
+
+/// 保险箱条目的 `(体积, 时间)`：拿不到就是 `None`，不是 0。
+///
+/// 文本侧原本就用 `-` 表示"不解密算不出明文行数"，但那个 `-` 来自
+/// `row_meta(ts, Some(by), None)` 里写死的 `None`，而 `ts`/`by` 在 stat 失败时
+/// 会变成 0——于是"读不到这个文件"和"这个文件是 0 字节"长得一样。JSON 侧更彻底，
+/// 压根没有这两列。
+fn file_meta(path: &Path) -> (Option<u64>, i64) {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            (Some(m.len()), t)
+        }
+        Err(_) => (None, 0),
+    }
+}
 
 pub fn run(a: &Args) -> R<i32> {
     let root = resolve_root(a);
@@ -12,16 +34,24 @@ pub fn run(a: &Args) -> R<i32> {
         "list" | "ls" => {
             let entries = list_entries(&root);
             if a.has("json") {
+                // 时间与体积必须进 JSON：文本读者早就看得见它们，机器调用方
+                // 却只拿到 ident/purpose/file。同一个库、同一份数据，"要不要
+                // 读这一条"的依据两侧必须一样，否则脚本只能盲取。
+                // 行数在这里恒为 null：`ls` 的契约是"不解值"，明文行数不解密
+                // 就算不出来。写 0 会被读成"这个条目是空的"。
                 crate::say_line!(
                     "[{}]",
                     entries
                         .iter()
                         .map(|e| {
+                            let (by, ts) = file_meta(&e.path);
                             format!(
-                                "{{\"ident\":{},\"purpose\":{},\"file\":{}}}",
+                                "{{\"ident\":{},\"purpose\":{},\"file\":{},{},\"verified\":{}}}",
                                 jstr(&e.ident),
                                 jstr(&e.purpose),
-                                jstr(&e.path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+                                jstr(&e.path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+                                meta_json(ts, by, None),
+                                e.verified
                             )
                         })
                         .collect::<Vec<_>>()
@@ -36,20 +66,10 @@ pub fn run(a: &Args) -> R<i32> {
                 // 明文行数不解密就算不出来，而 `ls` 的契约是"不解值"。填 0 会被
                 // 读成"这个条目是空的"——那是对数据的错误陈述；`-` 表示"这一维度
                 // 在不解密的前提下不可得"，与行数缺失的其余命令保持同一写法。
-                let (by, ts) = std::fs::metadata(&e.path)
-                    .map(|m| {
-                        let t = m
-                            .modified()
-                            .ok()
-                            .and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        (m.len(), t)
-                    })
-                    .unwrap_or((0, 0));
+                let (by, ts) = file_meta(&e.path);
                 crate::say_line!(
-                    "  {}  {}{}\n    {}",
-                    crate::util::row_meta(ts, Some(by), None),
+                    "{}  {}{}\n    {}",
+                    crate::util::row_meta(ts, by, None),
                     e.ident,
                     mark,
                     e.purpose

@@ -115,7 +115,25 @@ fn skills_root(a: &Args) -> PathBuf {
     if !e.is_empty() {
         return expand_tilde(&e);
     }
-    home_dir().join("AgentSkills")
+    // 默认根要认实际存在的那个。
+    //
+    // 只认 `~/AgentSkills` 的后果：这个目录是空的（或者根本不存在），而真实的
+    // skill 在 `~/.agents/skills`，于是 `abook skill list` 报"共 0 个"。
+    // 0 个是个**合法答案**，所以没有人会去怀疑路径错了——它看起来就是"你没有
+    // 装 skill"。这比报错更糟：报错会让人去查，报 0 只会让人以为事实如此。
+    //
+    // 三个候选按优先级排，取第一个存在的；都不存在时仍返回旧默认值（首次用
+    // `skill new` 时由它自己建目录）。
+    let home = home_dir();
+    for cand in [
+        home.join(".agents").join("skills"),
+        home.join(".config").join("agents").join("skills"),
+    ] {
+        if cand.is_dir() {
+            return cand;
+        }
+    }
+    home.join("AgentSkills")
 }
 
 fn need_name(a: &Args) -> R<String> {
@@ -543,7 +561,17 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 return usage(format!("{} 不存在", p.display()));
             }
             let txt = read_str(&p)?;
-            let mut problems: Vec<String> = Vec::new();
+            // 检查结果分两类：确定是问题的，和"需要人看一眼前提"的。
+    //
+    // 绝对路径这一项现在会把文档里提到的路径也报出来——`/opt/s_bin 在 PATH`
+    // 这类是**前置条件说明**，不是"运行时要读本机某个文件"。前者写在文档里是
+    // 有用的（告诉使用者要装什么），后者才是破坏自包含的。
+    //
+    // 靠词法分不开这两者，所以不硬猜：确定项照旧判不通过，存疑项单独列出并
+    // 说明该怎么自己判断。把正确答案判成错误答案，比漏检更糟——人会开始绕过
+    // 这条检查，然后真问题也一并漏掉。
+    let mut problems: Vec<String> = Vec::new();
+    let mut advisory: Vec<String> = Vec::new();
             for (n, line) in txt.lines().enumerate() {
                 let ln = n + 1;
                 let t = line.trim();
@@ -551,7 +579,7 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 // 盘符任意位置都能漏过去。判据应该是"任何以 / 或 X:\ 开头的
                 // 路径片段"，而不是列举几个我想到过的前缀。
                 if has_abs_path(t) {
-                    problems.push(format!("行{ln}: 绝对路径（Skill 须自带依赖）: {}", cut(t, 60)));
+                    advisory.push(format!("行{ln}: 出现了绝对路径（若为运行时要读的文件则不合规；仅作前置条件说明可忽略）: {}", cut(t, 60)));
                 }
                 // 相对逃逸：`../` 会读到 Skill 目录之外，同样破坏自包含。
                 if has_relative_escape(t) {
@@ -710,21 +738,31 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 }
             }
             if a.has("json") {
-                let arr = problems
-                    .iter()
-                    .map(|p| jstr(p))
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let arr = problems.iter().map(|p| jstr(p)).collect::<Vec<_>>().join(",");
+                let adv = advisory.iter().map(|p| jstr(p)).collect::<Vec<_>>().join(",");
                 crate::say_line!(
-                    "{{\"skill\":{},\"problems\":[{}],\"ok\":{}}}",
+                    "{{\"skill\":{},\"problems\":[{}],\"advisory\":[{}],\"ok\":{}}}",
                     jstr(&name),
                     arr,
+                    adv,
                     problems.is_empty()
                 );
                 return Ok(0);
             }
+            // 存疑项永远打在确定项之后、并且明说"这些不算不通过"。
+            // 混在一起数总量会让人以为 Skill 烂了 159 处，而其实绝大部分是
+            // 文档里正常出现的路径。
+            for x in &advisory {
+                crate::say_line!("  · {x}");
+            }
+            if !advisory.is_empty() {
+                crate::say_line!(
+                    "（以上 {} 条需自行判断：绝对路径作为前置条件写在文档里是正常的，作为运行时依赖才不合规）",
+                    advisory.len()
+                );
+            }
             if problems.is_empty() {
-                crate::say_line!("{} 通过：无外部路径、无跨 Skill 引用、无占位词", name);
+                crate::say_line!("{} 通过：无外部依赖、无跨 Skill 引用、无占位词", name);
                 Ok(0)
             } else {
                 crate::say_line!("{} 有问题 {} 处：", name, problems.len());
@@ -766,7 +804,24 @@ fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, 
     for e in rd.flatten() {
         let p = e.path();
         let nm = e.file_name().to_string_lossy().to_string();
-        if nm.starts_with('.') || nm == "node_modules" || nm == "target" {
+        // 跳过的东西分两类，理由不同：
+        //
+        //   - 构建/缓存类（`.git`、`node_modules`、`target`、`__pycache__`）：
+        //     不是 Skill 的正文，扫它们只会淹掉真正的问题。
+        //   - 第三方自带代码（`vendor`、`third_party`、`external`）：
+        //     这些**恰恰是自包含的正确做法**——把依赖复制进 Skill 目录，
+        //     总比运行时去别处取好。里面的 `"/fake/bin/repo"`、`~/.repoconfig`
+        //     是别人测试代码里的字符串常量，不是本 Skill 的外部依赖。
+        //
+        // 不排除第二类的后果：一个正确打包了 vendor 的 Skill，lint 报几百条
+        // "绝对路径""超 100 行须给目录"，退 5 判不通过。**检查把正确答案判成
+        // 错误答案**，比漏检更糟——人会开始绕过这条检查，然后真问题也一并漏掉。
+        if nm.starts_with('.')
+            || matches!(
+                nm.as_str(),
+                "node_modules" | "target" | "__pycache__" | "vendor" | "third_party" | "external"
+            )
+        {
             continue;
         }
         let md = match fs::metadata(&p) {
@@ -984,6 +1039,25 @@ fn has_relative_escape(t: &str) -> bool {
 ///
 /// 判据刻意收窄到"变量后面紧跟路径分隔符"：单纯提一句 `$PATH` 或
 /// `export FOO=1` 是正常的 shell 说明，不是外部路径依赖，不该误伤。
+/// 真正表示"位置取决于跑在谁的机器上"的变量名。
+///
+/// 判据从"任何 `$VAR/` 都算"收窄到"宿主环境变量才算"，因为前者的误报率实际上
+/// 让这条检查失效：Skill 自己的脚本里写 `S=$(cd "$(dirname "$0")" && pwd)` 之后
+/// 用 `$S/scripts/x.sh` 定位自己，这是**最正确的写法**（不依赖调用者的 cwd），
+/// 却会被判成"路径依赖本机环境变量"。
+///
+/// 实测一个正确打包的 Skill 因此报出上百条，退 5 判不通过。检查把正确答案判成
+/// 错误答案，人就会绕过这条检查——然后真正依赖 `$HOME/.config` 的地方也一并漏掉。
+///
+/// 所以只看这些"换台机器就变"的变量。它们要么是家目录，要么是系统临时目录，
+/// 要么是 Windows 的用户级路径。
+const HOST_ENV_VARS: &[&str] = &[
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "PROGRAMFILES", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
+    "USER", "USERNAME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "SHELL",
+];
+
 fn has_env_path(t: &str) -> bool {
     let b: Vec<char> = t.chars().collect();
     let at = |i: usize| b.get(i).copied().unwrap_or(' ');
@@ -1007,7 +1081,12 @@ fn has_env_path(t: &str) -> bool {
                 while at(j).is_alphanumeric() || at(j) == '_' {
                     j += 1;
                 }
-                if j > start && at(j) == '}' && is_sep(at(j + 1)) {
+                let nm: String = b[start..j].iter().collect();
+                if j > start
+                    && at(j) == '}'
+                    && is_sep(at(j + 1))
+                    && HOST_ENV_VARS.contains(&nm.as_str())
+                {
                     return true;
                 }
             } else {
@@ -1015,7 +1094,8 @@ fn has_env_path(t: &str) -> bool {
                 while at(j).is_alphanumeric() || at(j) == '_' {
                     j += 1;
                 }
-                if j > start && is_sep(at(j)) {
+                let nm: String = b[start..j].iter().collect();
+                if j > start && is_sep(at(j)) && HOST_ENV_VARS.contains(&nm.as_str()) {
                     return true;
                 }
             }
@@ -1033,7 +1113,16 @@ fn has_env_path(t: &str) -> bool {
             while at(j).is_alphanumeric() || at(j) == '_' {
                 j += 1;
             }
-            if j > start && at(j) == '%' {
+            // 名字至少 3 个字符。
+            //
+            // 不加这条，`old.strftime('%Y-%m-%dT%H:%M:%S%z')` 里的 `%S%` 会被
+            // 当成一个 Windows 路径变量（`%S` 后紧跟 `%`），于是每一处 strftime
+            // 格式化都被报成"路径依赖本机环境变量"。真实 Skill 的测试脚本里
+            // 这种写法很常见，误报量足以让人不再看这份报告。
+            //
+            // Windows 自带变量最短的是 `%TMP%`（3 个字符），所以 3 是安全下界；
+            // 而 strftime 指令全是单字符，正好被挡在外面。
+            if j - start >= 3 && at(j) == '%' {
                 return true;
             }
         }

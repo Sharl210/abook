@@ -5,6 +5,101 @@ use crate::rec::{load_lib, resolve_record, ListFilter, Lib, Record};
 use crate::util::*;
 use std::path::{Path, PathBuf};
 
+// ---------------------------------------------------------------- 列表元信息
+//
+// 放在这里而不是 `util.rs`：`util.rs` 正被另一个人改，而且这一组函数的语义
+// 属于"列表怎么显示"，与工具函数不同层。
+
+/// 行数算法的唯一实现。
+///
+/// 此前两种写法并存：`index`/`branch`/`skill` 数 `\n` 的个数，其余用
+/// `lines().count()`。两者在"文件末尾没有换行"时差 1——工具自己写的记录一定以
+/// 换行结尾，但库允许手改，于是同一条记录在 `list` 里 12 行、在 `index` 里 11 行。
+/// 按逻辑行数算：末尾不带换行也算最后一行，空文件 0 行。
+///
+/// 返回 `None` 表示这不是文本（含 NUL 字节），二进制没有"行"这个概念——不要拿
+/// 一个数字冒充。收 `Read` 是为了让几十 MB 的附件也能数行而不必整个读进内存。
+pub fn count_lines_from<R: std::io::Read>(mut r: R) -> Option<usize> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut newlines = 0usize;
+    let mut total = 0u64;
+    let mut last: Option<u8> = None;
+    loop {
+        let k = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(k) => k,
+            Err(_) => return None,
+        };
+        let chunk = &buf[..k];
+        if chunk.contains(&0) {
+            return None;
+        }
+        newlines += chunk.iter().filter(|c| **c == b'\n').count();
+        total += k as u64;
+        last = Some(chunk[k - 1]);
+    }
+    if total == 0 {
+        return Some(0);
+    }
+    Some(if last == Some(b'\n') { newlines } else { newlines + 1 })
+}
+
+/// 记录正文的行数。记录一定是文本，所以返 0 只可能是读失败——那种情况调用方
+/// 应该用 [`count_lines_of_file`] 拿到 `None`。
+pub fn count_lines(s: &str) -> usize {
+    count_lines_from(s.as_bytes()).unwrap_or(0)
+}
+
+/// 同上，直接吃字节：`index`/`branch` 只读字节、不解析记录。
+pub fn count_lines_bytes(b: &[u8]) -> usize {
+    count_lines_from(b).unwrap_or(0)
+}
+
+/// 文本文件的行数；二进制或打不开都给 `None`。
+pub fn count_lines_of_file(p: &Path) -> Option<usize> {
+    count_lines_from(std::fs::File::open(p).ok()?)
+}
+
+/// 时间列的文本写法，与 `util::row_meta` 同一口径：未知给 `-`。
+///
+/// `row_meta` 把这条判断写在函数里，JSON 侧没有对应物，于是同一条读不出时间的
+/// 记录在文本里是 `-`、在 JSON 里是 1970 年。
+pub fn when_or_dash(ts: i64) -> String {
+    if ts > 0 {
+        crate::util::short_when(ts)
+    } else {
+        "-".to_string()
+    }
+}
+
+/// JSON 的未知维度写 `null`，不写 0。
+pub fn jopt<T: std::fmt::Display>(v: Option<T>) -> String {
+    match v {
+        Some(x) => x.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// 列表行元信息的 JSON 版，与 `row_meta` 一一对应。
+///
+/// 文本打 `-` 的维度这里必须是 `null`：`index --json` 曾经把读不出来的记录报成
+/// `"bytes":0,"lines":0,"updated":0`，机器调用方看到的是"0 字节 0 行、更新于
+/// 1970"，而文本侧说的是"元信息不可得"。同一份数据两套说法，机器侧只会更相信
+/// 那个数字。
+pub fn meta_json(when: i64, bytes: Option<u64>, lines: Option<usize>) -> String {
+    format!(
+        "\"bytes\":{},\"lines\":{},\"updated\":{},\"when\":{}",
+        jopt(bytes),
+        jopt(lines),
+        if when > 0 {
+            when.to_string()
+        } else {
+            "null".to_string()
+        },
+        jstr(&when_or_dash(when))
+    )
+}
+
 /// `get <record> <field>` — read one field without dumping the whole record.
 pub fn cmd_get(a: &Args) -> R<i32> {
     let root = resolve_root(a);
@@ -270,11 +365,10 @@ fn note_dir(
             .take(pg.per.min(rows.len()))
             .map(|(n, t, b, ts, ln)| {
                 format!(
-                    "{{\"name\":{},\"title\":{},\"bytes\":{},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                    "{{\"name\":{},\"title\":{},{}}}",
                     jstr(n),
                     jstr(t),
-                    b,
-                    jstr(&crate::util::short_when(*ts))
+                    meta_json(*ts, Some(*b), Some(*ln))
                 )
             })
             .collect::<Vec<_>>()
@@ -337,7 +431,7 @@ pub fn cmd_history(a: &Args) -> R<i32> {
     // timestamps, and within one timestamp put `-1` before the bare name --
     // 44 of 76 rows landed in the wrong position. The file already records
     // when it happened, so ask the file.
-    let mut rows: Vec<(i64, String, String, usize, u64)> = Vec::new();
+    let mut rows: Vec<(i64, String, String, Option<usize>, Option<u64>)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -345,7 +439,9 @@ pub fn cmd_history(a: &Args) -> R<i32> {
                 continue;
             }
             let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let txt = read_str(&p).unwrap_or_default();
+            // 读不出来 = 量不出来，不是 0 字节 0 行。
+            let raw = read_str(&p).ok();
+            let txt = raw.clone().unwrap_or_default();
             if !needle.is_empty() && !txt.contains(&needle) && !name.contains(&needle) {
                 continue;
             }
@@ -357,7 +453,13 @@ pub fn cmd_history(a: &Args) -> R<i32> {
                 .trim_start_matches('#')
                 .trim()
                 .to_string();
-            rows.push((stamp, name, first, txt.lines().count(), txt.len() as u64));
+            rows.push((
+                stamp,
+                name,
+                first,
+                raw.as_ref().and_then(|t| count_lines_from(t.as_bytes())),
+                raw.as_ref().map(|t| t.len() as u64),
+            ));
         }
     }
     // Newest first; the name is the tie-break so equal timestamps stay stable.
@@ -368,17 +470,21 @@ pub fn cmd_history(a: &Args) -> R<i32> {
             .iter()
             .skip(pg.start())
             .take(pg.per.min(rows.len()))
-            .map(|(ts, n, t, ln, by)| format!("{{\"name\":{},\"title\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}", jstr(n), jstr(t), jstr(&crate::util::short_when(*ts))))
+            .map(|(ts, n, t, ln, by)| {
+                format!(
+                    "{{\"name\":{},\"title\":{},{}}}",
+                    jstr(n),
+                    jstr(t),
+                    meta_json(*ts, *by, *ln)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         println!("{{{},\"commits\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
     for (ts, n, t, ln, by) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
-        println!(
-            "{}  {n:<48}  {t}",
-            crate::util::row_meta(*ts, Some(*by), Some(*ln))
-        );
+        println!("{}  {n:<48}  {t}", crate::util::row_meta(*ts, *by, *ln));
     }
     println!("{}", pg.bar());
     Ok(0)
@@ -598,8 +704,22 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             continue;
         }
         let at = crate::atlas::Atlas::load(&ap)?;
-        // (name, member_count, status, newest, bytes, lines)
-        let mut rows: Vec<(String, usize, String, i64, usize, usize, usize, u64)> = at
+        // 一行一个分支。用结构体而不是八元组：列序正跟着 `row_meta` 统一，
+        // 下标一多，改一次顺序就要重新数"第几个才是体积"。
+        struct Row {
+            name: String,
+            count: usize,
+            status: String,
+            when: i64,
+            /// `None` = 这条分支的成员一条都没找到（PATH 指向已改名的文件）。
+            /// 那不是"0 字节 0 行"，是"量不出来"——两者的区别正是这一栏存在的
+            /// 意义：0 会让读者跳过一条其实很重的分支。
+            bytes: Option<u64>,
+            lines: Option<usize>,
+            attach_count: usize,
+            attach_bytes: u64,
+        }
+        let mut rows: Vec<Row> = at
             .branches
             .iter()
             .map(|b| {
@@ -609,34 +729,46 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 // member count and the totals always agree.
                 let mut seen: Vec<String> = Vec::new();
                 let mut latest = 0i64;
-                let mut bytes = 0usize;
+                let mut bytes = 0u64;
                 let mut lines = 0usize;
+                let mut measured = 0usize;
                 let (mut attach_count, mut attach_bytes) = (0usize, 0u64);
                 for p in b.paths() {
                     let bare = p.rsplit('/').next().unwrap_or(&p).to_string();
                     if seen.contains(&bare) {
                         continue;
                     }
+                    seen.push(bare.clone());
                     let m = match index.get(&p).or_else(|| index.get(&bare)) {
                         Some(m) => *m,
                         // A PATH entry whose file is missing is real in this
-                        // library (records get renamed). Count it as a member --
-                        // it is still claimed -- but contribute no bytes.
-                        None => Meta::default(),
+                        // library (records get renamed). It is still claimed as a
+                        // member -- it just contributes nothing measurable.
+                        None => continue,
                     };
-                    seen.push(bare);
+                    measured += 1;
                     if m.updated > latest {
                         latest = m.updated;
                     }
-                    bytes += m.bytes;
+                    bytes += m.bytes as u64;
                     lines += m.lines;
                     attach_count += m.attach_count;
                     attach_bytes += m.attach_bytes;
                 }
-                (b.name(), seen.len(), b.get("STATUS"), latest, bytes, lines, attach_count, attach_bytes)
+                let unmeasured = measured == 0 && !seen.is_empty();
+                Row {
+                    name: b.name(),
+                    count: seen.len(),
+                    status: b.get("STATUS"),
+                    when: latest,
+                    bytes: if unmeasured { None } else { Some(bytes) },
+                    lines: if unmeasured { None } else { Some(lines) },
+                    attach_count,
+                    attach_bytes,
+                }
             })
             .collect();
-        rows.sort_by(|x, y| y.1.cmp(&x.1));
+        rows.sort_by(|x, y| y.count.cmp(&x.count));
         let _ = &rows;
 
         // Hierarchy, computed from PARENT rather than from LEVEL.
@@ -665,12 +797,15 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 .iter()
                 .skip(pg.start())
                 .take(pg.per.min(rows.len()))
-                .map(|(name, n, st, ts, by, ln, ac, ab)| {
+                .map(|r| {
                     format!(
-                        "{{\"branch\":{},\"count\":{n},\"status\":{},\"bytes\":{by},\"lines\":{ln},\"attach_count\":{ac},\"attach_bytes\":{ab},\"updated\":{ts},\"when\":{}}}",
-                        jstr(name),
-                        jstr(st),
-                        jstr(&crate::util::short_when(*ts))
+                        "{{\"branch\":{},\"count\":{},\"status\":{},{},\"attach_count\":{},\"attach_bytes\":{}}}",
+                        jstr(&r.name),
+                        r.count,
+                        jstr(&r.status),
+                        meta_json(r.when, r.bytes, r.lines),
+                        r.attach_count,
+                        r.attach_bytes
                     )
                 })
                 .collect::<Vec<_>>()
@@ -683,26 +818,20 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             continue;
         }
         println!("== {}", lib.name());
-        let stat = |n: usize, by: usize, ln: usize, st: &str, ts: i64| {
-            format!(
-                "{n:>4}条 {:>8} {:>7}  {st:<8} {}",
-                human_bytes(by as u64),
-                format!("{ln}行"),
-                crate::util::short_when(ts)
-            )
-        };
         if flat || parents.values().all(|p| p.is_empty()) {
-            // No hierarchy declared: print the flat list exactly as before.
-            // The tree is an addition, not a replacement -- an existing library
-            // with no PARENT fields must read the same way it always did.
-            for (name, n, st, ts, by, ln, ac, ab) in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+            // No hierarchy declared: the flat list. 列序跟 `row_meta` 一致：
+            // 时间 / 体积 / 行数 在最前，条目数这类命令特有列接在后面。
+            for r in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
                 println!(
-                    "  {name:<28} {} {}",
-                    stat(*n, *by, *ln, st, *ts),
-                    if *ac == 0 {
+                    "{}  {:<28} {:>4}条  {:<8} {}",
+                    crate::util::row_meta(r.when, r.bytes, r.lines),
+                    r.name,
+                    r.count,
+                    r.status,
+                    if r.attach_count == 0 {
                         String::new()
                     } else {
-                        format!("{}件{}", ac, human_bytes(*ab))
+                        format!("{}件{}", r.attach_count, human_bytes(r.attach_bytes))
                     }
                 );
             }
@@ -710,26 +839,31 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
             // Depth-first walk. Children are ordered by size so the biggest
             // subtree is read first -- the point of a tree view is deciding
             // where to look next, and that decision is made on volume.
+            //
+            // 元信息前缀始终从第 0 列起，树的缩进放在它右边：这样 `tree` 与
+            // `list`/`branch`/`index` 并排看时前三列对得齐，同时子树仍然看得出
+            // 层级。
             fn emit(
                 name: &str,
                 depth: usize,
                 parents: &std::collections::HashMap<String, String>,
-                rows: &[(String, usize, String, i64, usize, usize, usize, u64)],
+                rows: &[Row],
                 out: &mut Vec<String>,
             ) {
-                if let Some((_, n, st, ts, by, ln, ac, ab)) = rows.iter().find(|r| r.0 == name) {
+                if let Some(r) = rows.iter().find(|r| r.name == name) {
                     let pad = "  ".repeat(depth);
                     let mark = if depth == 0 { "▸" } else { "·" };
                     out.push(format!(
-                        "{pad}{mark} {name:<28} {n:>4}条 {:>8} {:>7}  {}  {st:<8} {}",
-                        human_bytes(*by as u64),
-                        format!("{ln}行"),
-                        if *ac == 0 {
-                            "        ".to_string()
+                        "{}  {pad}{mark} {:<28} {:>4}条  {:<8} {}",
+                        crate::util::row_meta(r.when, r.bytes, r.lines),
+                        r.name,
+                        r.count,
+                        r.status,
+                        if r.attach_count == 0 {
+                            String::new()
                         } else {
-                            format!("{:>8}", format!("{}件{}", ac, human_bytes(*ab)))
-                        },
-                        crate::util::short_when(*ts)
+                            format!("{}件{}", r.attach_count, human_bytes(r.attach_bytes))
+                        }
                     ));
                 }
                 let mut kids: Vec<&String> = parents
@@ -738,8 +872,8 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                     .map(|(k, _)| k)
                     .collect();
                 kids.sort_by(|x, y| {
-                    let bx = rows.iter().find(|r| &r.0 == *x).map(|r| r.4).unwrap_or(0);
-                    let by_ = rows.iter().find(|r| &r.0 == *y).map(|r| r.4).unwrap_or(0);
+                    let bx = rows.iter().find(|r| &r.name == *x).and_then(|r| r.bytes).unwrap_or(0);
+                    let by_ = rows.iter().find(|r| &r.name == *y).and_then(|r| r.bytes).unwrap_or(0);
                     by_.cmp(&bx)
                 });
                 for k in kids {
@@ -752,8 +886,8 @@ pub fn cmd_tree(a: &Args) -> R<i32> {
                 .filter(|n| parents.get(*n).map(|p| p.is_empty()).unwrap_or(true))
                 .collect();
             roots.sort_by(|x, y| {
-                let bx = rows.iter().find(|r| &r.0 == *x).map(|r| r.4).unwrap_or(0);
-                let by_ = rows.iter().find(|r| &r.0 == *y).map(|r| r.4).unwrap_or(0);
+                let bx = rows.iter().find(|r| &r.name == *x).and_then(|r| r.bytes).unwrap_or(0);
+                let by_ = rows.iter().find(|r| &r.name == *y).and_then(|r| r.bytes).unwrap_or(0);
                 by_.cmp(&bx)
             });
             for r in roots {
@@ -866,19 +1000,16 @@ pub fn cmd_search(a: &Args) -> R<i32> {
             .take(pg.per.min(hits.len()))
             .map(|h| {
                 format!(
-                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
+                    "{{\"path\":{},\"score\":{},\"field\":{},\"line\":{},\"title\":{},\"snippet\":{},\"attach_count\":{},\"attach_bytes\":{},{}}}",
                     jstr(&h.path),
                     h.score,
                     jstr(&h.where_),
                     h.line,
                     jstr(&h.title),
                     jstr(&h.snippet),
-                    h.bytes,
-                    h.lines,
                     h.attach_count,
                     h.attach_bytes,
-                    h.updated,
-                    jstr(&crate::util::short_when(h.updated))
+                    meta_json(h.updated, Some(h.bytes as u64), Some(h.lines))
                 )
             })
             .collect::<Vec<_>>()
@@ -897,7 +1028,18 @@ pub fn cmd_search(a: &Args) -> R<i32> {
         } else {
             format!("{}件{}", h.attach_count, human_bytes(h.attach_bytes))
         };
-        println!("{:>4}  {:>8}  {:>7} {:>12}  {}  {}  [{}] {}", h.score, human_bytes(h.bytes as u64), format!("{}行", h.lines), att, crate::util::short_when(h.updated), h.path, h.where_, truncate_chars(&h.title, 60));
+        // 行数这一列曾在这里是 `{:>7}`、在 `list` 是 `{:>4}`、在 `row_meta` 是
+        // `{:>5}`：同一个含义三种宽度。现在三段元信息统一由 `row_meta` 铺开，
+        // 命中分（这行真正的排序依据）接在后面，不与那三列抢位置。
+        println!(
+            "{}  {:>5}  {:>12}  {}  [{}] {}",
+            crate::util::row_meta(h.updated, Some(h.bytes as u64), Some(h.lines)),
+            h.score,
+            att,
+            h.path,
+            h.where_,
+            truncate_chars(&h.title, 60)
+        );
         if !h.snippet.is_empty() {
             println!("       行{}  {}", h.line, h.snippet);
         }
@@ -1145,7 +1287,7 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             .copied()
             .map(|rec| {
                 format!(
-                    "{{\"path\":{},\"lib\":{},\"id\":{},\"title\":{},\"status\":{},\"kind\":{},\"maturity\":{},\"bytes\":{},\"lines\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
+                    "{{\"path\":{},\"lib\":{},\"id\":{},\"title\":{},\"status\":{},\"kind\":{},\"maturity\":{},\"created\":{},{}}}",
                     jstr(&rel(&root, &rec.path)),
                     jstr(rec.lib.name()),
                     jstr(&rec.id()),
@@ -1153,11 +1295,12 @@ pub fn cmd_list(a: &Args) -> R<i32> {
                     jstr(&rec.status()),
                     jstr(&rec.kind()),
                     jstr(&rec.get("MATURITY")),
-                    rec.raw.len(),
-                    rec.raw.lines().count(),
                     rec.created(),
-                    rec.updated(),
-                    jstr(&crate::util::short_when(rec.updated()))
+                    meta_json(
+                        rec.updated(),
+                        Some(rec.raw.len() as u64),
+                        Some(count_lines(&rec.raw))
+                    )
                 )
             })
             .collect::<Vec<_>>()
@@ -1166,19 +1309,25 @@ pub fn cmd_list(a: &Args) -> R<i32> {
         return Ok(0);
     }
     for rec in page.iter().copied() {
+        // 元信息一律走 `row_meta`：此处自己写 `{:>4}` 放过行数，于是从"行数"往后
+        // 整行相对其它命令左移一格，并排看就错位。附件列是命令特有信息，接在
+        // 统一前缀之后。
+        let att = {
+            let f = att_of(rec);
+            if f.is_empty() {
+                String::new()
+            } else {
+                format!("{}件{}", f.count(), human_bytes(f.bytes))
+            }
+        };
         println!(
-            "{:>8}  {:>7} {:>4}  {:>12}  {}  [{}] {}",
-            crate::util::short_when(rec.updated()),
-            human_bytes(rec.raw.len() as u64),
-            format!("{}行", rec.raw.lines().count()),
-            {
-                let f = att_of(rec);
-                if f.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}件{}", f.count(), human_bytes(f.bytes))
-                }
-            },
+            "{}  {:>12}  {}  [{}] {}",
+            crate::util::row_meta(
+                rec.updated(),
+                Some(rec.raw.len() as u64),
+                Some(count_lines(&rec.raw))
+            ),
+            att,
             rel(&root, &rec.path),
             rec.lib.name(),
             truncate_chars(&rec.title(), 70)
@@ -1272,4 +1421,79 @@ pub fn cmd_budget(a: &Args) -> R<i32> {
             if *n <= 8192 { "通过" } else { "超限" });
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------- 单元测试
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 未知维度不许伪装成一个数字。
+    ///
+    /// `index --json` 曾经把读不出来的记录报成 `0 字节 0 行、更新于 1970`，
+    /// 而文本侧同一份数据说的是"元信息不可得"。这条测试把两侧钉在一起：
+    /// 文本三个维度都只能是 `-`，JSON 三个维度都只能是 `null`。
+    #[test]
+    fn unknown_meta_is_dash_and_null_not_zero() {
+        let text = crate::util::row_meta(0, None, None);
+        assert!(
+            !text.chars().any(|c| c.is_ascii_digit()),
+            "未知维度在文本里被写成了数字: {text:?}"
+        );
+        assert_eq!(text.matches('-').count(), 3, "三个维度都该是 `-`: {text:?}");
+        assert_eq!(
+            meta_json(0, None, None),
+            "\"bytes\":null,\"lines\":null,\"updated\":null,\"when\":\"-\""
+        );
+        // `:0` 会同时命中 `"updated":0` 和 `"bytes":0`；两者都是这条要禁的。
+        assert!(!meta_json(0, None, None).contains(":0"));
+    }
+
+    /// 0 是测量值，不能被当成"未知"处理掉。
+    #[test]
+    fn zero_is_a_measurement_but_missing_is_not() {
+        let text = crate::util::row_meta(0, Some(0), Some(0));
+        assert!(text.contains("0B"), "{text:?}");
+        assert!(text.contains("0行"), "{text:?}");
+        let j = meta_json(0, Some(0), Some(0));
+        // 只针对被测的两个维度断言。`when=0` 是"时间未知"，它输出
+        // `"updated":null` 是对的——原来这里写的是 `!j.contains("null")`，
+        // 把那个正确的 null 也算成"0 被写成未知"，于是测试自己在失败。
+        // 断言的范围要正好圈住被测对象，宽一点就会把邻列的正确行为当错误。
+        assert!(!j.contains("\"bytes\":null"), "0 字节被写成了未知: {j}");
+        assert!(!j.contains("\"lines\":null"), "0 行被写成了未知: {j}");
+        assert!(j.contains("\"bytes\":0"), "{j}");
+        assert!(j.contains("\"lines\":0"), "{j}");
+    }
+
+    /// 行数只有一套算法：与 `str::lines()` 逐个对拍，并钉住"末尾没换行不丢一行"。
+    #[test]
+    fn line_counting_is_one_algorithm() {
+        let cases = [
+            "", "a", "a\n", "a\nb", "a\nb\n", "\n", "\n\n", "a\n\nb\n", "a\r\nb\r\n", "a\r\nb",
+        ];
+        for t in cases {
+            assert_eq!(count_lines(t), t.lines().count(), "count_lines({t:?})");
+            assert_eq!(count_lines_bytes(t.as_bytes()), t.lines().count(), "count_lines_bytes({t:?})");
+        }
+        // 手改的文件末尾没有换行：两种旧实现在这里差 1，现在必须一致。
+        assert_eq!(count_lines("x\ny"), 2);
+        assert_eq!(count_lines("x\ny\n"), 2);
+    }
+
+    /// 二进制没有行数；文件形态与字节形态必须给同一个答案。
+    #[test]
+    fn binary_has_no_line_count() {
+        assert_eq!(count_lines_from(&b"\x00\x01\x02"[..]), None);
+        let d = std::env::temp_dir().join("abook-count-lines-test");
+        let _ = std::fs::create_dir_all(&d);
+        let txt = d.join("a.md");
+        std::fs::write(&txt, "one\ntwo\nthree").expect("写临时文件");
+        assert_eq!(count_lines_of_file(&txt), Some(3));
+        let bin = d.join("b.bin");
+        std::fs::write(&bin, [0u8, 1, 2, b'\n']).expect("写临时文件");
+        assert_eq!(count_lines_of_file(&bin), None);
+        assert_eq!(count_lines_of_file(&d.join("不存在")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
