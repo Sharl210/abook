@@ -1018,6 +1018,39 @@ pub fn flush_write_report(root: &Path) {
     println!("写入 {} 个文件: {}", names.len(), names.join("、"));
 }
 
+/// 临时文件的自动清理。
+///
+/// 为什么需要它：这个函数有三条早退路径（写入失败、复读失败、改名失败），
+/// 每条都应该删掉临时文件，靠手写在每处补一句 `remove_file` 很容易漏——
+/// 事实上原来就漏了两条：`fs::write` 失败和 `fs::read` 失败都直接 `?` 返回，
+/// 半截临时文件留在目录里。用 `ulimit -f 1` 让写入失败，能稳定复现一个
+/// 1024 字节、内容被截断的 `.tmp<pid>` 残留。
+///
+/// 放在 Drop 里是因为它需要覆盖**所有**退出路径，包括将来新增的。
+/// `keep()` 用于成功路径：改名成功后临时文件已经不存在，再去删一次会误删
+/// 别人刚用同名写下的新文件。
+struct TmpGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl TmpGuard {
+    fn new(p: std::path::PathBuf) -> TmpGuard {
+        TmpGuard { path: Some(p) }
+    }
+    /// 临时文件已经被 rename 走了，不要再删。
+    fn keep(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = fs::remove_file(&p);
+        }
+    }
+}
+
 pub fn write_atomic(p: &Path, data: &str) -> R<()> {
     if let Some(dir) = p.parent() {
         fs::create_dir_all(dir)?;
@@ -1026,33 +1059,59 @@ pub fn write_atomic(p: &Path, data: &str) -> R<()> {
         "tmp{}",
         std::process::id() as u64 % 100000
     ));
+    // 从这里开始，任何路径退出都会删掉临时文件。
+    let mut guard = TmpGuard::new(tmp.clone());
     fs::write(&tmp, data.as_bytes())
         .map_err(|e| EE::Io(format!("写入失败 {}: {e}", tmp.display())))?;
     // read back: a lost write must not be reported as success
-    let back = fs::read(&tmp)?;
+    let back = fs::read(&tmp)
+        .map_err(|e| EE::Io(format!("复读失败 {}: {e}", tmp.display())))?;
     if back != data.as_bytes() {
-        let _ = fs::remove_file(&tmp);
         return integrity(format!("写入复读不一致: {}", p.display()));
     }
-    let done = match fs::rename(&tmp, p) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            // Windows: rename over existing file needs the target removed first
-            let _ = fs::remove_file(p);
-            fs::rename(&tmp, p).map_err(|e| {
-                EE::Io(format!("原子改名失败 {}: {e}", p.display()))
-            })
+    match fs::rename(&tmp, p) {
+        // 成功：临时文件已经变成目标，别让 guard 去删它。
+        Ok(_) => {
+            guard.keep();
         }
-    };
-    if done.is_ok() {
-        if let Ok(mut v) = written_files().lock() {
-            let s = p.to_string_lossy().to_string();
-            if !v.iter().any(|x| x.to_string_lossy() == s) {
-                v.push(p.to_path_buf());
+        Err(_) => {
+            // Windows 上 rename 不能覆盖已存在的文件，得先把目标挪开。
+            //
+            // 原来这里是 `remove_file(p)` 然后直接再 rename——第二步如果也
+            // 失败，旧内容已经没了，新内容也没写进去，两边都丢。改成先把
+            // 目标改名成 .bak（同目录，原子），rename 成功后再删 .bak；
+            // 失败则把 .bak 挪回原位，至少保住旧内容。
+            let bak = p.with_extension(format!(
+                "bak{}",
+                std::process::id() as u64 % 100000
+            ));
+            let moved = fs::rename(p, &bak).is_ok();
+            match fs::rename(&tmp, p) {
+                Ok(_) => {
+                    guard.keep();
+                    if moved {
+                        let _ = fs::remove_file(&bak);
+                    }
+                }
+                Err(e) => {
+                    if moved {
+                        let _ = fs::rename(&bak, p);
+                    }
+                    return Err(EE::Io(format!(
+                        "原子改名失败 {}: {e}",
+                        p.display()
+                    )));
+                }
             }
         }
     }
-    done
+    if let Ok(mut v) = written_files().lock() {
+        let s = p.to_string_lossy().to_string();
+        if !v.iter().any(|x| x.to_string_lossy() == s) {
+            v.push(p.to_path_buf());
+        }
+    }
+    Ok(())
 }
 
 /// Fingerprint of one file's bytes, for "did this change since I read it?".
