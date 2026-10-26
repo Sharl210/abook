@@ -32,6 +32,27 @@ jobs:
       macos: ${{ steps.m.outputs.macos }}
       any: ${{ steps.m.outputs.any }}
     steps:
+      # 工作流自身的语法门。
+      #
+      # v1.6.16 与 v1.6.17 连续两版死在一处两格缩进：`python3 -c` 里的
+      # IndentationError。前面 15 个架构全部编译成功，只有最后打包那一步炸，
+      # 于是白烧两次完整构建和一个 tag。这类错误在本地没有任何入口会被执行，
+      # 只能靠专门抽出来编译一遍才发现。
+      #
+      # 放在 plan 里另有原因：它要在**任何架构开始编译之前**失败。等到
+      # downloads 才发现，代价是 15 个架构的编译时间。
+      # 这里的 checkout 只为拿到工作流文件与检查脚本本身。之前 plan 不检出
+      # 仓库是对的（它只算矩阵），所以少了这一步的话上面那条会以
+      # "找不到工作流: .github/workflows/build.yml" 退 2 —— 一个因为环境缺失
+      # 而永远失败的检查，和永远通过的检查一样没有价值。
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github
+            scripts
+          sparse-checkout-cone-mode: false
+      - name: 工作流语法检查
+        run: bash scripts/check-workflow.sh
       - id: m
         run: |
           # `only` accepts a comma-separated list so several damaged targets can
