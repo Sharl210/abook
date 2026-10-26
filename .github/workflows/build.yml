@@ -1025,7 +1025,15 @@ jobs:
           # version 放进 manifest 顶层:升级命令要能在下载 1.6MB 之前就回答
           # "已经是最新了"。没有它,每次检查更新都要白下一份完整二进制再比。
           # 版本号从 tag 取,与 build.rs 同源,不会出现"manifest 说 A、二进制报 B"。
-          ver="${GITHUB_REF_NAME#v}"
+          # 只有 tag 构建才拿得到真版本号。`workflow_dispatch`（重测单个架构用的
+          # 那条路）下 GITHUB_REF_NAME 是分支名，照抄会把 "main" 写进 manifest，
+          # 而下面那条 `count('.')>=2` 的断言随即把整次构建判死——一个只在手动
+          # 触发时才炸的检查，等于把重测通道堵上。手动触发写空串，并跳过版本断言。
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] || case "${GITHUB_REF_NAME:-}" in v[0-9]*) true ;; *) false ;; esac; then
+            ver="${GITHUB_REF_NAME#v}"
+          else
+            ver=""
+          fi
           echo "{\"schema\":\"abook-downloads/1\",\"version\":\"$ver\",\"files\":[" > "$out/manifest.json"
           first=1
           : > "$out/SHA256SUMS"
@@ -1056,6 +1064,9 @@ jobs:
           import json
           d=json.load(open('$out/manifest.json'))
           assert len(d['files'])==15, len(d['files'])
+          import os
+          # 手动触发没有 tag，版本号本来就该是空的：断言它非空会把重测通道判死。
+          if os.environ.get('GITHUB_REF_TYPE') == 'tag':
               assert d.get('version'), 'manifest 缺 version 字段'
               assert d['version'].count('.')>=2, d['version']
           for e in d['files']:
