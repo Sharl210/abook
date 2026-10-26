@@ -990,25 +990,26 @@ pub fn cmd_grep(a: &Args) -> R<i32> {
     // Structured hits first, so the text and JSON renderings cannot disagree
     // about what was found or how many.
     //
-    // Both strings are folded once per iteration at most, not once per line:
-    // this loop walks every line of every record (~100k lines for a 962-record
-    // library) and `pat.to_lowercase()` used to be rebuilt for each one -- ~100k
-    // throwaway allocations to compare against a constant.
+    // Pattern folded once per scan, not once per line.
     //
-    // The haystack keeps its own buffer. `clear()` retains the capacity, and
-    // folding char-by-char into it is exactly what `str::to_lowercase` does
-    // internally (`s.extend(self.chars().flat_map(char::to_lowercase))`), so the
-    // matched set is unchanged -- including the multi-char folds (`İ` becomes
-    // `i` + combining dot) that an ASCII-only lowercasing would have changed.
+    // The haystack fold stays `str::to_lowercase`, deliberately. Reusing one
+    // buffer for it means reimplementing that function, and on this toolchain it
+    // is *not* `chars().flat_map(char::to_lowercase)`: std maps `Σ` by context
+    // (`ς` for Final_Sigma, `σ` otherwise), so a char-wise fold silently stopped
+    // matching lines ending in a capital sigma. Measured: `grep ς` lost the line
+    // `ΣΟΦΟΣ 同样词尾。`. Dropping real hits to save an allocation is not a trade
+    // worth making. An ASCII-only fast path was also tried and measured slower
+    // (std's ASCII conversion is vectorized; a hand-written loop is not).
+    //
+    // This is not where `grep` spends its time anyway: `list --q <no match>`
+    // loads the same libraries and prints nothing, and it already costs the same
+    // ~108 ms that `grep` does.
     let pat_lc = pat.to_lowercase();
-    let mut line_lc = String::new();
     let mut found: Vec<(String, usize, String)> = Vec::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         for rec in load_lib(&root, lib) {
             for (i, line) in rec.raw.lines().enumerate() {
-                line_lc.clear();
-                line_lc.extend(line.chars().flat_map(char::to_lowercase));
-                if line_lc.contains(&pat_lc) {
+                if line.to_lowercase().contains(&pat_lc) {
                     found.push((
                         rel(&root, &rec.path),
                         i + 1,
