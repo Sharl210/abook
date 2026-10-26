@@ -88,3 +88,21 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Sharl210/abook
 ```
 
 `install.sh` 会自动按 `uname` 选目标、走上面 9 个源依次尝试、校验产物格式、放进 `PATH`。
+
+## 已经装过之后的更新
+
+工具自己会做，不需要脚本：
+
+```sh
+abook upgrade --check     # 只查有没有新版（先取 manifest，不下 1.6MB 二进制）
+abook upgrade             # 下载并安装，替换"正在运行的这个文件"
+abook upgrade --force     # 本地是自己编的、比远端新，仍要按远端覆盖
+abook upgrade --url <基地址>   # 指定镜像或本地目录（内网盘、离线机）
+```
+
+它替换的是 `current_exe()` 而不是某个约定路径——二进制装在哪里就更新哪里，
+不会写出影子副本。装之前过三道：`sha256` 比对 manifest、新文件自报版本与
+manifest 一致、新文件自己的 `selftest` 通过；任一不过就回滚到原文件。
+
+与 `install.sh` 的分工：**首次安装**用 `install.sh`（它管 `PATH` 配置），
+**此后更新**用 `abook upgrade`（它不需要动 `PATH`，因为路径没变）。
