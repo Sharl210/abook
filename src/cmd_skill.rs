@@ -389,7 +389,7 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 None => return usage("需要 Skill 名"),
             };
             let cand = match a.pos.get(2) {
-                Some(c) => c.clone(),
+                Some(c) => cand_name(c)?,
                 None => return usage("需要候选文件名"),
             };
             let p = skill_dir(a, &name).join("candidates").join(&cand);
@@ -408,7 +408,7 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 None => return usage("需要 Skill 名"),
             };
             let cand = match a.pos.get(2) {
-                Some(c) => c.clone(),
+                Some(c) => cand_name(c)?,
                 None => return usage("需要候选文件名"),
             };
             let decision = match a.pos.get(3).map(|s| s.as_str()) {
@@ -530,6 +530,30 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
             "skill 没有子命令 `{other}`；可用：guide list show new candidate candidates read decide lint path"
         )),
     }
+}
+
+/// Reject anything that is not a plain file name inside the candidates directory.
+///
+/// `skill read`/`decide` used the raw argument as a path component, so
+/// `abook skill decide x ../../../../tmp/victim reject` escaped the candidates
+/// directory and rewrote whatever file the caller named -- including files
+/// outside the skills tree entirely. A candidate is identified by its file name,
+/// nothing about that needs to accept a path.
+fn cand_name(raw: &str) -> R<String> {
+    let p = std::path::Path::new(raw);
+    let bad = raw.is_empty()
+        || raw == "."
+        || raw == ".."
+        || p.components().count() != 1
+        || raw.contains('/')
+        || raw.contains('\\')
+        || p.is_absolute();
+    if bad {
+        return usage(format!(
+            "候选名必须是文件名字符串，不能含路径：{raw}"
+        ));
+    }
+    Ok(raw.to_string())
 }
 
 fn opt(a: &Args, k: &str) -> String {

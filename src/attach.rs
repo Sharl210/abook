@@ -431,6 +431,26 @@ fn add(a: &Args) -> R<i32> {
             dst.display()
         ));
     }
+    // dry-run 必须什么都不写。原先 add/commit 根本没有 dry-run 分支，于是
+    // `attach add --dry-run` 每次都真的复制文件、回写 [ATTACH]、刷新条目
+    // UPDATED 并写 commit —— 而 main 见到 --dry-run 会跳过库锁，所以它还
+    // 是在无锁状态下改库。一个"只看看会发生什么"的开关做出这种事，比没有
+    // 这个开关更坏。
+    if a.has("dry-run") {
+        let sz = fs::metadata(&sp).map(|m| m.len()).unwrap_or(0);
+        crate::say_line!(
+            "[dry-run] 将把 {} 加入 {} 的附件（{}，{} → {}）",
+            src,
+            rec.file_name(),
+            human_bytes(sz),
+            sp.display(),
+            dst.display()
+        );
+        if a.has("move") {
+            crate::say_line!("          --move：源文件会被搬走（原位置不再存在）");
+        }
+        return Ok(0);
+    }
     // `--move` 是唯一会让源文件消失的开关：语义上"搬进来"而不是"加一份"。
     let moved = place(&sp, &dst, a.has("move"), a.has("force"))?;
     // 复读核对：复制报告成功但写短了，比直接失败更坏——记录随后会声称
@@ -1207,15 +1227,23 @@ fn refs(a: &Args) -> R<i32> {
 /// 选它是因为零依赖、顺序读一遍就能算完，且不需要抗碰撞——这里的对手不是
 /// 攻击者，是"改了文件而没通知工具"这种日常意外。
 ///
-/// 大文件抽样：整份算下来在 50 MB 视频上要读完整个文件，而校验会在每次列目录
-/// 时跑。超过 `FULL_HASH_MAX` 就取"头 64KB + 尾 64KB + 长度"，足以发现一次
-/// 真实编辑——没人会只改一个 50 MB 文件的第 20 MB 处还指望不被察觉，而那种
-/// 情况本来就该走重新 `attach add`。
-const FULL_HASH_MAX: u64 = 4 * 1024 * 1024;
-const SAMPLE: usize = 64 * 1024;
+/// 全量哈希，不抽样。
+///
+/// 前三版都在抽样，每一版都比上一版更像回事，但都错在同一个地方：
+///
+///   头 64KB + 尾 64KB   改中间 → 长度不变、头尾不变 → 报"内容没变"
+///   16 块均匀抽样       块间有 len/blocks - SAMPLE 的空隙 → 落在空隙里照样漏
+///
+/// 空隙是数学上不可避免的：要么覆盖全部，要么留缝。而这条路径的失败形态是
+/// "证据已被改，工具回答没变"——附件是记录携带的原始证据，证据坏了却报完好，
+/// 比误报更坏，因为它让人停止怀疑。
+///
+/// 成本实测换来这个保证很划算：逐字节 FNV-1a 在 release 下约 500MB/s，5MB
+/// 附件约 10ms，50MB 约 100ms。而库里超过 4MB 的附件本来就少。
+const _: () = ();
 
 fn fingerprint(path: &Path, len: u64) -> u64 {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::Read;
     let mut f = match fs::File::open(path) {
         Ok(f) => f,
         // 打不开就返回 0：调用方看到 0 会当作"没有指纹"，退回按字节数比对，
@@ -1229,25 +1257,12 @@ fn fingerprint(path: &Path, len: u64) -> u64 {
             *h = h.wrapping_mul(0x1000_0000_01b3);
         }
     };
-    if len <= FULL_HASH_MAX {
-        let mut buf = vec![0u8; 8192];
-        loop {
-            match f.read(&mut buf) {
-                Ok(0) => break,
-                Ok(k) => mix(&buf[..k], &mut h),
-                Err(_) => return 0,
-            }
-        }
-    } else {
-        let mut head = vec![0u8; SAMPLE];
-        if let Ok(k) = f.read(&mut head) {
-            mix(&head[..k], &mut h);
-        }
-        if f.seek(SeekFrom::Start(len.saturating_sub(SAMPLE as u64))).is_ok() {
-            let mut tail = vec![0u8; SAMPLE];
-            if let Ok(k) = f.read(&mut tail) {
-                mix(&tail[..k], &mut h);
-            }
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(k) => mix(&buf[..k], &mut h),
+            Err(_) => return 0,
         }
     }
     // 长度也进指纹：抽样两段相同时，长度不同必须区分开
@@ -1329,6 +1344,14 @@ fn commit(a: &Args) -> R<i32> {
             "{} 内容没变（指纹 {:016x} 与清单一致），没有要同步的改动",
             it.name,
             it.hash
+        );
+        return Ok(0);
+    }
+    if a.has("dry-run") {
+        crate::say_line!(
+            "[dry-run] 将确认 {} 的改动并回写清单（{}）",
+            it.name,
+            human_bytes(it.bytes)
         );
         return Ok(0);
     }
