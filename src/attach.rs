@@ -1576,11 +1576,17 @@ fn edit(a: &Args) -> R<i32> {
     let base = path.parent().unwrap_or(Path::new("."));
     let full = base.join(&it.name);
     crate::say_line!("{}", full.display());
+    // 行数走统一实现，且二进制给 `-`：原来 `read_to_string` 失败就报 0 行，
+    // 于是一个二进制附件在这里显示成"空的"。
+    let lines = match count_lines_of_file(&full) {
+        Some(n) => format!("{n}行"),
+        None => "-".to_string(),
+    };
     crate::say_line!(
-        "改之前指纹 {:016x}（{}，{}行）。改完执行：abook attach commit {} {}",
+        "改之前指纹 {:016x}（{}，{}）。改完执行：abook attach commit {} {}",
         it.hash,
         human_bytes(it.bytes),
-        std::fs::read_to_string(&full).map(|t| t.lines().count()).unwrap_or(0),
+        lines,
         rec.id(),
         want
     );

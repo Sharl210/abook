@@ -209,7 +209,7 @@ pub fn cmd_path(a: &Args) -> R<i32> {
     // 列序统一成 `时间 体积 行数`（与 `row_meta` 一致），附件这类命令特有列
     // 接在后面。这里原来是 `体积 行数 时间`，四个命令四种排列。
     println!(
-        "  {}  {}{}",
+        "{}  {}{}",
         row_meta(rec.updated(), Some(rec.raw.len() as u64), Some(count_lines(&rec.raw))),
         if own.is_empty() {
             String::new()

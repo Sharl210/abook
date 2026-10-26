@@ -439,60 +439,6 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
         "candidate" | "n" => vec![Lib::Candidate],
         _ => vec![Lib::Canonical, Lib::Candidate],
     };
-    if a.has("json") {
-        // Dedicated branch: the human path interleaves headers with a --card
-        // drill-down, and folding JSON into it would emit prose on some inputs.
-        let mut out: Vec<String> = Vec::new();
-        for lib in libs {
-            let p = root.join(lib.atlas());
-            if !p.exists() {
-                out.push(format!(
-                    "{{\"lib\":{},\"exists\":false}}",
-                    jstr(lib.name())
-                ));
-                continue;
-            }
-            let at = Atlas::load(&p)?;
-            let only = a.get("card");
-            let cards = at
-                .branches
-                .iter()
-                .filter(|b| match only {
-                    Some(w) => b.name() == w || b.heading == w,
-                    None => true,
-                })
-                .map(|b| {
-                    let fields = b
-                        .fields
-                        .iter()
-                        .map(|(k, v)| format!("{}:{}", jstr(k), jstr(v)))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(
-                        "{{\"branch\":{},\"heading\":{},\"declared_count\":{},\"parsed_count\":{},\"paths\":{},\"fields\":{{{fields}}}}}",
-                        jstr(&b.name()),
-                        jstr(&b.heading),
-                        b.get("COUNT").parse::<i64>().unwrap_or(-1),
-                        b.count(),
-                        b.paths().len()
-                    )
-                })
-                .collect::<Vec<_>>();
-            let all_cards = cards.len();
-            let (cards, pg) = crate::paging::page_json(a, cards);
-            out.push(format!(
-                "{{\"lib\":{},\"exists\":true,\"path\":{},\"branches\":{},\"total_count\":{},\"covered_through\":{},{pg},\"card_total\":{all_cards},\"cards\":[{}]}}",
-                jstr(lib.name()),
-                jstr(lib.atlas()),
-                at.branches.len(),
-                at.total_count(),
-                jstr(&at.get("COVERED_THROUGH")),
-                cards.join(",")
-            ));
-        }
-        println!("[{}]", out.join(","));
-        return Ok(0);
-    }
     // Same index `tree` builds: one pass over the library, then per-branch sums.
     // `atlas` and `tree` answering the same question with different numbers
     // would be worse than either answering it alone.
@@ -556,6 +502,68 @@ pub fn cmd_atlas(a: &Args) -> R<i32> {
             ab,
         )
     };
+    if a.has("json") {
+        // Dedicated branch: the human path interleaves headers with a --card
+        // drill-down, and folding JSON into it would emit prose on some inputs.
+        let mut out: Vec<String> = Vec::new();
+        for lib in libs {
+            let p = root.join(lib.atlas());
+            if !p.exists() {
+                out.push(format!(
+                    "{{\"lib\":{},\"exists\":false}}",
+                    jstr(lib.name())
+                ));
+                continue;
+            }
+            let at = Atlas::load(&p)?;
+            let only = a.get("card");
+            let cards = at
+                .branches
+                .iter()
+                .filter(|b| match only {
+                    Some(w) => b.name() == w || b.heading == w,
+                    None => true,
+                })
+                .map(|b| {
+                    let fields = b
+                        .fields
+                        .iter()
+                        .map(|(k, v)| format!("{}:{}", jstr(k), jstr(v)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    // 元信息与文本同一份：文本那份早就带着时间/体积/行数，
+                    // JSON 只有 declared/parsed/paths。同一张卡两侧依据不同，
+                    // 机器调用方只能盲取。
+                    let (n, ts, by, ln, ac, ab) = agg(b);
+                    format!(
+                        "{{\"branch\":{},\"heading\":{},\"declared_count\":{},\"parsed_count\":{},\"count\":{},\"paths\":{},{},\"attach_count\":{},\"attach_bytes\":{},\"fields\":{{{fields}}}}}",
+                        jstr(&b.name()),
+                        jstr(&b.heading),
+                        b.get("COUNT").parse::<i64>().unwrap_or(-1),
+                        b.count(),
+                        n,
+                        b.paths().len(),
+                        meta_json(ts, by, ln),
+                        ac,
+                        ab
+                    )
+                })
+                .collect::<Vec<_>>();
+            let all_cards = cards.len();
+            let (cards, pg) = crate::paging::page_json(a, cards);
+            out.push(format!(
+                "{{\"lib\":{},\"exists\":true,\"path\":{},\"branches\":{},\"total_count\":{},\"covered_through\":{},{pg},\"card_total\":{all_cards},\"cards\":[{}]}}",
+                jstr(lib.name()),
+                jstr(lib.atlas()),
+                at.branches.len(),
+                at.total_count(),
+                jstr(&at.get("COVERED_THROUGH")),
+                cards.join(",")
+            ));
+        }
+        println!("[{}]", out.join(","));
+        return Ok(0);
+    }
     for lib in libs {
         let p = root.join(lib.atlas());
         if !p.exists() {
@@ -712,8 +720,15 @@ pub fn cmd_identity(a: &Args) -> R<i32> {
 /// 判据只此一份。此前 JSON 侧用 `path.contains("/records/")`、文本侧用
 /// `contains("/records/") || ends_with(".md")`——同一条路由可能在文本里进"记录"
 /// 段、在 JSON 里被标成 `branch`。两个说法同时存在时，总有一个在骗人。
-fn index_kind(path: &str) -> &'static str {
-    if path.contains("/records/") || path.ends_with(".md") {
+///
+/// 合并后的判据取两侧的**并集**，谁的条件都不丢：`/records/` 里的、以 `.md`
+/// 结尾的、以及能在记录索引里查到的（给不带扩展名的裸名路由兜底）。只看路径形状
+/// 会把一条指向已删文件的记录路由错判成分支，只看索引又会把同样一条错判成"没有
+/// 这条记录"。两条合起来才是"这条路由声明的是什么"。
+///
+/// `known` 由调用方给（文本与 JSON 两侧都已经建过记录索引）。
+fn index_kind(path: &str, known: bool) -> &'static str {
+    if path.contains("/records/") || path.ends_with(".md") || known {
         "record"
     } else {
         "branch"
@@ -860,7 +875,9 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 // "/records/")`，文本侧是 `|| path.ends_with(".md")`，于是同一条
                 // 路由可能在文本里进"记录"段、在 JSON 里被标成 branch。两种说法
                 // 同时存在时，总有一个在骗人。
-                let kind = index_kind(path);
+                let bare = path.rsplit('/').next().unwrap_or(path).to_string();
+                let known = rec_index.contains_key(path) || rec_index.contains_key(&bare);
+                let kind = index_kind(path, known);
                 let status = if path.starts_with("candidate/") {
                     "candidate"
                 } else if kind == "record" {
@@ -873,7 +890,6 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 // 元信息与文本输出同一份数据:体积/行数/最近活跃/条目数。
                 // 文本读者看得见的东西,机器调用方也必须看得见——否则"要不要读"
                 // 这个判断在两侧的可用依据不同,机器侧只能盲取。
-                let bare = path.rsplit('/').next().unwrap_or(path).to_string();
                 let (by, ln, ts, cnt) = if kind == "record" {
                     match rec_index.get(path).or_else(|| rec_index.get(&bare)) {
                         Some((b, l, t)) => (*b, *l, *t, Some(1usize)),
@@ -929,14 +945,14 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
     // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
     // 记录与分支走同一个分类判据，理由见 JSON 分支里 `index_kind` 的注释。
-    let is_record = |path: &str| index_kind(path) == "record";
     let (mut br_rows, mut rec_rows): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for (path, summary, when) in &routes {
         if !q.is_empty() && !ci_contains(path, &q) && !ci_contains(summary, &q) && !ci_contains(when, &q) {
             continue;
         }
-        if is_record(path) {
-            let bare = path.rsplit('/').next().unwrap_or(path).to_string();
+        let bare = path.rsplit('/').next().unwrap_or(path).to_string();
+        let known = rec_index.contains_key(path) || rec_index.contains_key(&bare);
+        if index_kind(path, known) == "record" {
             let meta = rec_index.get(path).or_else(|| rec_index.get(&bare));
             let (by, ln, ts) = match meta {
                 Some((b, l, t)) => (*b, *l, *t),
@@ -1524,3 +1540,27 @@ pub fn cmd_paths(a: &Args) -> R<i32> {
     Ok(0)
 }
 
+
+#[cfg(test)]
+mod tests {
+    /// 路由分类只有一套判据，且两条分支不能各说各话。
+    ///
+    /// 这里钉定的是"文本段"与 JSON 的 `kind` 必须由同一个函数决定；历史上
+    /// 一边用 `contains("/records/")`、一边用 `|| ends_with(".md")`，同一条路由
+    /// 可能在文本里进"记录"段、在 JSON 里被标成 `branch`。
+    #[test]
+    fn index_kind_is_one_judgment() {
+        // 记录目录下：明确是记录，索引里有没有都不影响。
+        assert_eq!(super::index_kind("candidate/records/N-1.md", false), "record");
+        assert_eq!(super::index_kind("candidate/records/N-1.md", true), "record");
+        // 裸文件名的路由：.md 形状或索引能查到，两者任一成立就是记录。
+        // 旧实现里 JSON 侧只认 `/records/`，这一行会返回 `branch`，与文本侧冲突。
+        assert_eq!(super::index_kind("N-1.md", false), "record");
+        assert_eq!(super::index_kind("N-1.md", true), "record");
+        // 不带扩展名、索引里也没有：只能算分支。
+        assert_eq!(super::index_kind("N-1", false), "branch");
+        assert_eq!(super::index_kind("N-1", true), "record");
+        // 分支名。
+        assert_eq!(super::index_kind("tools-skill-mcp", false), "branch");
+    }
+}

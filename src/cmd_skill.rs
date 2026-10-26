@@ -733,8 +733,18 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                         }
                     }
                 }
-                if sub.lines().count() > 100 {
-                    problems.push(format!("{disp} 超 100 行，须在头部给出它的目录"));
+                // 规则是"超 100 行**须在头部给出它的目录**"，检查的应该是
+                // "有没有目录"，而不是"是不是超了 100 行"。
+                //
+                // 原来只数行数就判不通过，从不看目录在不在：加完目录照样报。
+                // 一个永远无法通过的检查，等价于把这条规则废掉——人会去
+                // 绕过它，而真正没写目录的文件也被一起放过。
+                let nlines = sub.lines().count();
+                if nlines > 100 && !has_toc(&sub) {
+                    problems.push(format!(
+                        "{} 共 {nlines} 行但头部没有目录（超 100 行须在头部给目录）",
+                        disp
+                    ));
                 }
             }
             if a.has("json") {
@@ -1198,4 +1208,44 @@ mod lint_probe_tests {
             println!("{tag}: abs={} env={} esc={}", super::has_abs_path(s), super::has_env_path(s), super::has_relative_escape(s));
         }
     }
+}
+
+/// 头部有没有目录。
+///
+/// 三种写法都认，因为真实 Skill 里都出现过：
+///   - 标题里带「目录」/「TOC」字样
+///   - `L28  xxx` / `L28-40  xxx` 这种按行号定位的清单
+///   - Markdown 锚点链接 `[xxx](#yyy)`
+///
+/// 只看前 40 行：目录是给"要不要往下读、从哪开始读"用的，塞在文件中间就
+/// 失去意义了。
+fn has_toc(text: &str) -> bool {
+    let mut hits = 0;
+    for line in text.lines().take(40) {
+        let t = line.trim();
+        if t.contains("目录") || t.contains("TOC") || t.contains("Table of Contents") {
+            return true;
+        }
+        // `L28  xxx`、`L28-40 xxx`、`行28 xxx`
+        let b: Vec<char> = t.chars().collect();
+        let mut i = 0;
+        while i < b.len() {
+            let mark = b[i] == 'L' || (i > 0 && b[i] == '#' && b[i - 1] == 'L');
+            if mark {
+                let mut j = i + 1;
+                while j < b.len() && (b[j].is_ascii_digit() || b[j] == '-' || b[j] == ',') {
+                    j += 1;
+                }
+                if j > i + 1 && j < b.len() && b[j].is_whitespace() {
+                    hits += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if t.contains("](#") {
+            hits += 1;
+        }
+    }
+    hits >= 3
 }
