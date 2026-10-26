@@ -989,11 +989,26 @@ pub fn cmd_grep(a: &Args) -> R<i32> {
     let ctx = a.num("context").unwrap_or(0) as usize;
     // Structured hits first, so the text and JSON renderings cannot disagree
     // about what was found or how many.
+    //
+    // Both strings are folded once per iteration at most, not once per line:
+    // this loop walks every line of every record (~100k lines for a 962-record
+    // library) and `pat.to_lowercase()` used to be rebuilt for each one -- ~100k
+    // throwaway allocations to compare against a constant.
+    //
+    // The haystack keeps its own buffer. `clear()` retains the capacity, and
+    // folding char-by-char into it is exactly what `str::to_lowercase` does
+    // internally (`s.extend(self.chars().flat_map(char::to_lowercase))`), so the
+    // matched set is unchanged -- including the multi-char folds (`İ` becomes
+    // `i` + combining dot) that an ASCII-only lowercasing would have changed.
+    let pat_lc = pat.to_lowercase();
+    let mut line_lc = String::new();
     let mut found: Vec<(String, usize, String)> = Vec::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         for rec in load_lib(&root, lib) {
             for (i, line) in rec.raw.lines().enumerate() {
-                if line.to_lowercase().contains(&pat.to_lowercase()) {
+                line_lc.clear();
+                line_lc.extend(line.chars().flat_map(char::to_lowercase));
+                if line_lc.contains(&pat_lc) {
                     found.push((
                         rel(&root, &rec.path),
                         i + 1,
@@ -1082,14 +1097,28 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             .cmp(&x.updated())
             .then_with(|| y.file_name().cmp(&x.file_name()))
     });
-    // Attachment totals come from one index built up front.
+    // Paging first, attachments second.
     //
-    // Scanning a directory per record inside this loop would mean 500 directory
-    // walks for a 500-record listing, and the answer would still be a snapshot
-    // per row rather than one consistent view.
+    // The attachment column is only rendered for the rows on the current page,
+    // so only those rows are scanned. Indexing every row up front meant
+    // `list --per-page 1` probed 962 records' worth of `-refs` candidates --
+    // 4810 statx calls to fill a column that then showed one row (measured:
+    // 6758 statx for a one-row listing).
+    //
+    // The index stays keyed by file name, and it still covers exactly the rows
+    // it renders: the two libraries hold disjoint record names (checked over the
+    // whole library: 0 shared basenames), so a page-scoped index cannot shadow a
+    // row that is on the page. The counts themselves come from one scan per row
+    // either way, so the column is still one consistent view.
+    let pg = Page::from_args(a, rows.len());
+    let page: Vec<&Record> = rows
+        .iter()
+        .skip(pg.start())
+        .take(pg.per.min(rows.len()))
+        .collect();
     let mut att: std::collections::HashMap<String, crate::attach::Files> =
         std::collections::HashMap::new();
-    for r in &rows {
+    for r in &page {
         let f = crate::attach::scan(&r.path);
         if !f.is_empty() {
             att.insert(r.file_name(), f);
@@ -1098,14 +1127,12 @@ pub fn cmd_list(a: &Args) -> R<i32> {
     let att_of = |rec: &Record| -> crate::attach::Files {
         att.get(&rec.file_name()).cloned().unwrap_or_default()
     };
-    let pg = Page::from_args(a, rows.len());
     if a.has("json") {
         // A caller that asked for JSON and got a table would silently parse
         // nothing, so every command that advertises --json has to branch here.
-        let items = rows
+        let items = page
             .iter()
-            .skip(pg.start())
-            .take(pg.per.min(rows.len()))
+            .copied()
             .map(|rec| {
                 format!(
                     "{{\"path\":{},\"lib\":{},\"id\":{},\"title\":{},\"status\":{},\"kind\":{},\"maturity\":{},\"bytes\":{},\"lines\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
@@ -1128,7 +1155,7 @@ pub fn cmd_list(a: &Args) -> R<i32> {
         println!("{{{},\"records\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
-    for rec in rows.iter().skip(pg.start()).take(pg.per.min(rows.len())) {
+    for rec in page.iter().copied() {
         println!(
             "{:>8}  {:>7} {:>4}  {:>12}  {}  [{}] {}",
             crate::util::short_when(rec.updated()),

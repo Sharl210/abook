@@ -614,29 +614,47 @@ impl Record {
 ///
 /// Every key the fallback looks at (`ID`, `TITLE`) sits at the top of the
 /// record, so this is not a guess that might clip real data: the format puts
-/// those keys there. Measured over the real library, the longest `TITLE=` line
-/// is 1445 B and every header key precedes it, so 4 KiB covers both with room
-/// to spare. Reading the whole file instead bought nothing — a mistyped
-/// selector used to read *and fully parse* all 962 records (74 ms) only to
-/// report that nothing matched.
+/// those keys there.
+///
+/// Measured over the real library (962 records: 523 canonical + 439 candidate):
+/// the first six lines -- exactly the slice the ID match below uses -- end by
+/// byte 359, and the `TITLE=` line ends by byte 1662. 4 KiB therefore leaves a
+/// 2.4x margin on the widest header actually present. The one `TITLE=`
+/// occurrence past byte 4096 in the whole library sits in a record's *body*
+/// prose (`KEYS=/TITLE=/SECTIONS=`), and a duplicate could not win anyway: the
+/// first field wins, and that one is inside the header.
+///
+/// Reading the whole file instead bought nothing. A selector that matches
+/// nothing used to read *and fully parse* all 962 records (84.5 ms median) only
+/// to report that nothing matched, and the title loop used to run a full parse
+/// per record -- body included -- to compare one header string.
 const SELECTOR_HEAD_BYTES: usize = 4096;
 
 /// The `TITLE` the fallback title match should see, read from the head only.
 ///
 /// `None` means "not a usable record" and stands in for the `Err` arm of
-/// `Record::parse`. The parser has exactly two error rules: `R001` (no
-/// recognizable field) — decidable from the header alone, since a header with
-/// no field has no body either — and `R002` (no body *and* no title). Reading
-/// only the head makes every body look empty, so a record with no `TITLE` looks
-/// unparseable here where a full parse accepted it. Such a record's title is
-/// empty, and an empty title can neither equal nor be a prefix of a non-empty
-/// selector (`sel` is never empty in this loop: `dir.join("")` is the records
-/// directory and resolved earlier), so both paths agree.
+/// `Record::parse`, so the two have to agree on *which* records are skipped, not
+/// just on the title text. `Record::parse` fails for exactly two reasons, both
+/// `Sev::Error` (verified: the only two `Sev::Error` sites in `src/parse.rs` are
+/// the two sanity rules):
+///
+/// - `R001` no recognizable field. A header with no field has no body either,
+///   and every record in the library has a `KEY=` line inside its first 4 KiB
+///   (checked: 962/962), so the head decides this identically.
+/// - `R002` no body *and* no title. Reading only the head makes a long body look
+///   empty, so a record with no `TITLE` can look unparseable here where a full
+///   parse accepted it. That record's title is empty either way, and an empty
+///   title can neither equal nor be a prefix of a non-empty selector (`sel` is
+///   never empty in this loop: `dir.join("")` is the records directory and was
+///   resolved earlier), so both paths still skip it.
 ///
 /// One more difference from `Record::get`: that falls back to a `TITLE` inside
-/// the `[PROMOTION]` tail block, which by definition is past the head. Measured
-/// over the real library: 0 records carry `TITLE=` in a promotion block and 0
-/// lack a header `TITLE`, so the fallback has never been reachable.
+/// the `[PROMOTION]` tail block, which by definition is past the head;
+/// `Parsed::get` here does not. Measured over the real library: 0 records carry
+/// `TITLE=` inside a promotion block and 0 lack a header `TITLE`, so that
+/// fallback has never been reachable -- and `promote` writes only PROMOTED_TO /
+/// PROMOTED_AT / BRANCH / NOTE into the block, so this tool cannot make it
+/// reachable either.
 fn title_from_head(path: &Path, lib: Lib) -> Option<String> {
     let head = read_head(path, SELECTOR_HEAD_BYTES).ok()?;
     let parsed = crate::parse::parse(&head, Some(lib));
