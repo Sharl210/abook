@@ -984,6 +984,67 @@ pub fn path_dirs() -> Vec<String> {
         .collect()
 }
 
+/// Locate this binary without trusting `current_exe()`.
+///
+/// On Android the kernel execs `/apex/com.android.runtime/bin/linker64`, which
+/// then loads the application, so `/proc/self/exe` resolves to the *linker*,
+/// not to us. Anything that derives "where am I installed" from it lands on a
+/// read-only system partition and fails: `upgrade` reported
+/// `/apex/com.android.runtime/bin/linker64` as its install target and could
+/// never update itself on Android.
+///
+/// The real path is the first field of `/proc/self/cmdline`. Fall back to
+/// `current_exe()` only when that is unusable, and reject a resolved path that
+/// is a dynamic linker even then -- writing "the new abook" over the system
+/// linker is the worst possible outcome of guessing wrong.
+pub fn self_path() -> Option<PathBuf> {
+    if let Ok(raw) = std::fs::read("/proc/self/cmdline") {
+        if let Some(end) = raw.iter().position(|&b| b == 0) {
+            let s = String::from_utf8_lossy(&raw[..end]).to_string();
+            if !s.is_empty() {
+                let p = PathBuf::from(&s);
+                let abs = if p.is_absolute() {
+                    p
+                } else if p.components().count() > 1 {
+                    std::env::current_dir().ok()?.join(p)
+                } else {
+                    let mut found = None;
+                    for d in path_dirs() {
+                        let cand = Path::new(&d).join(&s);
+                        if cand.is_file() {
+                            found = Some(cand);
+                            break;
+                        }
+                    }
+                    found?
+                };
+                if abs.is_file() {
+                    return Some(abs);
+                }
+            }
+        }
+    }
+    let ce = std::env::current_exe().ok()?;
+    if is_linker(&ce) {
+        return None;
+    }
+    if ce.is_file() {
+        Some(ce)
+    } else {
+        None
+    }
+}
+
+/// True for a dynamic linker (`ld-*`, `linker`, `linker64`).
+///
+/// A caller that gets one of these back must treat "where am I" as unknown
+/// rather than acting on it.
+pub fn is_linker(p: &Path) -> bool {
+    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    name == "linker" || name == "linker64" || name == "ld-linux.so.2" || name.starts_with("ld-linux")
+        || name.starts_with("ld-musl") || name == "ld.so"
+}
+
 pub fn home_dir() -> PathBuf {
     if let Ok(h) = std::env::var("HOME") {
         if !h.is_empty() {

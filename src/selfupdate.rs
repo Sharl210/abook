@@ -504,10 +504,17 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     let json = a.has("json");
     let force = a.has("force");
 
-    // 更新目标是"正在跑的这个文件"。`current_exe` 在 Linux 上读 /proc/self/exe,
-    // 已经解析过符号链接,所以它指向真正被执行的那一份。
-    let cur = std::env::current_exe()
-        .map_err(|e| EE::Io(format!("拿不到当前程序路径: {e}")))?;
+    // 更新目标是"正在跑的这个文件"。不能用 `current_exe` 直接取:
+    // Android 上内核 exec 的是 `/apex/com.android.runtime/bin/linker64`,
+    // `/proc/self/exe` 于是指向**链接器**而不是我们。照它写回等于往只读系统
+    // 分区覆盖链接器,是最坏的一种猜错。`util::self_path` 先读
+    // `/proc/self/cmdline` 拿真实路径,并在兜底里显式拒绝链接器名字。
+    let cur = crate::util::self_path().ok_or_else(|| {
+        EE::Io(
+            "拿不到当前程序路径（可能运行在动态链接器下）。用 --dir 显式指定安装目录，例如 `abook upgrade --dir ~/.local/bin`"
+                .to_string(),
+        )
+    })?;
     let cur = std::fs::canonicalize(&cur).unwrap_or(cur);
     let install_to: PathBuf = match a.get("dir") {
         Some(d) => Path::new(d).join(exe),

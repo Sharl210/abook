@@ -505,7 +505,47 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
         let mut good = 0;
         let total = 5;
         // a real name is accepted
-        if crate::util::Args::known("per-page") {
+            // `upgrade` 曾经在 Android 上把安装目标算成 /apex/.../linker64:
+    // 内核 exec 的是动态链接器, /proc/self/exe 于是指向链接器而不是 abook。
+    // 照那个路径写回会往只读系统分区覆盖链接器 -- 猜错里最坏的一种。
+    // 这里锁两件事: 自身路径能找到、且不是链接器; 前者在 Android 上必须
+    // 走 /proc/self/cmdline, 后者是显式拒绝。
+    {
+        let sp = crate::util::self_path();
+        let mut bad: Vec<String> = Vec::new();
+        match sp {
+            None => bad.push("定位不到自身可执行文件".to_string()),
+            Some(ref p) => {
+                if crate::util::is_linker(p) {
+                    bad.push(format!("自身路径被认成动态链接器: {}", p.display()));
+                }
+                if !p.is_absolute() {
+                    bad.push(format!("自身路径非绝对: {}", p.display()));
+                }
+                let base = p.file_name().and_then(|x| x.to_str()).unwrap_or("");
+                // 允许 ab.new / abook.exe 之类的临时名, 但不允许系统目录。
+                let sys = p.to_string_lossy().starts_with("/apex/")
+                    || p.to_string_lossy().starts_with("/system/");
+                if sys {
+                    bad.push(format!("自身路径落在系统分区: {}", p.display()));
+                }
+                if !(base.starts_with("ab") || base.starts_with("abook")) {
+                    bad.push(format!("自身文件名可疑: {base}"));
+                }
+            }
+        }
+        if bad.is_empty() {
+            pass += 1;
+            if verbose {
+                msgs.push("PASS  self_path 指向自身而非动态链接器".to_string());
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!("FAIL  self_path 不可信: {}", bad.join("; ")));
+        }
+    }
+
+if crate::util::Args::known("per-page") {
             good += 1;
         }
         // a typo is not
@@ -3202,52 +3242,8 @@ fn ok_preflight(script: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Locate this binary without trusting `current_exe()`.
-///
-/// On Android the kernel execs `/apex/com.android.runtime/bin/linker64`, which
-/// then loads the application, so `/proc/self/exe` resolves to the linker. Any
-/// child spawned from it fails with `expected absolute path`. The real path is
-/// the first field of `/proc/self/cmdline`; fall back to skipping the test if
-/// even that is not an existing file.
 fn self_path() -> Option<std::path::PathBuf> {
-    if let Ok(raw) = std::fs::read("/proc/self/cmdline") {
-        if let Some(end) = raw.iter().position(|&b| b == 0) {
-            let s = String::from_utf8_lossy(&raw[..end]).to_string();
-            if !s.is_empty() {
-                let p = std::path::PathBuf::from(&s);
-                let abs = if p.is_absolute() {
-                    p
-                } else if p.components().count() > 1 {
-                    // `./abook` or `tools/abook`: relative to the working
-                    // directory, never on PATH. Resolving via PATH here made
-                    // `--json` look unsupported when the binary was run as
-                    // `./ab.new`.
-                    std::env::current_dir().ok()?.join(p)
-                } else {
-                    // Resolve through PATH ourselves; execvp would too, but we
-                    // need a concrete path to check existence first.
-                    let mut found = None;
-                    for d in crate::util::path_dirs() {
-                        let cand = std::path::Path::new(&d).join(&s);
-                        if cand.is_file() {
-                            found = Some(cand);
-                            break;
-                        }
-                    }
-                    found?
-                };
-                if abs.is_file() {
-                    return Some(abs);
-                }
-            }
-        }
-    }
-    let ce = std::env::current_exe().ok()?;
-    if ce.is_file() {
-        Some(ce)
-    } else {
-        None
-    }
+    crate::util::self_path()
 }
 
 /// Structural check that does not need a JSON crate: balanced brackets outside
