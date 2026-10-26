@@ -337,10 +337,45 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 hh ^= *b as u64;
                 hh = hh.wrapping_mul(0x1000_0000_01b3);
             }
-            let fname = format!("{}-{slug}-{:08x}.md", st.compact, (hh & 0xffff_ffff) as u32);
-            let p = cdir.join(&fname);
-            if p.exists() && !a.has("force") {
-                return blocked(format!("{} 已存在", p.display()));
+            // 用全部 64 位，不截到 32 位。
+            //
+            // 截断到低 32 位后，生日碰撞在几十万条量级就能撞上，而实测已经
+            // 撞出来了：两条不同正文的候选算出同一个 `008b1809`。撞上之后
+            // 第二条把第一条覆盖掉，退出码 0，第一条凭空消失。
+            //
+            // 即便 64 位，也不把"哈希不同即路径不同"当成保证——下面还有一层
+            // 内容比对：路径已存在且内容不同，就换一个序号，绝不覆盖。
+            let mut fname = format!("{}-{slug}-{hh:016x}.md", st.compact);
+            let mut p = cdir.join(&fname);
+            let same = |q: &std::path::Path| -> bool {
+                std::fs::read_to_string(q)
+                    .map(|t| t == body)
+                    .unwrap_or(false)
+            };
+            if p.exists() {
+                if same(&p) {
+                    // 同一条候选重复写入：幂等，不是丢失。
+                    if !a.has("force") {
+                        return blocked(format!("{} 已存在且内容相同", p.display()));
+                    }
+                } else {
+                    // 不同内容撞了同一个名字：换序号，绝不覆盖已有的那条。
+                    let mut n = 2;
+                    loop {
+                        fname = format!("{}-{slug}-{hh:016x}-{n}.md", st.compact);
+                        p = cdir.join(&fname);
+                        if !p.exists() {
+                            break;
+                        }
+                        if same(&p) {
+                            break;
+                        }
+                        n += 1;
+                        if n > 999 {
+                            return blocked("候选文件名分配失败：同名不同内容过多");
+                        }
+                    }
+                }
             }
             let doc = format!(
                 "TITLE={title}\nTIME={}\nSTATUS=PENDING\nSKILL={name}\n\n{body}\n",
@@ -541,25 +576,79 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                     }
                 }
             }
-            // 超过 100 行的参考文件，头部应有目录
-            if let Ok(rd) = fs::read_dir(&dir) {
-                for e in rd.flatten() {
-                    let q = e.path();
-                    if !q.is_file() {
-                        continue;
+            // 递归检查 Skill 目录下的**所有**文本文件。
+            //
+            // 原来只扫 SKILL.md 和目录的直接子文件。Skill 的正文可以拆到
+            // `references/`、脚本、模板里，而自包含的要求覆盖整个 Skill——
+            // 只查门面的话，把 `/tmp/private/config.json`、`../shared/data.yaml`、
+            // 记忆机制术语、兄弟 Skill 名全塞进 `references/deep.md`，lint 依旧
+            // 返回 `problems:[]`、`ok:true`。检查范围小于被检查对象，等于没查。
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            collect_text_files(&dir, &mut files, 0);
+            files.sort();
+            for q in &files {
+                let disp = q
+                    .strip_prefix(&dir)
+                    .unwrap_or(q)
+                    .to_string_lossy()
+                    .to_string();
+                let sub = match read_str(q) {
+                    Ok(t) => t,
+                    // 二进制文件（图片、pdf、压缩包）跳过；它们不是"引用"的载体。
+                    Err(_) => continue,
+                };
+                if q.file_name().map(|s| s == "SKILL.md").unwrap_or(false) {
+                    continue;
+                }
+                // 逐行套用与 SKILL.md 相同的判据
+                for (n, line) in sub.lines().enumerate() {
+                    let t = line.trim();
+                    if has_abs_path(t) {
+                        problems.push(format!(
+                            "{disp} 行{}: 绝对路径（Skill 须自带依赖）: {}",
+                            n + 1,
+                            cut(t, 50)
+                        ));
                     }
-                    if q.file_name().map(|s| s == "SKILL.md").unwrap_or(false) {
-                        continue;
+                    if t.contains("../") {
+                        problems.push(format!(
+                            "{disp} 行{}: 相对路径逃出 Skill 目录: {}",
+                            n + 1,
+                            cut(t, 50)
+                        ));
                     }
-                    if let Ok(sub) = read_str(&q) {
-                        if sub.lines().count() > 100 {
-                            let name = q
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            problems.push(format!("{} 超 100 行，须在头部给出它的目录", name));
+                    if t.contains("~/AgentsBook")
+                        || t.contains("ABOOK_")
+                        || t.contains("MEMORY_ROUTE")
+                        || t.contains("AGENTSBOOK_V2")
+                        || (t.contains("记忆库") && (t.contains("GATE") || t.contains("门")))
+                    {
+                        problems.push(format!(
+                            "{disp} 行{}: 疑似记忆机制术语（Skill 须能独立工作）: {}",
+                            n + 1,
+                            cut(t, 50)
+                        ));
+                    }
+                    if let Some(parent) = dir.parent() {
+                        if let Ok(rd) = fs::read_dir(parent) {
+                            for e in rd.flatten() {
+                                if !e.path().is_dir() {
+                                    continue;
+                                }
+                                let sib = e.file_name().to_string_lossy().to_string();
+                                if sib != name && !sib.starts_with('.') && t.contains(sib.as_str()) {
+                                    problems.push(format!(
+                                        "{disp} 行{}: 引用了另一个 Skill `{sib}`: {}",
+                                        n + 1,
+                                        cut(t, 50)
+                                    ));
+                                }
+                            }
                         }
                     }
+                }
+                if sub.lines().count() > 100 {
+                    problems.push(format!("{disp} 超 100 行，须在头部给出它的目录"));
                 }
             }
             if a.has("json") {
@@ -604,6 +693,36 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
 ///
 /// 判据按形态而不按前缀列举：`/xxx` 前是行首或空白/引号/括号，或 `C:\` 这类
 /// 盘符。列举前缀的做法永远漏（曾经只认 `/home/`，于是 `/tmp` 畅通无阻）。
+/// 递归收集 Skill 目录下的文本文件。
+///
+/// 跳过 `.git`、`node_modules` 这类明显不是内容的地方；深度上限 8 层，
+/// 避免软链接成环时无限下钻。
+fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let nm = e.file_name().to_string_lossy().to_string();
+        if nm.starts_with('.') || nm == "node_modules" || nm == "target" {
+            continue;
+        }
+        let md = match fs::metadata(&p) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if md.is_dir() {
+            collect_text_files(&p, out, depth + 1);
+        } else if md.is_file() {
+            out.push(p);
+        }
+    }
+}
+
 fn has_abs_path(t: &str) -> bool {
     let b: Vec<char> = t.chars().collect();
     for i in 0..b.len() {
