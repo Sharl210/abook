@@ -232,6 +232,53 @@ fn read_version_of(p: &Path) -> Option<String> {
     t.split_whitespace().nth(1).map(|s| s.to_string())
 }
 
+/// 进度信息走哪一路。
+///
+/// `--json` 模式下 stdout 只能有那一个 JSON 对象，任何进度行混进去都会让调用方
+/// 的解析器直接失败——而失败点在对方，不在我们这边，很难归因。所以这里把进度
+/// 统一改道 stderr：人在终端照样看得见（stderr 不缓冲、直接上屏），机器读
+/// stdout 只拿到 JSON。
+macro_rules! prog {
+    ($json:expr, $($t:tt)*) => {
+        if $json { eprintln!($($t)*) } else { println!($($t)*) }
+    };
+}
+
+/// 把一次检查的结论发出去。
+///
+/// 抽成函数是因为"检查结论"有三条出口（有新版本、已是最新、本地更新），它们
+/// 分散在版本比较和 `--check` 两处。原先只有一处写了 JSON，另外两处在 `--json`
+/// 下照样打印人话——于是同一个命令的输出形态取决于远端状态，调用方没法预先
+/// 知道该按哪种解析。
+#[allow(clippy::too_many_arguments)]
+fn emit_check_result(
+    json: bool,
+    os: &str,
+    arch: &str,
+    target: &str,
+    remote_ver: &str,
+    size: u64,
+    state: &str,
+    from: &str,
+    install_to: &std::path::Path,
+) {
+    if !json {
+        return;
+    }
+    println!(
+        "{{\"os\":{},\"arch\":{},\"target\":{},\"current\":{},\"remote\":{},\"size\":{},\"state\":{},\"source\":{},\"install_to\":{}}}",
+        jstr(os),
+        jstr(arch),
+        jstr(target),
+        jstr(crate::VERSION),
+        jstr(remote_ver),
+        size,
+        jstr(state),
+        jstr(from),
+        jstr(&install_to.to_string_lossy())
+    );
+}
+
 pub fn cmd_upgrade(a: &Args) -> R<i32> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -243,6 +290,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     let repo = std::env::var("ABOOK_REPO").unwrap_or_else(|_| "Sharl210/abook".to_string());
 
     let check_only = a.has("check");
+    let json = a.has("json");
     let force = a.has("force");
 
     // 更新目标是"正在跑的这个文件"。`current_exe` 在 Linux 上读 /proc/self/exe,
@@ -255,8 +303,18 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
         None => cur.clone(),
     };
 
-    if a.has("dry-run") || a.has("json") {
-        let srcs = sources(&repo);
+    // `--dry-run` 是"只看将要做什么"，可以先于联网返回；`--json` 不是。
+    //
+    // 原先两者合在一个条件里，于是 `abook upgrade --check --json` 从不取
+    // manifest：输出里有 `version` 字段、退出码 0，脚本会读成"检查过了、已是
+    // 当前版本"——它检查的是自己的命令行，不是远端。机器可读输出恰恰是"静默
+    // 假成功"代价最大的地方，因为没有人会去看它的措辞。
+    //
+    // 这里的源列表也必须走 `pick_sources`。用 `sources()` 会把显式 `--url`
+    // 顶替掉，而这条命令的用途之一正是"报告我打算用哪个源"——报告错了比不报
+    // 更糟。
+    if a.has("dry-run") {
+        let srcs = pick_sources(&repo, a.get("url"));
         println!(
             "{{\"os\":{},\"arch\":{},\"target\":{},\"current\":{},\"install_to\":{},\"version\":{},\"sources\":[{}]}}",
             jstr(os),
@@ -284,10 +342,10 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(home_dir);
 
-    println!("当前 {} ({os}/{arch})", crate::VERSION);
-    println!("目标 {target}");
-    println!("安装位置 {}", install_to.display());
-    println!();
+    prog!(json, "当前 {} ({os}/{arch})", crate::VERSION);
+    prog!(json, "目标 {target}");
+    prog!(json, "安装位置 {}", install_to.display());
+    prog!(json, "");
 
     // 临时文件放在目标同目录:跨文件系统 rename 会退化成"复制+删除",那样中途
     // 中断就会留下半个可执行文件。`.part` 前缀用点开头,不会被执行。
@@ -313,7 +371,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
 
     for (name, base) in &srcs {
         let url = format!("{base}/manifest.json");
-        print!("取 manifest ← {name} ... ");
+        if json { eprint!("取 manifest ← {name} ... ") } else { print!("取 manifest ← {name} ... ") };
         if !fetch(&url, &mpath) {
             println!("不可达");
             failures.push(format!("{name}: manifest 下载失败"));
@@ -329,7 +387,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
         };
         match pick_entry(&txt, target) {
             Some((sha, size, ver)) => {
-                println!("{} 条,本平台 {size} 字节", count_entries(&txt));
+                prog!(json, "{} 条,本平台 {size} 字节", count_entries(&txt));
                 entry = Some((sha, size, ver, name.clone()));
                 break;
             }
@@ -362,22 +420,31 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     // 不能推断"远端更新"或"已最新",只能老实下载一份再比。
     if !remote_ver.is_empty() && !force {
         let (r, l) = (ver_tuple(&remote_ver), ver_tuple(crate::VERSION));
-        if r == l {
-            println!();
-            println!("已是最新 ({})", crate::VERSION);
+        // "已最新"与"本地更新"也是检查结论，`--json` 时同样要给 JSON。
+        // 这两条早退原本直接打印人话，于是 `upgrade --check --json` 在最新时
+        // 输出人话、在有新版时输出 JSON——同一个命令的两种输出形态取决于远端
+        // 状态，调用方无法预先知道该按哪种解析。
+        if r == l || r < l {
+            let state = if r == l { "current" } else { "older" };
+            emit_check_result(json, os, arch, target, &remote_ver, want_size, state, &from, &install_to);
+            if state == "current" {
+                prog!(json, "");
+                prog!(json, "已是最新 ({})", crate::VERSION);
+            } else {
+                prog!(json, "");
+                prog!(
+                    json,
+                    "本地 {} 比远端 {remote_ver} 还新(可能是自己编的),不覆盖。要强制改用 --force",
+                    crate::VERSION
+                );
+            }
             let _ = std::fs::remove_file(&part);
+            if !json {
+                return Ok(0);
+            }
             return Ok(0);
         }
-        if r < l {
-            println!();
-            println!(
-                "本地 {} 比远端 {remote_ver} 还新(可能是自己编的),不覆盖。要强制改用 --force",
-                crate::VERSION
-            );
-            let _ = std::fs::remove_file(&part);
-            return Ok(0);
-        }
-        println!("远端 {remote_ver}(来自 {from})");
+        prog!(json, "远端 {remote_ver}(来自 {from})");
     } else if remote_ver.is_empty() && !force {
         // manifest 里没有 version(旧版 CI 生成的)。此时"更新"与"已最新"都无从
         // 判断,唯一诚实的说法是承认不知道,再照流程下载一次按实得版本决定。
@@ -385,12 +452,36 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     }
 
     if check_only {
-        println!();
-        if remote_ver.is_empty() {
-            println!("远端 {want_size} 字节,但 manifest 未声明版本,无法判断是否比当前新。");
-            println!("去掉 --check 即安装(会先校验 sha256 与自检)");
+        // 三个状态分开报，脚本据此决定要不要真的去装。
+        let state = if remote_ver.is_empty() {
+            "unknown"
+        } else if ver_tuple(&remote_ver) > ver_tuple(crate::VERSION) {
+            "newer"
+        } else if ver_tuple(&remote_ver) == ver_tuple(crate::VERSION) {
+            "current"
         } else {
-            println!("有新版本 {remote_ver},{want_size} 字节。去掉 --check 即安装");
+            "older"
+        };
+        // `--json` 就必须是 JSON。之前这条路径直接 return 人类可读文本：
+        // 会联网、会退出 0，但输出不能被解析——对脚本而言这是最坏的组合，
+        // 因为它在 shell 里看着"成功"了，只是字段取不到。
+        emit_check_result(json, os, arch, target, &remote_ver, want_size, state, &from, &install_to);
+        if json {
+            let _ = std::fs::remove_file(&part);
+            return Ok(0);
+        }
+        println!();
+        match state {
+            "unknown" => {
+                println!("远端 {want_size} 字节,但 manifest 未声明版本,无法判断是否比当前新。");
+                println!("去掉 --check 即安装(会先校验 sha256 与自检)");
+            }
+            "newer" => println!("有新版本 {remote_ver},{want_size} 字节。去掉 --check 即安装"),
+            "current" => println!("已是最新 ({})", crate::VERSION),
+            _ => println!(
+                "本地 {} 比远端 {remote_ver} 还新(可能是自己编的),不覆盖。要强制改用 --force",
+                crate::VERSION
+            ),
         }
         let _ = std::fs::remove_file(&part);
         return Ok(0);
@@ -405,7 +496,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     let mut used = String::new();
     for (name, base) in &bases {
         let url = format!("{base}/{target}/{exe}");
-        print!("下载 ← {name} ... ");
+        if json { eprint!("下载 ← {name} ... ") } else { print!("下载 ← {name} ... ") };
         if !fetch(&url, &part) {
             println!("不可达");
             failures.push(format!("{name}: 文件下载失败"));
@@ -489,24 +580,79 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     // 两步换位:先把在用的挪到 .old,再把新文件挪到位。
     // 不用"直接覆盖"是因为 Windows 上正在运行的文件不可删改;而两步法在 Unix
     // 上同样正确,失败时能原路退回去。
+    //
+    // 这里有三件事必须分清,否则会造出"机器上一份 abook 都不剩"的后果:
+    //
+    //   1. 安装目标不存在，不等于"本来就没有旧文件"。上一轮 upgrade 若在
+    //      "已把旧文件改名成 .old、还没把新文件挪到位"之间被打断（Ctrl-C、
+    //      断电、OOM），磁盘上就是 install_to 缺失、`.old` 是唯一一份 abook。
+    //      旧代码在动手前无条件删掉 `.old`，于是那份唯一的东西被自己删了；
+    //      接着 exists() 为假 → 判定"没有可回滚的文件" → 自检失败删掉新文件
+    //      → 目录空了，还打印"原本没有可回滚的文件"（这当然是假的）。
+    //
+    //   2. "改名失败"必须与"没有旧文件"分开。压成同一个 false 的后果是：
+    //      改名其实失败了，旧文件还在原地，之后却走进"没有可回滚"分支。
+    //
+    //   3. 回滚本身失败必须如实说。原样吞掉 rename 的结果、照样打印"已回滚到
+    //      原文件"，会让人停止补救——而他手上已经没有能用的可执行文件了。
     let backup = dir.join(format!(".{exe}.old"));
-    let _ = std::fs::remove_file(&backup);
+    let had_install = install_to.exists();
+    let had_backup = backup.exists();
+
+    if !had_install && had_backup {
+        // 上一轮被打断的现场：把 .old 认作"原来的文件"，先复位回原位。
+        // 复位不了就直接停，不要在唯一一份可执行文件上继续动手。
+        std::fs::rename(&backup, &install_to).map_err(|e| {
+            EE::Io(format!(
+                "发现上次升级留下的 {}，但无法复位成 {}: {e}\n\
+                 这是当前唯一的可执行文件，已停止以免把它弄丢。请手工执行:\n  mv {} {}",
+                backup.display(),
+                install_to.display(),
+                backup.display(),
+                install_to.display()
+            ))
+        })?;
+        println!("发现上次升级中断的残留，已复位 {}", install_to.display());
+    } else if had_install && had_backup {
+        // 正常情况：旧文件还在原位，那份 .old 是上一轮没清理掉的，可以删。
+        let _ = std::fs::remove_file(&backup);
+    }
+
     let moved_old = if install_to.exists() {
-        std::fs::rename(&install_to, &backup).is_ok()
+        match std::fs::rename(&install_to, &backup) {
+            Ok(()) => true,
+            Err(e) => {
+                // 旧文件还在原位、新文件还在 .upgrade：什么也没破坏，如实报错即可。
+                let _ = std::fs::remove_file(&part);
+                return Err(EE::Io(format!(
+                    "无法把现有文件移开: {e}\n  {} 未被改动，仍是可用状态。",
+                    install_to.display()
+                )));
+            }
+        }
     } else {
         false
     };
 
     if let Err(e) = std::fs::rename(&part, &install_to) {
         // 退回去,别把用户留在一个"原来的没了、新的没装上"的状态里。
-        if moved_old {
-            let _ = std::fs::rename(&backup, &install_to);
-        }
+        let rolled = if moved_old {
+            std::fs::rename(&backup, &install_to).is_ok()
+        } else {
+            false
+        };
         let _ = std::fs::remove_file(&part);
-        return Err(EE::Io(format!(
-            "无法写入 {}: {e}(已回滚到原文件)",
-            install_to.display()
-        )));
+        let tail = if rolled {
+            "(已回滚到原文件)".to_string()
+        } else {
+            // 不能声称回滚了。把现场原样说清楚，并给出可自查的路径。
+            format!(
+                "(回滚失败，原文件在 {}，请手工改名回 {})",
+                backup.display(),
+                install_to.display()
+            )
+        };
+        return Err(EE::Io(format!("无法写入 {}: {e}{tail}", install_to.display())));
     }
 
     // 装好还不算完:跑它自己的自检。一个能装但自检不过的 release 是坏 release,
@@ -528,13 +674,24 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     }
 
     if !verified {
+        let _ = std::fs::remove_file(&install_to);
         if moved_old {
-            let _ = std::fs::remove_file(&install_to);
-            let _ = std::fs::rename(&backup, &install_to);
-            println!("新版本自检未通过,已回滚到原文件");
+            match std::fs::rename(&backup, &install_to) {
+                Ok(()) => println!("新版本自检未通过,已回滚到原文件"),
+                Err(e) => {
+                    // 这里说"已回滚"就是在骗人,而此刻用户手上的 abook 已经
+                    // 被删掉了,他必须知道去哪找回来。
+                    eprintln!(
+                        "新版本自检未通过，且回滚失败: {e}\n\
+                         原文件仍在 {}，请手工改名回 {}",
+                        backup.display(),
+                        install_to.display()
+                    );
+                    return Ok(5);
+                }
+            }
         } else {
-            let _ = std::fs::remove_file(&install_to);
-            println!("新版本自检未通过,已删除(原本没有可回滚的文件)");
+            eprintln!("新版本自检未通过,已删除");
         }
         return Ok(5);
     }

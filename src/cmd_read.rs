@@ -930,7 +930,13 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         println!();
         println!("【知识分支】时间 / 体积 / 行数 / 条目数 —— 聚合值，据此判断该不该进去翻");
     }
-    let lim = a.num("limit").unwrap_or(40) as usize;
+    // `--per-page 0` 表示"不分页"，`--limit` 是总数上限——两者不是一回事，
+    // 不能被同一个默认值 40 吃掉。
+    let lim = match a.num("limit") {
+        Some(0) => usize::MAX,
+        Some(n) => n as usize,
+        None => 40,
+    };
     let cut_b = br_rows.len().min(lim);
     // `--limit` 先截再分页,两条 flag 各自独立,与其余 list 命令一致。
     let (shown_rows, footer) = crate::paging::page_rows(a, br_rows[..cut_b].to_vec());
@@ -957,7 +963,10 @@ pub fn cmd_index(a: &Args) -> R<i32> {
             rec_rows.len()
         );
         println!("确认要用须先读正文核对，或等它升为正式库");
-        let cut_r = rec_rows.len().min(lim);
+        // 名额是**总共**多少条，不是每段各多少条。各段各自截断会让
+        // `--limit 5` 打出 10 行（5 分支 + 5 候选），与"总共 5 条"的直觉不符。
+        let remain = lim.saturating_sub(cut_b);
+        let cut_r = rec_rows.len().min(remain);
         let (shown_c, footer_c) = crate::paging::page_rows(a, rec_rows[..cut_r].to_vec());
         for r in &shown_c {
             println!("{r}");

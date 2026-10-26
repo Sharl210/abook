@@ -205,6 +205,31 @@ impl Args {
         }
     }
 
+    /// 存一个参数：折叠后的键与原键都存。
+    ///
+    /// 别名折叠（`limit` → `per-page`）让分页逻辑统一，但把原键弄丢了，
+    /// 于是 `a.num("limit")` 恒为 `None`。两个键语义本就不同（总共几条 vs
+    /// 每页几条），不能只留一个。
+    fn store_both(&mut self, folded: &str, raw: &str, v: String) {
+        self.kv.entry(folded.to_string()).or_default().push(v.clone());
+        if folded != raw {
+            self.kv.entry(raw.to_string()).or_default().push(v);
+        }
+    }
+
+    /// 记录一个参数，同时保留它的原名。
+    ///
+    /// 别名折叠有个副作用：`--limit` 被折成 `per-page` 之后，`a.num("limit")`
+    /// 永远返回 `None`——而四个命令（`index`、`recall`、`recent`、`log`）恰恰直接
+    /// 读 `limit`，于是那句 `unwrap_or(40)` 成了唯一生效的值：`--limit 100` 无论
+    /// 传什么都只出 40 行，而同一处提示语还在叫用户"用 --limit 扩大"。
+    ///
+    /// 一个 flag 被文档列出、被解析、被打印在提示里，却从来读不到值——这比不
+    /// 支持它更糟，因为支持是写在帮助里的。
+    ///
+    /// 所以两个键都存：折叠后的键给分页逻辑用，原键给"总数上限"用。两者语义
+    /// 本来就不同（每页几条 vs 总共几条），不该共用一个键。
+
     pub fn parse(argv: &[String]) -> R<Args> {
         let mut a = Args::default();
         let mut i = 0;
@@ -230,8 +255,8 @@ impl Args {
             if t.starts_with("--") {
                 let rest = &t[2..];
                 if let Some((k, v)) = rest.split_once('=') {
-                    let k = Self::alias(k).to_string();
-                    a.kv.entry(k).or_default().push(v.to_string());
+                    let folded = Self::alias(k).to_string();
+                    a.store_both(&folded, k, v.to_string());
                     i += 1;
                     continue;
                 }
@@ -254,7 +279,7 @@ impl Args {
                 if needs_value {
                     if i + 1 < argv.len() && !argv[i + 1].starts_with('-') {
                         let v = argv[i + 1].clone();
-                        a.kv.entry(k).or_default().push(v);
+                        a.store_both(&k, rest, v);
                         i += 2;
                     } else {
                         // A value was expected in front of the command. Saying
@@ -294,24 +319,24 @@ impl Args {
         while i < argv.len() {
             let t = &argv[i];
             if let Some(rest) = t.strip_prefix("--") {
-                let (k, inline) = match rest.split_once('=') {
+                let (raw_k, inline) = match rest.split_once('=') {
                     Some((k, v)) => (k.to_string(), Some(v.to_string())),
                     None => (rest.to_string(), None),
                 };
-                let k = Self::alias(&k).to_string();
+                let k = Self::alias(&raw_k).to_string();
                 if BOOLS.contains(&k.as_str()) {
                     let v = inline.unwrap_or_else(|| "true".to_string());
-                    a.kv.entry(k).or_default().push(v);
+                    a.store_both(&k, &raw_k, v);
                 } else if let Some(v) = inline {
-                    a.kv.entry(k).or_default().push(v);
+                    a.store_both(&k, &raw_k, v);
                 } else {
                     // value follows, unless next token is another flag
                     if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
                         let v = argv[i + 1].clone();
-                        a.kv.entry(k).or_default().push(v);
+                        a.store_both(&k, &raw_k, v);
                         i += 1;
                     } else {
-                        a.kv.entry(k).or_default().push(String::new());
+                        a.store_both(&k, &raw_k, String::new());
                     }
                 }
             } else if t == "-" {
@@ -393,6 +418,12 @@ impl Args {
             // Paging and root are universal, and `--root` must work even for
             // commands the table has not enumerated.
             if k == "root" || allowed.iter().any(|a| a == k) {
+                continue;
+            }
+            // 别名原样留着（`limit` 与 `per-page` 同时入表），所以校验也要按
+            // 折叠后的名字判：`--limit` 折成 `per-page` 属于这个命令接受的参数，
+            // 不该因为它保留了自己的名字就被判成未知参数。
+            if allowed.iter().any(|a| *a == Self::alias(k)) {
                 continue;
             }
             let mut best = (usize::MAX, String::new());
@@ -1722,4 +1753,55 @@ pub fn libs_from(a: &Args) -> Vec<crate::rec::Lib> {
 macro_rules! say_line {
     () => { $crate::util::emit_line("") };
     ($($t:tt)*) => { $crate::util::emit_line(format!($($t)*)) };
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+
+    /// `--limit` 必须真的能读到。
+    ///
+    /// 别名折叠把 `limit` 折成 `per-page`，只留折叠后的键，于是 `a.num("limit")`
+    /// 恒为 `None`——而四个命令（`index`/`recall`/`recent`/`log`）直接读 `limit`，
+    /// 那句 `unwrap_or(40)` 成了唯一生效的值：`--limit 100` 无论传什么都只出
+    /// 40 行，而同一处提示语还在叫用户"用 --limit 扩大"。
+    ///
+    /// 一个被帮助文档列出、被解析、被写进提示的 flag，从来没被读到过——这比
+    /// 不支持它更糟，因为"支持"是写在帮助里的。
+    #[test]
+    fn limit_and_per_page_are_both_readable() {
+        let argv: Vec<String> = ["index", "--limit", "5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let a = Args::parse(&argv).expect("parse");
+        assert_eq!(a.num("limit"), Some(5), "限总数必须读得到");
+        assert_eq!(a.num("per-page"), Some(5), "分页侧也要能看到");
+
+        let argv: Vec<String> = ["index", "--per-page", "7"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let a = Args::parse(&argv).expect("parse");
+        assert_eq!(a.num("per-page"), Some(7));
+        assert_eq!(a.num("limit"), None, "只给 per-page 时不该伪造一个 limit");
+
+        // 校验按折叠后的名字判：`--limit` 与 `--per-page` 是同一个参数的两种
+        // 写法，不能因为它保留了原名就被判成未知参数。曾经如此，表现为
+        // `list --limit 2` 报"不接受 --limit"。
+        let argv: Vec<String> = ["list", "--limit", "2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let a = Args::parse(&argv).expect("parse");
+        assert!(a.validate_for("list").is_ok(), "list 应接受 --limit");
+
+        // 真正陌生的参数仍要拒绝，否则上面那条"放宽"会把校验废掉。
+        let argv: Vec<String> = ["list", "--bogus", "2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let a = Args::parse(&argv).expect("parse");
+        assert!(a.validate_for("list").is_err(), "未知参数必须仍被拒绝");
+    }
 }
