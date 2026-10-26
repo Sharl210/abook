@@ -540,3 +540,178 @@ pub fn reconcile(root: &Path) -> (usize, usize, Vec<String>) {
     }
     (files, rows, problems)
 }
+
+// ---------------------------------------------------------------------------
+// 身份索引：让模型在不解密的前提下知道"库里有什么"
+// ---------------------------------------------------------------------------
+
+/// 身份索引的节标题，与 `BookFile::credential_rows` 的解析保持一致。
+pub const IDENTITY_SECTION: &str = "Credential Identity Index";
+
+/// 身份索引的一行：标识、用途、归属、允许用途、取用条件、披露级别。
+pub fn identity_row(e: &Entry) -> String {
+    // 六个字段，分隔符是全角 `｜`——`credential_rows` 按它切。
+    //
+    // 用途里的换行必须压平：表格一行就是一条记录，折行会让下半个句子
+    // 变成一条新记录（字段数不足 3 的行会被丢掉，于是那条凭据从索引里
+    // 消失且没有任何提示）。
+    let purpose = e.purpose.replace('\n', " ").replace('\u{FF5C}', "/");
+    let disclosure = if e.verified { "可引用" } else { "可引用(无校验码)" };
+    format!(
+        "{ident}｜{purpose}｜vault（未独立核实）｜供本机工具与脚本使用｜按需 vault get｜{disclosure}",
+        ident = e.ident,
+        purpose = purpose,
+        disclosure = disclosure
+    )
+}
+
+/// 按磁盘上的实际条目重写 Global.md 的 Credential Identity Index。
+///
+/// 这个节以前**没有任何代码写它**：`abook identity` 读它，`vault put` 不写它，
+/// 所以索引永远是空的。后果不是"少了个功能"，而是模型**无从知道自己手里有什么**
+/// ——保险箱里存了邮箱授权码，模型仍然要去问用户"我要发邮件，SMTP 怎么配"。
+/// 索引为空与"确实没有凭据"在输出上是同一句话，没人会去怀疑。
+///
+/// 与 `sync_ledger` 同一模式：只在真的变了时写盘，返回 (是否改动, 条数)。
+pub fn sync_identity(root: &Path) -> R<(bool, usize)> {
+    let p = root.join("Global.md");
+    if !p.exists() {
+        return Ok((false, 0));
+    }
+    let mut bf = crate::book::BookFile::load(&p)?;
+
+    // 名册自己不是凭据，不进身份索引——它只是一份"有哪些名字"的清单，
+    // 列进去会让模型以为存在一个叫 aq7x0k3m9p 的账号。
+    let mut entries: Vec<Entry> = list_entries(root)
+        .into_iter()
+        .filter(|e| e.ident != LEDGER_ID)
+        .collect();
+    entries.sort_by(|a, b| a.ident.cmp(&b.ident));
+
+    let want: Vec<String> = entries.iter().map(identity_row).collect();
+
+    // 现状：把该节里已有的行读出来（跳过表头与空行）。
+    let cur: Vec<String> = bf
+        .credential_rows()
+        .iter()
+        .filter(|r| r.len() >= 3)
+        .map(|r| {
+            // 反过来拼回一行，只用于比对"有没有变"。字段内部若含分隔符，
+            // 拼回来的结果与原来不同，于是被判成"变了"并整节重写——那是
+            // 正确的方向：宁可多写一次，也不要留一行读起来自相矛盾的索引。
+            r.join("｜")
+        })
+        .collect();
+
+    if cur == want {
+        return Ok((false, entries.len()));
+    }
+
+    // 重建整节。找不到节标题就追加到末尾——旧库（本工具 v2 之前建的）
+    // 压根没有这一节，`identity` 于是一直报"索引为空"。
+    let mut out: Vec<String> = Vec::new();
+    let mut insec = false;
+    let mut placed = false;
+    for line in bf.content.lines() {
+        let t = line.trim();
+        if let Some(h) = t.strip_prefix("## ") {
+            // 离开这一节时，把新内容写进去
+            if insec && !placed {
+                out.push(String::new());
+                out.extend(want.iter().cloned());
+                out.push(String::new());
+                placed = true;
+            }
+            insec = h.trim().eq_ignore_ascii_case(IDENTITY_SECTION);
+        }
+        if insec {
+            // 节内的旧内容全部丢弃，由下面统一重写
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if insec && !placed {
+        out.push(String::new());
+        out.extend(want.iter().cloned());
+        out.push(String::new());
+        placed = true;
+    }
+    if !placed {
+        out.push(String::new());
+        out.push(format!("## {IDENTITY_SECTION}"));
+        out.push(String::new());
+        out.push("本节为身份投影，不含凭据值；由 `vault put`/`vault rm` 自动维护。".into());
+        out.push(String::new());
+        out.push("标识｜用途｜归属系统/来源状态｜允许用途｜取用条件｜值披露级别".into());
+        out.push(String::new());
+        out.extend(want.iter().cloned());
+        out.push(String::new());
+    }
+
+    bf.content = out.join("\n");
+    // 尾部换行按原样保留：Global.md 有 [/MEMORY_CONTENT] 收尾标记，
+    // 丢掉换行会让 render() 拼出的文件少一个分隔，下一轮读取时标记就贴
+    // 在上一行末尾。
+    bf.content.push('\n');
+    crate::util::write_atomic(&p, &bf.render())?;
+
+    // 写完复读核对：索引与磁盘不一致时宁可报错，也不要让模型看到一份
+    // 与其实际能力不符的清单。
+    let back = crate::book::BookFile::load(&p)?;
+    let got = back.credential_rows().len();
+    if got != want.len() {
+        return Err(crate::EE::Integrity(format!(
+            "身份索引写入后复读不一致：期望 {} 条，实际 {} 条",
+            want.len(),
+            got
+        )));
+    }
+    Ok((true, entries.len()))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// 索引的每一行必须能被 `credential_rows` 读回来。
+    ///
+    /// 这条是整件事的地基：写进去的行如果解析不出来，索引就是"看起来有、
+    /// 实际读不到"，比空索引更糟——`identity` 报 0 条会让人以为库里没凭据，
+    /// 而文件里明明躺着一行行文字。
+    #[test]
+    fn identity_rows_round_trip_through_the_parser() {
+        let e = Entry {
+            ident: "qqmail-smtp-authcode".into(),
+            purpose: "QQ邮箱授权码，用于发完成通知".into(),
+            body: "secret".into(),
+            path: PathBuf::new(),
+            verified: true,
+        };
+        let row = identity_row(&e);
+        let parts: Vec<&str> = row.split('｜').collect();
+        assert_eq!(parts.len(), 6, "必须是六列: {row}");
+        assert_eq!(parts[0], "qqmail-smtp-authcode");
+        assert!(parts[1].contains("授权码"));
+        assert!(parts[5].contains("可引用"));
+    }
+
+    /// 用途里出现换行或全角分隔符时，仍必须是一行、六列。
+    ///
+    /// 换行会把一句话的后半截变成新的一行；`credential_rows` 丢弃字段数
+    /// 不足 3 的行，于是那条凭据**从索引里静默消失**。而用途字段是本工具
+    /// 里最容易被写成多行的字段（"用在什么平台、做什么、何时用"天然分点）。
+    #[test]
+    fn purpose_with_newlines_stays_one_row() {
+        let e = Entry {
+            ident: "k".into(),
+            purpose: "第一行\n第二行｜带分隔符\n第三行".into(),
+            body: String::new(),
+            path: PathBuf::new(),
+            verified: false,
+        };
+        let row = identity_row(&e);
+        assert!(!row.contains('\n'), "换行没压平: {row:?}");
+        assert_eq!(row.split('｜').count(), 6, "分隔符没转义: {row}");
+        assert!(row.contains("可引用(无校验码)"), "无校验码要如实标: {row}");
+    }
+}

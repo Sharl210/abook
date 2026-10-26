@@ -128,11 +128,23 @@ pub fn run(a: &Args) -> R<i32> {
             }
             let p = write_entry(&root, &ident, &purpose, body.trim_end())?;
             let (changed, n) = sync_ledger(&root)?;
+            // 身份索引与名册一起维护。两者都是"投影"，但服务不同问题：
+            // 名册回答"库里有哪几个名字"，身份索引回答"这个凭据是干什么的、
+            // 什么时候该用它"——后者才是模型判断"我手里有没有可用手段"的依据。
+            // 不写它，模型就只能靠记忆猜，或者干脆来问用户。
+            let id_note = match sync_identity(&root) {
+                Ok((true, k)) => format!("，身份索引已同步 {k} 条"),
+                Ok((false, _)) => String::new(),
+                // 索引写失败不能让 put 也失败：凭据本身已落盘并复读校验过，
+                // 那是不可丢的东西；索引只是投影，下次 put/rm 还会再试。
+                Err(e) => format!("，身份索引同步失败（{}）：凭据已存好，索引下次再试", e.msg()),
+            };
             crate::say_line!(
-                "{}  (名册{}，共 {} 条)",
+                "{}  (名册{}，共 {} 条{})",
                 p.display(),
                 if changed { "已同步" } else { "未变" },
-                n
+                n,
+                id_note
             );
             Ok(0)
         }
@@ -150,6 +162,9 @@ pub fn run(a: &Args) -> R<i32> {
             }
             let ok = delete_entry(&root, ident)?;
             sync_ledger(&root)?;
+            if ok {
+                let _ = sync_identity(&root);
+            }
             crate::say_line!("{}{}", if ok { "已删除 " } else { "不存在 " }, ident);
             Ok(if ok { 0 } else { 3 })
         }
