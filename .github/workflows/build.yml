@@ -833,6 +833,27 @@ jobs:
           fi
           echo "15 个产物全部同源"
 
+      # 版本号来自 build.rs 读的 git tag，所以「先构建、后打标签」会得到一个
+      # 自称旧版本的二进制，而它照样会被发布——用户下载到的文件版本号与标签
+      # 对不上，却没有任何一步报错。这个顺序错误本地出过一次：打完 tag 直接
+      # 推上去，二进制还说 1.6.9 而 tag 是 1.6.10。
+      #
+      # CI 只在 tag 推送时触发，所以这里能拿到确定的期望值，直接对死。
+      - name: 校验版本号与 tag 一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          cargo build --release --quiet
+          GOT=$(./target/release/abook version | sed -n 's/^abook \([0-9][^ ]*\) .*/\1/p')
+          WANT="${GITHUB_REF_NAME#v}"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::二进制自称 $GOT，标签是 $WANT"
+            echo "版本号取自构建时可见的 git tag。这是「先构建、后打 tag」的典型症状："
+            echo "打完 tag 必须重新构建一次，让 build.rs 读到新 tag。"
+            exit 1
+          fi
+          echo "版本号与标签一致: $GOT"
+
       # Assets for targets that no longer exist would otherwise stay published
       # forever (a stale riscv64gc-unknown-linux-musl did exactly this), so a
       # full run prunes anything the current matrix does not produce.
