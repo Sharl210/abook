@@ -153,7 +153,7 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
             .map(|h| {
                 format!(
                     "{{\"lib\":{},\"path\":{},\"title\":{},\"tier\":{},\"score\":{},\
-\"reason\":{},\"body\":{},\"created\":{},\"bytes\":{},\"lines\":{},\"attach_count\":{},\"attach_bytes\":{},\"updated\":{},\"when\":{}}}",
+\"reason\":{},\"body\":{},\"created\":{},{},\"attach_count\":{},\"attach_bytes\":{}}}",
                     jstr(h.lib.name()),
                     jstr(&h.path),
                     jstr(&h.title),
@@ -162,12 +162,9 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
                     jstr(&h.reason),
                     jstr(&h.record.as_ref().map(|r| r.body.clone()).unwrap_or_default()),
                     h.record.as_ref().map(|r| r.created()).unwrap_or(0),
-                    h.bytes,
-                    h.lines,
+                    meta_json(h.updated, Some(h.bytes as u64), Some(h.lines)),
                     h.attach_count,
-                    h.attach_bytes,
-                    h.updated,
-                    jstr(&crate::util::short_when(h.updated))
+                    h.attach_bytes
                 )
             })
             .collect::<Vec<_>>()
@@ -190,17 +187,17 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
         // Score order stays; the date rides along so a hit can be placed in
         // time. Without it a reader cannot tell "this is how it works now" from
         // "this was how it worked a year ago".
+        // 前缀统一走 `row_meta`，附件列按 `list` 的规矩：没有就不占位。
+        let meta = crate::util::row_meta(h.updated, Some(h.bytes as u64), Some(h.lines));
+        let att = if h.attach_count == 0 {
+            String::new()
+        } else {
+            format!("  {}件{}", h.attach_count, human_bytes(h.attach_bytes))
+        };
         println!(
-            "  {}  {:>8} {:>7} {:>12}  [{}] {} {}  ({} / {})",
-            crate::util::short_when(h.updated),
-            human_bytes(h.bytes as u64),
-            format!("{}行", h.lines),
-            if h.attach_count == 0 {
-                String::new()
-            } else {
-                format!("{}件{}", h.attach_count, human_bytes(h.attach_bytes))
-            },
+            "{meta}  [{}{}] {} {}  ({} / {})",
             h.lib.name(),
+            att,
             h.title,
             h.path,
             h.tier.label(),
