@@ -46,6 +46,10 @@ __pycache__/
 /docs/*
 !/docs/MAINTENANCE.md
 !/docs/DOWNLOADS.md
+# 操作手册比维护文档更该跟着二进制走：使用者第一件事就是查它。
+# 它原先漏在忽略规则里，于是"本地有、仓库没有"，一次
+# `git clone` 之后 check_docs.py 就没有可检查的对象了。
+!/docs/COMMANDS.md
 /tools/
 /Plan_Mode_Books/
 /.agents/
