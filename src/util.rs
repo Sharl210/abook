@@ -1013,7 +1013,20 @@ pub fn read_head(p: &Path, max: usize) -> R<String> {
 
 pub fn read_str(p: &Path) -> R<String> {
     match fs::read(p) {
-        Ok(b) => Ok(String::from_utf8_lossy(&b).to_string()),
+        // `String::from_utf8` takes the buffer over; `from_utf8_lossy(..)
+        // .to_string()` only ever borrows it and then allocates a second copy,
+        // so the file lives twice in memory until the `Vec` drops -- for the
+        // 52 MB synthetic record that is 52 MB of peak RSS bought for nothing.
+        //
+        // Note `Cow::into_owned()`, the obvious "avoid the copy" spelling, does
+        // not help here: `from_utf8_lossy` returns `Cow::Borrowed` whenever the
+        // bytes are valid UTF-8 (the normal case), and turning *that* into an
+        // owned String is exactly the same allocation-and-copy. Taking ownership
+        // of the bytes is the only version that skips it.
+        Ok(b) => Ok(match String::from_utf8(b) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        }),
         Err(e) => Err(EE::Io(format!("读取失败 {}: {e}", p.display()))),
     }
 }
