@@ -610,6 +610,42 @@ impl Record {
     }
 }
 
+/// How much of a record the fallback selector match is allowed to read.
+///
+/// Every key the fallback looks at (`ID`, `TITLE`) sits at the top of the
+/// record, so this is not a guess that might clip real data: the format puts
+/// those keys there. Measured over the real library, the longest `TITLE=` line
+/// is 1445 B and every header key precedes it, so 4 KiB covers both with room
+/// to spare. Reading the whole file instead bought nothing — a mistyped
+/// selector used to read *and fully parse* all 962 records (74 ms) only to
+/// report that nothing matched.
+const SELECTOR_HEAD_BYTES: usize = 4096;
+
+/// The `TITLE` the fallback title match should see, read from the head only.
+///
+/// `None` means "not a usable record" and stands in for the `Err` arm of
+/// `Record::parse`. The parser has exactly two error rules: `R001` (no
+/// recognizable field) — decidable from the header alone, since a header with
+/// no field has no body either — and `R002` (no body *and* no title). Reading
+/// only the head makes every body look empty, so a record with no `TITLE` looks
+/// unparseable here where a full parse accepted it. Such a record's title is
+/// empty, and an empty title can neither equal nor be a prefix of a non-empty
+/// selector (`sel` is never empty in this loop: `dir.join("")` is the records
+/// directory and resolved earlier), so both paths agree.
+///
+/// One more difference from `Record::get`: that falls back to a `TITLE` inside
+/// the `[PROMOTION]` tail block, which by definition is past the head. Measured
+/// over the real library: 0 records carry `TITLE=` in a promotion block and 0
+/// lack a header `TITLE`, so the fallback has never been reachable.
+fn title_from_head(path: &Path, lib: Lib) -> Option<String> {
+    let head = read_head(path, SELECTOR_HEAD_BYTES).ok()?;
+    let parsed = crate::parse::parse(&head, Some(lib));
+    if parsed.has_error() {
+        return None;
+    }
+    Some(parsed.get("TITLE"))
+}
+
 /// Resolve a user-supplied record selector to a path.
 /// Accepts: full path, library-relative path, filename, record ID.
 pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
@@ -655,7 +691,10 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
                 if stem == sel || stem.ends_with(&format!("-{sel}")) {
                     return Ok((pth, lib));
                 }
-                if let Ok(txt) = std::fs::read_to_string(&pth) {
+                // Head only, same six lines the full read was sliced to. The
+                // `take(6)` stays: it is what keeps a `=x;` that merely
+                // appears in the body from being read as a header match.
+                if let Ok(txt) = read_head(&pth, SELECTOR_HEAD_BYTES) {
                     let head: String = txt.lines().take(6).collect::<Vec<_>>().join("\n");
                     if head.contains(&format!("ID={sel}"))
                         || head.contains(&format!(";{sel};"))
@@ -669,6 +708,13 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
     }
     // Title match: users and models name a record by its heading far more
     // often than by filename. Exact title first, then unique prefix.
+    //
+    // This loop is why a title selector used to cost a full library scan: it
+    // read every record in full and ran the whole parser over it, body and
+    // all, to compare one header string. It now reads the head (see
+    // `title_from_head`) and keeps the same three-way outcome — exact beats
+    // prefix, a unique hit wins, multiple hits are an ambiguity error listing
+    // *both* candidate sets — because that order is what callers already saw.
     for lib in [Lib::Candidate, Lib::Canonical] {
         let dir = root.join(lib.dir());
         let mut exact: Vec<PathBuf> = Vec::new();
@@ -679,13 +725,14 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
                 if !pth.extension().map(|x| x == "md").unwrap_or(false) {
                     continue;
                 }
-                if let Ok(rec) = Record::parse(&pth, lib) {
-                    let t = rec.title();
-                    if t == sel {
-                        exact.push(pth.clone());
-                    } else if !t.is_empty() && t.starts_with(sel) {
-                        prefix.push(pth.clone());
-                    }
+                let title = match title_from_head(&pth, lib) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if title == sel {
+                    exact.push(pth.clone());
+                } else if !title.is_empty() && title.starts_with(sel) {
+                    prefix.push(pth.clone());
                 }
             }
         }
