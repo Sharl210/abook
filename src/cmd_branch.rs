@@ -159,11 +159,27 @@ pub fn cmd_branch(a: &Args) -> R<i32> {
                     .iter()
                     .map(|b| {
                         let n = b.count();
-                        let decl: usize = b.get("COUNT").trim().parse().unwrap_or(0);
-                        let flag = if decl == n {
-                            ""
-                        } else {
-                            "  <-- COUNT 与实际不符"
+                        // `COUNT` 缺失与"`COUNT` 写错了"是两件事，不能都报成
+                        // "与实际不符"。
+                        //
+                        // 原来 `parse().unwrap_or(0)` 把缺失读成 0，于是每个
+                        // 没写 COUNT 的分支都挂一句"COUNT 与实际不符"——那句话
+                        // 断言了一个并不存在的事实（它压根没声明过 COUNT）。
+                        // 真实库上 20 个分支全带这句，读者会以为地图烂了。
+                        // 这与本轮在别处修的"0 冒充未知"是同一个错。
+                        // COUNT 缺失是常态，不提示。
+                        //
+                        // Atlas 由工具自己维护，写 COUNT 是可选的冗余字段
+                        // （`recount` 才会补）。真实库 20 个分支一个都没写，
+                        // 给每一行都挂一句"未声明 COUNT"，等于给了一张每行都
+                        // 有标注的表——标注太多就等于没有标注；而且它暗示了一件
+                        // 需要处理的事，其实不需要。
+                        //
+                        // 只有**写了但对不上**才是真问题：那说明地图与磁盘漂移，
+                        // 或者有人手改过。
+                        let flag = match b.get("COUNT").trim().parse::<usize>() {
+                            Ok(decl) if decl != n => "  <-- COUNT 与实际不符",
+                            _ => "",
                         };
                         let (by, ln, ts) = aggregate(&meta, b);
                         format!(

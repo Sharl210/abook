@@ -24,19 +24,53 @@ pub fn count_lines_from<R: std::io::Read>(mut r: R) -> Option<usize> {
     let mut newlines = 0usize;
     let mut total = 0u64;
     let mut last: Option<u8> = None;
+    // 跨块被切断的多字节字符尾巴，最多 3 字节。
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         let k = match r.read(&mut buf) {
             Ok(0) => break,
             Ok(k) => k,
             Err(_) => return None,
         };
-        let chunk = &buf[..k];
-        if chunk.contains(&0) {
+        if k == 0 {
+            continue;
+        }
+        if buf[..k].contains(&0) {
+            // NUL 在 UTF-8 里是合法字符，实际出现只说明这是二进制或 UTF-16。
             return None;
         }
-        newlines += chunk.iter().filter(|c| **c == b'\n').count();
-        total += k as u64;
-        last = Some(chunk[k - 1]);
+        pending.extend_from_slice(&buf[..k]);
+        let advance = match std::str::from_utf8(&pending) {
+            Ok(s) => {
+                newlines += s.bytes().filter(|c| *c == b'\n').count();
+                let n = pending.len();
+                total += n as u64;
+                last = pending.last().copied();
+                pending.clear();
+                n
+            }
+            Err(e) => {
+                // `error_len() == None` 表示"这一块结尾被切断了"，不是非法字节：
+                // 留下尾巴等下一块。
+                if e.error_len().is_some() {
+                    return None;
+                }
+                let valid = e.valid_up_to();
+                let s = std::str::from_utf8(&pending[..valid]).ok()?;
+                newlines += s.bytes().filter(|c| *c == b'\n').count();
+                total += valid as u64;
+                if valid > 0 {
+                    last = Some(pending[valid - 1]);
+                }
+                pending.drain(..valid);
+                valid
+            }
+        };
+        let _ = advance;
+    }
+    // 结尾残留不完整的多字节序列：这不是文本。
+    if !pending.is_empty() {
+        return None;
     }
     if total == 0 {
         return Some(0);
@@ -1312,26 +1346,38 @@ pub fn cmd_list(a: &Args) -> R<i32> {
         // 元信息一律走 `row_meta`：此处自己写 `{:>4}` 放过行数，于是从"行数"往后
         // 整行相对其它命令左移一格，并排看就错位。附件列是命令特有信息，接在
         // 统一前缀之后。
+        // 附件列只在真有附件时才占位。
+        //
+        // 原先无条件打印 `{:>12}`：整个库里绝大多数记录没有附件，于是每一行都
+        // 是一段 12 字符的空白，看起来像排版坏了或者有字段没填。宽表格里"空列"
+        // 与"字段缺失"在视觉上无法区分，读者只会去怀疑工具。
         let att = {
             let f = att_of(rec);
             if f.is_empty() {
-                String::new()
+                None
             } else {
-                format!("{}件{}", f.count(), human_bytes(f.bytes))
+                Some(format!("{}件{}", f.count(), human_bytes(f.bytes)))
             }
         };
-        println!(
-            "{}  {:>12}  {}  [{}] {}",
-            crate::util::row_meta(
-                rec.updated(),
-                Some(rec.raw.len() as u64),
-                Some(count_lines(&rec.raw))
-            ),
-            att,
-            rel(&root, &rec.path),
-            rec.lib.name(),
-            truncate_chars(&rec.title(), 70)
+        let meta = crate::util::row_meta(
+            rec.updated(),
+            Some(rec.raw.len() as u64),
+            Some(count_lines(&rec.raw)),
         );
+        match att {
+            Some(att) => println!(
+                "{meta}  {att:>12}  {}  [{}] {}",
+                rel(&root, &rec.path),
+                rec.lib.name(),
+                truncate_chars(&rec.title(), 70)
+            ),
+            None => println!(
+                "{meta}  {}  [{}] {}",
+                rel(&root, &rec.path),
+                rec.lib.name(),
+                truncate_chars(&rec.title(), 70)
+            ),
+        }
     }
     // 零命中时说清楚"为什么是零"。
     //
@@ -1485,6 +1531,15 @@ mod tests {
     #[test]
     fn binary_has_no_line_count() {
         assert_eq!(count_lines_from(&b"\x00\x01\x02"[..]), None);
+        // 没有 NUL 但也不是 UTF-8 的随机字节：不能数出行数来。
+        assert_eq!(count_lines_from(&[0xFFu8, 0xFE, b'\n'][..]), None);
+        assert_eq!(count_lines_from(&[0x89u8, b'P', b'N', b'G', b'\n'][..]), None);
+        // 中文与 emoji 是文本，跨块边界也不能被误判成二进制。
+        let mut long = String::new();
+        for _ in 0..5000 {
+            long.push_str("中文测试🙂\n");
+        }
+        assert_eq!(count_lines_from(long.as_bytes()), Some(5000));
         let d = std::env::temp_dir().join("abook-count-lines-test");
         let _ = std::fs::create_dir_all(&d);
         let txt = d.join("a.md");

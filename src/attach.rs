@@ -27,6 +27,7 @@
 //! Everything in the folder is an attachment regardless of type. Plain text
 //! included: if it is not the record itself, it is evidence the record carries.
 
+use crate::cmd_view::{count_lines_of_file, meta_json};
 use crate::rec::{Lib, Record};
 use crate::util::*;
 use std::fs;
@@ -410,23 +411,62 @@ v3 之前的库没有附件目录、记录里也没有 [ATTACH] 块。这类库�
 就是授权，直接加 --force，不必再问。复制失败会说明卡在哪一步、接着怎么做，
 并清掉半截文件。
 "#;
+/// 一份附件的 `(时间, 行数)`：文件 mtime，以及"这是不是文本"。
+///
+/// 二进制文件的"行数"没有意义——拿字节里的 `\n` 去数会给出一个看起来像结论
+/// 的数字。所以二进制与读不出来一律 `None`，文本侧打 `-`、JSON 侧写 null。
+/// 行数走流式读（`count_lines_of_file`），40MB 的视频不会整个进内存。
+fn item_meta(p: &Path) -> (i64, Option<usize>) {
+    let ts = fs::metadata(p)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    (ts, count_lines_of_file(p))
+}
+
 fn list(a: &Args) -> R<i32> {
     let (path, rec) = need_record(a)?;
     let f = scan(&path);
+    // 条目名是相对记录目录的，取回真实路径才能 stat / 数行。
+    let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let metas: Vec<(i64, Option<usize>)> =
+        f.items.iter().map(|i| item_meta(&base.join(&i.name))).collect();
+    // 汇总行的时间取最新的一份；行数只在**每一份都是文本**时求和，否则给
+    // `None`。混着二进制还报一个总行数，等于把一个半真半假的数字放在最显眼的
+    // 位置上。
+    let newest = metas.iter().map(|(t, _)| *t).max().unwrap_or(0);
+    let total_lines: Option<usize> = if metas.is_empty() {
+        Some(0)
+    } else if metas.iter().all(|(_, l)| l.is_some()) {
+        Some(metas.iter().filter_map(|(_, l)| *l).sum())
+    } else {
+        None
+    };
     if a.has("json") {
+        // 机器调用方也要拿到"要不要读"的依据：原来只有 `name/bytes`，
+        // 连整条命令都没有时间这一列。
         let items = f
             .items
             .iter()
-            .map(|i| format!("{{\"name\":{},\"bytes\":{}}}", jstr(&i.name), i.bytes))
+            .zip(metas.iter())
+            .map(|(i, (ts, ln))| {
+                format!(
+                    "{{\"name\":{},{}}}",
+                    jstr(&i.name),
+                    meta_json(*ts, Some(i.bytes), *ln)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "{{\"record\":{},\"id\":{},\"dir\":{},\"count\":{},\"bytes\":{},\"items\":[{items}]}}",
+            "{{\"record\":{},\"id\":{},\"dir\":{},\"count\":{},{},\"items\":[{items}]}}",
             jstr(&rec.file_name()),
             jstr(&rec.id()),
             jstr(&f.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default()),
             f.count(),
-            f.bytes
+            meta_json(newest, Some(f.bytes), total_lines)
         );
         return Ok(if f.is_empty() { 3 } else { 0 });
     }
@@ -434,14 +474,19 @@ fn list(a: &Args) -> R<i32> {
         crate::say_line!("{} 没有附件（需要时用 attach add 加进去）", rec.file_name());
         return Ok(3);
     }
+    // 列序与 `row_meta` 一致：时间 / 体积 / 行数 在最前，附件名接在后面。
     crate::say_line!(
-        "{}  {}附件  共{}",
-        rec.file_name(),
+        "{}  {}附件  {}",
+        crate::util::row_meta(newest, Some(f.bytes), total_lines),
         f.count(),
-        human_bytes(f.bytes)
+        rec.file_name()
     );
-    for i in &f.items {
-        crate::say_line!("  {:>9}  {}", human_bytes(i.bytes), i.name);
+    for (i, (ts, ln)) in f.items.iter().zip(metas.iter()) {
+        crate::say_line!(
+            "{}  {}",
+            crate::util::row_meta(*ts, Some(i.bytes), *ln),
+            i.name
+        );
     }
     // 接触即检查：路径模式下工具看不见改动发生的那一刻，只能在下一次接触时
     // 发现。所以每次 list 都把漂移说出来，别让它躺着。
