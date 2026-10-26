@@ -190,52 +190,40 @@ pub fn run(a: &Args) -> R<i32> {
                 }
                 return Ok(3);
             }
-            let mut unreadable: Vec<String> = Vec::new();
-            match std::fs::read_dir(&vdir) {
-                Err(e) => {
-                    if a.has("json") {
-                        crate::say_line!(
-                            "{{\"ok\":false,\"reason\":{}}}",
-                            jstr(&format!("保险箱目录读不到：{e}"))
-                        );
-                    } else {
-                        crate::say_line!("FAIL 保险箱目录读不到：{e}");
-                    }
-                    return Ok(6);
+            // 目录读不到要立刻报，不能退化成"0 条"。
+            if let Err(e) = std::fs::read_dir(&vdir) {
+                if a.has("json") {
+                    crate::say_line!(
+                        "{{\"ok\":false,\"reason\":{}}}",
+                        jstr(&format!("保险箱目录读不到：{e}"))
+                    );
+                } else {
+                    crate::say_line!("FAIL 保险箱目录读不到：{e}");
                 }
-                Ok(rd) => {
-                    let mut on_disk: Vec<String> = rd
-                        .flatten()
-                        .filter(|e| e.path().is_file())
-                        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                        .filter(|n| !n.starts_with('.'))
-                        .collect();
-                    on_disk.sort();
-                    let known: std::collections::HashSet<String> =
-                        list_entries(&root).iter().map(|e| entry_name(&e.ident)).collect();
-                    for n in on_disk {
-                        if !known.contains(&n) {
-                            // 解不开、或者解出来但没有标识。两种都属于"这个文件
-                            // 里的凭据现在拿不到了"，必须报出来。
-                            unreadable.push(n);
-                        }
-                    }
-                }
+                return Ok(6);
             }
-            let entries = list_entries(&root);
-            let mut bad = unreadable.len();
+            // 用 scan_vault，不用 list_entries。
+            //
+            // 这一条曾经是错的：上面费了力气把磁盘文件和"列表里的条目"对账，
+            // 但对账用的那个列表自己就会把坏文件静默跳过。自己拿一个会藏问题
+            // 的清单去查问题，结构上就不可能查出问题——坏文件不在列表里，于是
+            // 一个也报不出来。
+            //
+            // scan_vault 把读得出的和读不出的一起交出来，好文件和坏文件都在
+            // 视野里，才算真的查过。
+            let (entries, broken) = crate::vault::scan_vault(&root);
+            let mut bad = broken.len();
+            let mut unverified = 0usize;
             let mut rows: Vec<String> = Vec::new();
-            for n in &unreadable {
+            for (n, why) in &broken {
                 if a.has("json") {
                     rows.push(format!(
                         "{{\"file\":{},\"ok\":false,\"bytes\":0,\"reason\":{}}}",
                         jstr(n),
-                        jstr("文件存在但解不出条目：种子不对、内容损坏或名字不合规")
+                        jstr(why)
                     ));
                 } else {
-                    crate::say_line!(
-                        "FAIL {n} 文件存在但解不出条目（种子不对、内容损坏或名字不合规）"
-                    );
+                    crate::say_line!("FAIL {n} 文件存在但解不出条目（{why}）");
                 }
             }
             for e in &entries {
@@ -259,14 +247,32 @@ pub fn run(a: &Args) -> R<i32> {
                         }
                         if a.has("json") {
                             rows.push(format!(
-                                "{{\"ident\":{},\"ok\":{},\"bytes\":{},\"reason\":{}}}",
+                                "{{\"ident\":{},\"ok\":{},\"bytes\":{},\"verified\":{},\"reason\":{}}}",
                                 jstr(&e.ident),
                                 ok,
                                 full.body.len(),
+                                full.verified,
                                 jstr(&why)
                             ));
                         } else if !ok {
                             crate::say_line!("FAIL {} {why}", e.ident);
+                        } else if !full.verified {
+                            // 解得出，但没有校验码。这**不等于通过**。
+                            //
+                            // 旧格式条目就是这样：内容照样能解出来，可它从没
+                            // 写过校验码，所以谁也回答不了"这份密文有没有被改
+                            // 过"。原来 verify 对它一律报 PASS，等于把"无从
+                            // 校验"说成了"校验通过"。它不是失败，但必须被看见，
+                            // 所以单独成一档。
+                            unverified += 1;
+                            if !a.has("quiet") {
+                                crate::say_line!(
+                                    "WARN {}  ({}B) 无校验码，能读但无法证明未被改动；\
+                                     重新 vault put 同标识可升级为带校验的格式",
+                                    e.ident,
+                                    full.body.len()
+                                );
+                            }
                         } else if !a.has("quiet") {
                             crate::say_line!("PASS {}  ({}B)", e.ident, full.body.len());
                         }
@@ -287,18 +293,36 @@ pub fn run(a: &Args) -> R<i32> {
             }
             if a.has("json") {
                 crate::say_line!(
-                    "{{\"total\":{},\"bad\":{bad},\"ok\":{},\"entries\":[{}]}}",
-                    entries.len(),
-                    bad == 0,
+                    "{{\"total\":{},\"bad\":{bad},\"unverified\":{unverified},\"ok\":{},\"entries\":[{}]}}",
+                    entries.len() + broken.len(),
+                    bad == 0 && unverified == 0,
                     rows.join(",")
                 );
             } else {
                 // 分母要算上解不出来的文件，否则"自检 2 条"会让人以为库里就
                 // 只有 2 份凭据——磁盘上明明是 3 份，第 3 份才是要查的那个。
-                let total = entries.len() + unreadable.len();
-                crate::say_line!("自检 {} 条，失败 {} 条", total, bad);
+                let total = entries.len() + broken.len();
+                if unverified > 0 {
+                    crate::say_line!(
+                        "自检 {} 条，失败 {} 条，{} 条无校验码（能读，但无法证明未被改动）",
+                        total,
+                        bad,
+                        unverified
+                    );
+                } else {
+                    crate::say_line!("自检 {} 条，失败 {} 条", total, bad);
+                }
             }
-            Ok(if bad > 0 { 5 } else { 0 })
+            // 无校验码不算失败——那些条目本来就在，把它们算成错误只会让人
+            // 以为库坏了。但整库都无从校验时，退出码要体现"这次自检没证明
+            // 任何事"，否则脚本会把它当成绿灯。
+            Ok(if bad > 0 {
+                5
+            } else if unverified > 0 && entries.len() == unverified {
+                4
+            } else {
+                0
+            })
         }
         "names" => {
             let entries = list_entries(&root);
