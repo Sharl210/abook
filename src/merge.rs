@@ -64,10 +64,22 @@ pub fn diff(base: &str, other: &str) -> Vec<Hunk> {
             j += 1;
             continue;
         }
+        // 越界两枝的极性此前写反了，后果是死循环而不是错结果。
+        //
+        // `take_b` 为真走的是"i 前进、a[i] 从 base 删掉"那一支，为假走"j 前进、
+        // b[j] 插入"那一支。于是：
+        //   · a 用完时，剩下的只能是插入 → 必须前进 j → take_b 为假；
+        //     写成真会让 i 越界后继续自增，而 while 的条件含 `j < b.len()`，
+        //     j 始终不动 → 永远出不来。
+        //   · b 用完时，剩下的只能是删除 → 必须前进 i → take_b 为真。
+        //
+        // 触发条件很普通：任意一版在末尾多出一行（追加）就走这条路径，所以
+        // `append_and_edit_merge` 会挂死，而三个"两版行数相同"的用例都能通过——
+        // 死循环被用例规模掩盖了整整一段时间。
         let take_b = if i >= a.len() {
-            true
-        } else if j >= b.len() {
             false
+        } else if j >= b.len() {
+            true
         } else {
             t[i + 1][j] >= t[i][j + 1]
         };

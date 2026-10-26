@@ -703,63 +703,6 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     let bf = BookFile::load(&p)?;
     let routes = bf.routes();
     let q = a.pos.first().cloned().unwrap_or_default();
-    if a.has("json") {
-        // Routes carry the full-width ｜ separator because a half-width one
-        // appears inside route values (AB2V1|nonce|tag); the split already
-        // honours that, so JSON just re-emits the three real fields.
-        // `--limit` used to be applied *before* paging and defaulted to 40, so
-        // `index --json --page 2 --per-page 10` sliced a 40-row set and came
-        // back empty forever. `page_json` applies the cap first and pages the
-        // capped set, the only order that keeps both flags meaningful. The 40
-        // default is gone as well: an unpaged machine-readable inventory that
-        // silently stops at 40 rows is the same lie as ignoring the flag.
-        let items: Vec<String> = routes
-            .iter()
-            .filter(|(path, summary, when)| {
-                q.is_empty()
-                    || ci_contains(path, &q)
-                    || ci_contains(summary, &q)
-                    || ci_contains(when, &q)
-            })
-            .map(|(path, summary, when)| {
-                format!(
-                    "{{\"path\":{},\"summary\":{},\"read_when\":{}}}",
-                    jstr(path),
-                    jstr(summary),
-                    jstr(when)
-                )
-            })
-            .collect();
-        // 凭据与路由并列,而不是要求调用方"顺便再跑一次 vault ls"。
-        // 索引的用途是让调用方一眼看到"库里有什么、因此可以怎么approach";
-        // 只列知识分支不列凭据,等于把"能用什么去访问外部系统"这个维度藏起来,
-        // 调用方会退化成只查知识、想不起还有 token 可用。
-        let creds = credential_index(&root);
-        let cjson: Vec<String> = creds
-            .iter()
-            .filter(|(id, purpose)| q.is_empty() || ci_contains(id, &q) || ci_contains(purpose, &q))
-            .map(|(id, purpose)| {
-                format!("{{\"ident\":{},\"purpose\":{},\"fetch\":{}}}", jstr(id), jstr(purpose), jstr(&format!("abook vault get {id}")))
-            })
-            .collect();
-        let matched_n = items.len();
-        let (shown, pg) = crate::paging::page_json(a, items);
-        // Count real items; counting occurrences of a substring in the emitted
-        // text would break the moment a path itself contains that substring.
-        let shown_n = shown.len();
-        let body = shown.join(",");
-        println!(
-            "{{\"routes\":{},\"matched\":{matched_n},\"shown\":{shown_n},{pg},\"credentials\":[{}],\"items\":[{body}]}}",
-            routes.len(),
-            cjson.join(",")
-        );
-        return Ok(0);
-    }
-    // 先把每条路由的元信息算出来。分支走 Atlas 聚合（条目数/体积/行数/最近活跃），
-    // 记录级路由直接指向单个文件。
-    //
-    // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
-    // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
     // 只 stat + 数行，不走 `load_lib`。
     //
     // 这里的差别不是微调：`load_lib` 会把每条记录解析成结构体并克隆几份，965 条
@@ -837,6 +780,102 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         }
     }
 
+    if a.has("json") {
+        // Routes carry the full-width ｜ separator because a half-width one
+        // appears inside route values (AB2V1|nonce|tag); the split already
+        // honours that, so JSON just re-emits the three real fields.
+        // `--limit` used to be applied *before* paging and defaulted to 40, so
+        // `index --json --page 2 --per-page 10` sliced a 40-row set and came
+        // back empty forever. `page_json` applies the cap first and pages the
+        // capped set, the only order that keeps both flags meaningful. The 40
+        // default is gone as well: an unpaged machine-readable inventory that
+        // silently stops at 40 rows is the same lie as ignoring the flag.
+        let items: Vec<String> = routes
+            .iter()
+            .filter(|(path, summary, when)| {
+                q.is_empty()
+                    || ci_contains(path, &q)
+                    || ci_contains(summary, &q)
+                    || ci_contains(when, &q)
+            })
+            .map(|(path, summary, when)| {
+                // `kind` 区分分支与记录级路由。
+                //
+                // 文本输出已经把两类分段打印了,但机器调用方拿到的是一层扁平
+                // 数组:读者看得见"这条是分支、那条是单条记录",JSON 调用方看不出
+                // 来,只能靠 path 里有没有 "/records/" 去猜——那是字符串形状的
+                // 巧合,不是契约。`status` 再分出 candidate,让"候选只可参考"这条
+                // 语义在机器侧同样成立。
+                let kind = if path.contains("/records/") {
+                    "record"
+                } else {
+                    "branch"
+                };
+                let status = if path.starts_with("candidate/") {
+                    "candidate"
+                } else if kind == "record" {
+                    "canonical"
+                } else {
+                    // 分支卡覆盖两个库（Index.md 的"正式 / 候选"列即计数），
+                    // 所以它不属于任何一侧；写 branch 会与 kind 重复且无信息。
+                    "both"
+                };
+                // 元信息与文本输出同一份数据:体积/行数/最近活跃/条目数。
+                // 文本读者看得见的东西,机器调用方也必须看得见——否则"要不要读"
+                // 这个判断在两侧的可用依据不同,机器侧只能盲取。
+                let bare = path.rsplit('/').next().unwrap_or(path).to_string();
+                let (by, ln, ts, cnt) = if kind == "record" {
+                    match rec_index.get(path).or_else(|| rec_index.get(&bare)) {
+                        Some((b, l, t)) => (*b, *l, *t, 1usize),
+                        None => (0, 0, 0, 0),
+                    }
+                } else {
+                    match branch_agg.get(path) {
+                        Some((n, b, l, t)) => (*b, *l, *t, *n),
+                        None => (0, 0, 0, 0),
+                    }
+                };
+                format!(
+                    "{{\"path\":{},\"kind\":{},\"status\":{},\"summary\":{},\"read_when\":{},\"count\":{cnt},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                    jstr(path),
+                    jstr(kind),
+                    jstr(status),
+                    jstr(summary),
+                    jstr(when),
+                    jstr(&crate::util::short_when(ts))
+                )
+            })
+            .collect();
+        // 凭据与路由并列,而不是要求调用方"顺便再跑一次 vault ls"。
+        // 索引的用途是让调用方一眼看到"库里有什么、因此可以怎么approach";
+        // 只列知识分支不列凭据,等于把"能用什么去访问外部系统"这个维度藏起来,
+        // 调用方会退化成只查知识、想不起还有 token 可用。
+        let creds = credential_index(&root);
+        let cjson: Vec<String> = creds
+            .iter()
+            .filter(|(id, purpose)| q.is_empty() || ci_contains(id, &q) || ci_contains(purpose, &q))
+            .map(|(id, purpose)| {
+                format!("{{\"ident\":{},\"purpose\":{},\"fetch\":{}}}", jstr(id), jstr(purpose), jstr(&format!("abook vault get {id}")))
+            })
+            .collect();
+        let matched_n = items.len();
+        let (shown, pg) = crate::paging::page_json(a, items);
+        // Count real items; counting occurrences of a substring in the emitted
+        // text would break the moment a path itself contains that substring.
+        let shown_n = shown.len();
+        let body = shown.join(",");
+        println!(
+            "{{\"routes\":{},\"matched\":{matched_n},\"shown\":{shown_n},{pg},\"credentials\":[{}],\"items\":[{body}]}}",
+            routes.len(),
+            cjson.join(",")
+        );
+        return Ok(0);
+    }
+    // 先把每条路由的元信息算出来。分支走 Atlas 聚合（条目数/体积/行数/最近活跃），
+    // 记录级路由直接指向单个文件。
+    //
+    // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
+    // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
     let is_record = |path: &str| path.contains("/records/") || path.ends_with(".md");
     let (mut br_rows, mut rec_rows): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for (path, summary, when) in &routes {
@@ -876,23 +915,48 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     }
 
     println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", routes.len(), branch_agg.len(), rec_rows.len());
+    if !br_rows.is_empty() {
+        println!();
+        println!("【知识分支】时间 / 体积 / 行数 / 条目数 —— 聚合值，据此判断该不该进去翻");
+    }
     let lim = a.num("limit").unwrap_or(40) as usize;
     let cut_b = br_rows.len().min(lim);
-    let cut_r = rec_rows.len().min(lim);
     // `--limit` 先截再分页,两条 flag 各自独立,与其余 list 命令一致。
-    let mut merged: Vec<String> = Vec::new();
-    merged.extend(br_rows[..cut_b].iter().cloned());
-    merged.extend(rec_rows[..cut_r].iter().cloned());
-    let (shown_rows, footer) = crate::paging::page_rows(a, merged);
+    let (shown_rows, footer) = crate::paging::page_rows(a, br_rows[..cut_b].to_vec());
     for r in &shown_rows {
         println!("{r}");
     }
-    let hidden = (br_rows.len() - cut_b) + (rec_rows.len() - cut_r);
-    if hidden > 0 {
-        println!("  …（另有 {hidden} 条，用 --limit 扩大）");
+    if cut_b < br_rows.len() {
+        println!("  …（另有 {} 条，用 --limit 扩大）", br_rows.len() - cut_b);
     }
     if !footer.is_empty() {
         println!("{footer}");
+    }
+
+    // 未晋升候选单独成段,并明确标注它的证据地位。
+    //
+    // 它们与正式记录并列在 Index.md 里,但两者的可用性完全不同:正式库是已闭合
+    // 并经用户批准的结论,候选是"可能还有矛盾、还没验证完"的材料。混在一张表里
+    // 打印,读者会把候选当成同等可靠的依据——而它只应当用来指方向、不应当当结论。
+    // 但也不能不列:不列就等于让模型完全看不见手上还有什么线索。
+    if !rec_rows.is_empty() {
+        println!();
+        println!(
+            "【未晋升候选】{} 条 —— 仅作参考：可能仍有矛盾或未验证，不可当结论，",
+            rec_rows.len()
+        );
+        println!("确认要用须先读正文核对，或等它升为正式库");
+        let cut_r = rec_rows.len().min(lim);
+        let (shown_c, footer_c) = crate::paging::page_rows(a, rec_rows[..cut_r].to_vec());
+        for r in &shown_c {
+            println!("{r}");
+        }
+        if cut_r < rec_rows.len() {
+            println!("  …（另有 {} 条，用 --limit 扩大）", rec_rows.len() - cut_r);
+        }
+        if !footer_c.is_empty() {
+            println!("{footer_c}");
+        }
     }
 
     // 凭据段:只给标识与用途,永不打印值。
@@ -904,10 +968,10 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     let creds = credential_index(&root);
     println!();
     if creds.is_empty() {
-        println!("凭据  0 条（保险箱中无可读条目）");
+        println!("【凭据】0 条（保险箱中无可读条目）");
     } else {
         println!(
-            "凭据  {} 条（只有标识与用途，取值用 abook vault get <标识>）",
+            "【凭据】{} 条 —— 只有标识与用途，取值用 abook vault get <标识>",
             creds.len()
         );
         for (id, purpose) in &creds {
