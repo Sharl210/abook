@@ -203,6 +203,43 @@ pub fn cmd_set(a: &Args) -> R<i32> {
     if canon.is_empty() {
         return usage(format!("字段名不合法: {field}"));
     }
+    // `set` is the generic escape hatch, so it has to know the few fields whose
+    // change is not a plain text edit. Letting it write them created states no
+    // other command can produce or repair:
+    //
+    //   set R ID <随便写>      -> ID 与文件名分叉，所有指向它的引用一起断
+    //   set R FORMAT BOGUS     -> 写入一个解析器不认识的格式
+    //   set R STATUS DELETED   -> 记录留在图里，目录数与地图数分叉
+    //
+    // 状态迁移有完整的同步路径（delete / restore），身份字段有它自己的规则，
+    // 所以这三类不走 `set`。
+    match canon.as_str() {
+        "ID" => {
+            return usage(
+                "ID 是身份字段，不能用 set 改。\
+它同时是文件名、其它记录 READ_WHEN 的指向目标和地图条目的键，改它会让这些引用一起失效。\
+要改身份请用 abook rename（连文件名一起对齐）。",
+            )
+        }
+        "STATUS" => {
+            return usage(
+                "STATUS 请用 delete / restore 改。\
+     它们还会同步地图、目录计数和路由索引；直接 set 会让记录留在图里但目录数变少，\
+     也就是 state 报「一致性 发现 1 个问题」的那种状态。",
+            )
+        }
+        "FORMAT" => {
+            let ok = value == "CANONICAL_MEMORY_V2"
+                || value == "CANDIDATE_MEMORY_V2"
+                || value == "AGENTSBOOK_V2_EXPERIMENT";
+            if !ok {
+                return usage(format!(
+                    "FORMAT 只接受 CANONICAL_MEMORY_V2 / CANDIDATE_MEMORY_V2 / AGENTSBOOK_V2_EXPERIMENT，收到 {value}"
+                ));
+            }
+        }
+        _ => {}
+    }
     rec.set(&canon, &value);
     let wrote = save(&root, &mut rec, a, "set-field")?;
     if !a.has("dry-run") {
@@ -223,22 +260,55 @@ pub fn cmd_unset(a: &Args) -> R<i32> {
     guard(a, lib, "修改")?;
     let mut rec = Record::parse(&path, lib)?;
     let (canon, _) = crate::parse::canon_key(&field);
+    let had = rec.fields.iter().any(|(k, _)| k == &canon);
     rec.fields.retain(|(k, _)| k != &canon);
-    save(&root, &mut rec, a, "unset-field")?;
-    crate::say_line!("已移除 {canon}");
+    let changed = save(&root, &mut rec, a, "unset-field")?;
+    // Only claim to have removed something when the removal actually happened.
+    // A dry run used to print "已移除 X" and write nothing; a field that was
+    // never there printed the same line. Both make the caller believe the file
+    // changed when it did not.
+    if a.has("dry-run") {
+        crate::say_line!(
+            "[dry-run] {} {}",
+            if had { "将移除" } else { "无此字段" },
+            canon
+        );
+    } else if changed {
+        crate::say_line!("已移除 {canon}");
+    } else {
+        crate::say_line!("没有 {} 这个字段，未写入", canon);
+    }
     Ok(0)
 }
 
 fn read_payload(a: &Args) -> R<String> {
     if let Some(f) = a.get("file") {
+        if f == "-" {
+            return read_stdin_all();
+        }
         return read_str(&expand_tilde(f));
     }
+    // `-` means stdin, the way every other unix tool spells it.
+    //
+    // Without this, `abook update R --body -` wrote the single character `-` as
+    // the whole body and returned 0: a heredoc is the normal way for an agent to
+    // hand over a long text, so this quietly emptied records.
     if let Some(t) = a.get("text") {
+        if t == "-" {
+            return read_stdin_all();
+        }
         return Ok(t.to_string());
     }
     if let Some(b) = a.get("body") {
+        if b == "-" {
+            return read_stdin_all();
+        }
         return Ok(b.to_string());
     }
+    read_stdin_all()
+}
+
+pub fn read_stdin_all() -> R<String> {
     let mut s = String::new();
     use std::io::Read;
     std::io::stdin().read_to_string(&mut s)?;
@@ -297,6 +367,14 @@ pub fn cmd_patch(a: &Args) -> R<i32> {
     let (path, lib) = resolve_record(&root, sel)?;
     guard(a, lib, "替换")?;
     let old = a.get("old").ok_or_else(|| EE::Usage("缺 --old".into()))?.to_string();
+    // An empty needle is not "replace nothing", it is "match at every position".
+    // `--old "$VAR"` with an unset VAR reached this line and, with `--all`, spliced
+    // the replacement between every character of the body -- the record was
+    // destroyed while the command reported success. Refusing is the only safe
+    // reading of an empty needle.
+    if old.is_empty() {
+        return usage("--old 不能为空（空串会在每个字符之间插入替换内容，把正文毁掉）");
+    }
     let new = a.get("new").unwrap_or("").to_string();
     let mut rec = Record::parse(&path, lib)?;
     // `--field F` means "the field named F". Reading it only when `--in field`
@@ -409,6 +487,26 @@ pub fn cmd_move(a: &Args) -> R<i32> {
     let branch = a.need_pos(1, "目标分支")?;
     let (path, lib) = resolve_record(&root, sel)?;
     guard(a, lib, "换分支")?;
+    // Refuse a branch name that does not exist yet.
+    //
+    // `move` used to create whatever branch it was told to, so a typo did not
+    // fail -- it silently fragmented the map into a new one-record branch, and
+    // the record's real branch kept its old count. Creating a branch is a
+    // decision, so it gets its own command (`branch add`) rather than happening
+    // as a side effect of a misspelled move.
+    let apath = root.join(lib.atlas());
+    if apath.exists() {
+        let at = crate::atlas::Atlas::load(&apath)?;
+        if at.branch(branch).is_none() {
+            let names: Vec<String> = at.branches.iter().map(|b| b.name()).collect();
+            return notfound(format!(
+                "分支「{branch}」不存在。现有分支：{}\n新建分支请用 abook branch add \"{branch}\"",
+                names.join("、")
+            ));
+        }
+    }
+    let target = branch.to_string();
+    let branch = target.as_str();
     if a.has("dry-run") {
         crate::say_line!("[dry-run] 把 {} 移到分支 {branch}", rel(&root, &path));
         return Ok(0);

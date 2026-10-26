@@ -40,7 +40,12 @@ __pycache__/
 # 这个仓库公开后只承担一件事：跑 Actions 出二进制。构建只需要 src/ 与
 # 三个构建文件，其余都留在本地。用 ignore 而不是「记得别 add」，因为
 # 靠记性守的那条线总会有一次 `git add -A` 撞上去。
-/docs/
+# 文档进仓库，其余仍留在本地。维护文档是给要改这个工具的人看的，
+# 它和二进制一起发出去才有意义——只放在我这台机器上，下一个人接手时
+# 就得从零重新发现"地图有两种布局""计数有四份"这些坑。
+/docs/*
+!/docs/MAINTENANCE.md
+!/docs/DOWNLOADS.md
 /tools/
 /Plan_Mode_Books/
 /.agents/

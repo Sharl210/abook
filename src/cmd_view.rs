@@ -132,7 +132,16 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                 crate::util::short_when(rec.created()).chars().count(),
                 crate::util::short_when(rec.created())
             );
+            // Skip the stored UPDATED/CREATED rows: they were already printed
+            // above from the same source. Printing both made one field appear
+            // twice with different lengths (11 versus 40 characters), so a caller
+            // scraping this output could not tell which value was authoritative.
+            // A record that has no stored field still gets the row from the two
+            // pseudo-lines above, which is why those exist.
             for (k, v) in &rec.fields {
+                if k == "UPDATED" || k == "CREATED" {
+                    continue;
+                }
                 println!("{k}\t{}\t{}", v.chars().count(), truncate_chars(v, 60));
             }
             for (k, v) in rec.promo_fields() {

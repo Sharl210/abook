@@ -1288,6 +1288,10 @@ pub const WRITE_COMMANDS: &[&str] = &[
     "write", "copy", "merge", "split", "update", "append", "prepend", "patch", "set", "unset",
     "rename", "move", "delete", "restore", "promote", "demote", "commit", "refresh", "recount",
     "repair", "normalize", "sync", "leftover", "init", "attach", "vault",
+    // These three rewrite the map or the records too. Leaving them out meant
+    // `branch add`, `doctor --fix` and `refs --fix` wrote with no lock at all --
+    // exactly the hole that let two concurrent writers lose one of two updates.
+    "branch", "doctor", "refs",
 ];
 
 /// True when this command may modify files under the library root.
@@ -1341,7 +1345,20 @@ impl LibLock {
                             .nth(1)
                             .and_then(|s| s.parse::<u64>().ok())
                             .unwrap_or(0);
-                        if started > 0 && (now_secs() as u64).saturating_sub(started) > STALE_LOCK_SECS {
+                        // Age alone is not proof of death: a genuinely long
+                        // write looked identical to a crash, so a 10-minute
+                        // import could have its lock stolen mid-write. Check
+                        // whether the holder still exists, and only fall back to
+                        // age when the pid is unreadable.
+                        let pid = txt
+                            .split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let aged = started > 0
+                            && (now_secs() as u64).saturating_sub(started) > STALE_LOCK_SECS;
+                        let dead = pid > 0 && !pid_alive(pid);
+                        if aged && dead {
                             let _ = std::fs::remove_file(&path);
                             continue;
                         }
@@ -1360,6 +1377,19 @@ impl LibLock {
             }
         }
     }
+}
+
+/// True when `pid` is a live process.
+///
+/// `/proc/<pid>` exists on Linux and WSL2; elsewhere the check is skipped and the
+/// caller falls back to age alone. Written without external crates on purpose:
+/// the tool is one static binary by design.
+fn pid_alive(pid: u32) -> bool {
+    let probe = std::path::Path::new("/proc").join(pid.to_string());
+    if !std::path::Path::new("/proc").exists() {
+        return true; // Cannot tell; assume alive rather than steal a live lock.
+    }
+    probe.exists()
 }
 
 impl Drop for LibLock {

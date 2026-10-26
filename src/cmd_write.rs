@@ -545,11 +545,24 @@ pub fn cmd_update(a: &Args) -> R<i32> {
         rec.set(key, &val);
         changed.push(key.to_string());
     }
+    // `-` means stdin. Without this, `update R --body -` wrote the single
+    // character `-` as the whole body and returned 0 -- and a heredoc is the
+    // normal way an agent hands over a long text, so records were quietly emptied.
     if let Some(bf) = a.get("body-file") {
-        rec.body = read_str(&expand_tilde(bf))?.trim_end().to_string();
+        let text = if bf == "-" {
+            crate::cmd_edit::read_stdin_all()?
+        } else {
+            read_str(&expand_tilde(bf))?
+        };
+        rec.body = text.trim_end().to_string();
         changed.push("BODY".into());
     } else if let Some(b) = a.get("body") {
-        rec.body = b.trim_end().to_string();
+        let text: String = if b == "-" {
+            crate::cmd_edit::read_stdin_all()?
+        } else {
+            b.to_string()
+        };
+        rec.body = text.trim_end().to_string();
         changed.push("BODY".into());
     }
     if changed.is_empty() {
@@ -589,35 +602,21 @@ pub fn cmd_update(a: &Args) -> R<i32> {
     if let Some(want) = a.get("if-version") {
         require_version(&path, want)?;
     }
-    write_atomic(&path, &rec.render())?;
-    let back = Record::parse(&path, lib)?;
-    if back.get("TITLE").is_empty() {
-        return integrity("修改后复读校验失败");
+    // Everything below used to be hand-rolled and disagreed with every other
+    // edit command in four ways: it did not stamp UPDATED, it wrote a commit even
+    // when the value was unchanged (the phantom commit `save()` exists to
+    // prevent), it labelled candidates as CANONICAL in the commit, and it did not
+    // recompute SUMMARY/SIZE after replacing the body -- so a record whose body
+    // was completely replaced still advertised the old summary, and no command
+    // could recompute it afterwards.
+    //
+    // `save()` already does all of that and is the one path every other edit
+    // funnels through, so route through it instead of keeping a second opinion.
+    let changed_flag = crate::cmd_edit::save(&root, &mut rec, a, "update-record")?;
+    if !changed_flag {
+        crate::say_line!("与现值相同，未写入");
+        return Ok(0);
     }
-    crate::cmd_admin::index_upsert(
-        &root,
-        &rel(&root, &path),
-        &back.title(),
-        &back.get("READ_WHEN"),
-    )?;
-    let body = format!(
-        "修改记录 {}\n\n字段: {}\n标题: {}",
-        rel(&root, &path),
-        changed.join(","),
-        back.title()
-    );
-    crate::cmd_admin::write_commit(
-        &root,
-        &crate::cmd_admin::CommitInfo {
-            slug: "update-record",
-            scope: "仅改写 1 条记录，头部与地图按需同步",
-            operation: "PATCH",
-            library: "CANONICAL",
-            summary: &format!("改写记录 {sel}"),
-            target: "canonical/records",
-            body: &body,
-        },
-    )?;
     crate::say_line!("{}", rel(&root, &path));
     Ok(0)
 }
@@ -627,12 +626,21 @@ pub fn cmd_delete(a: &Args) -> R<i32> {
     let sel = a.need_pos(0, "记录（路径 / 文件名 / ID）")?;
     let (path, lib) = resolve_record(&root, sel)?;
     let rec = Record::parse(&path, lib)?;
+    // A dry run writes nothing, so it must not need approval. It used to, which
+    // made previewing a delete *more* gated than performing one -- the caller
+    // could not see what would happen without first authorising it, so the
+    // approval was given blind.
+    if a.has("dry-run") {
+        crate::say_line!(
+            "[dry-run] 将删除 {}（{}，{}）",
+            rel(&root, &path),
+            rec.title(),
+            if a.has("hard") { "物理删除，不可恢复" } else { "标记删除，可 restore 撤销" }
+        );
+        return Ok(0);
+    }
     if !a.has("approve") {
         return blocked("删除需要用户明确批准：确认后加 --approve。不带 --hard 时可恢复。");
-    }
-    if a.has("dry-run") {
-        crate::say_line!("[dry-run] 将删除 {}", rel(&root, &path));
-        return Ok(0);
     }
     if a.has("hard") {
         std::fs::remove_file(&path)?;
