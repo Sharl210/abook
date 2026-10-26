@@ -553,7 +553,11 @@ pub fn cmd_copy(a: &Args) -> R<i32> {
         },
     );
     let dir = root.join(target_lib.dir());
-    ensure_dir(&dir)?;
+    // 预览不建目标库目录（同 write/promote）：后面 561 行会走 save 的
+    // dry-run 分支返回，真正写入时才需要目录存在。
+    if !a.has("dry-run") {
+        ensure_dir(&dir)?;
+    }
     let dst = dir.join(format!("{id}.md"));
     rec.path = dst.clone();
     rec.lib = target_lib;
@@ -585,7 +589,9 @@ pub fn cmd_demote(a: &Args) -> R<i32> {
         &format!("从正式记录退回: {}", rec.file_name()),
     );
     let dir = root.join(Lib::Candidate.dir());
-    ensure_dir(&dir)?;
+    if !a.has("dry-run") {
+        ensure_dir(&dir)?;
+    }
     let dst = dir.join(format!("{id}.md"));
     rec.path = dst.clone();
     rec.lib = Lib::Candidate;
@@ -685,7 +691,9 @@ pub fn cmd_merge(a: &Args) -> R<i32> {
         "SOURCE",
         &format!("merge: {}", recs.iter().map(|(_, _, r)| r.file_name()).collect::<Vec<_>>().join(" + ")),
     );
-    ensure_dir(&root.join(lib.dir()))?;
+    if !a.has("dry-run") {
+        ensure_dir(&root.join(lib.dir()))?;
+    }
     save(&root, &mut out, a, "merge-records")?;
     if !a.has("dry-run") {
         crate::say_line!("{}", rel(&root, &out.path));

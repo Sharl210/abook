@@ -234,7 +234,21 @@ fn sync_global_counts(root: &Path) -> R<()> {
 
 pub fn cmd_write(a: &Args) -> R<i32> {
     let root = resolve_root(a);
-    crate::cmd_admin::init_book(&root)?;
+    // 预览不能在空库上把整个库骨架建出来。
+    //
+    // `init_book` 会创建 canonical/records、candidate/records、commits、review、
+    // staging、vault 六个目录，以及 Global.md、Index.md、两张 Atlas.md 和一条
+    // 保险箱名册——十来个文件。原来这一句在 `--dry-run` 判断之前，于是对一个
+    // 空目录跑一次"只看看会写成什么样"，就凭空造出一个完整的记忆库。
+    //
+    // 而且 `main` 见到 `--dry-run` 会跳过库锁，所以这些写入还是在无锁状态下
+    // 发生的。一个预览命令既造了库又绕了锁，两件事都很糟。
+    //
+    // 预览时不初始化：下面的代码本来就会因为目标目录不存在而在 dry-run 分支
+    // 直接返回，不需要库骨架先存在。
+    if !a.has("dry-run") {
+        crate::cmd_admin::init_book(&root)?;
+    }
     let target = a.get("lib").unwrap_or("candidate");
     let lib = if target.starts_with('c') && !target.starts_with("cand") {
         Lib::Canonical
@@ -249,7 +263,13 @@ pub fn cmd_write(a: &Args) -> R<i32> {
     }
     let mut rec = build_record(a, lib)?;
     let dir = root.join(lib.dir());
-    ensure_dir(&dir)?;
+    // 预览时连目录都不建。`ensure_dir` 会创建 `candidate/`、`canonical/`
+    // 这类目录，对一个空目录跑一次预览就留下一个空壳库，之后 `state` 会说
+    // "候选库 0 条记录"——看起来像库坏了，其实是上次预览留下的。
+    // 真正写入时下面还会再建一次，所以跳过这里是安全的。
+    if !a.has("dry-run") {
+        ensure_dir(&dir)?;
+    }
     let fname = format!("{}.md", rec.id());
     let path = dir.join(&fname);
     rec.path = path.clone();
@@ -394,7 +414,11 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
     canon.set("RELATED_IDS", &related);
 
     let dir = root.join(Lib::Canonical.dir());
-    ensure_dir(&dir)?;
+    // 同 write：预览不建目标库目录。promote 带 --dry-run 时下面 423 行就返回了，
+    // 真正写入时才需要这个目录存在。
+    if !a.has("dry-run") {
+        ensure_dir(&dir)?;
+    }
     let path = dir.join(format!("{id}.md"));
     canon.path = path.clone();
     if path.exists() && !a.has("force") {

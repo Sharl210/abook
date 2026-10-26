@@ -321,7 +321,11 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 return usage(format!("{} 还不存在，先 `abook skill new {}`", dir.display(), name));
             }
             let cdir = dir.join("candidates");
-            ensure_dir(&cdir)?;
+            // 预览不建目录：对还没建过候选的 Skill 跑一次 `skill candidate
+            // --dry-run`，原来会留下一个空的 `candidates/` 目录。
+            if !a.has("dry-run") {
+                ensure_dir(&cdir)?;
+            }
             let st = stamps();
             let slug = slugify(&title);
             // 候选文件名不能只靠秒级时间戳 + slug 定。
@@ -531,7 +535,7 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                     problems.push(format!("行{ln}: 绝对路径（Skill 须自带依赖）: {}", cut(t, 60)));
                 }
                 // 相对逃逸：`../` 会读到 Skill 目录之外，同样破坏自包含。
-                if t.contains("../") {
+                if has_relative_escape(t) {
                     problems.push(format!("行{ln}: 相对路径逃出 Skill 目录: {}", cut(t, 60)));
                 }
                 if t.contains("参见") || t.contains("见另一") || t.contains("依赖其它 Skill")
@@ -551,6 +555,23 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 {
                     problems.push(format!("行{ln}: 疑似记忆机制术语（Skill 须能独立工作）: {}", cut(t, 60)));
                 }
+                // 环境变量展开出来的路径，同样是"运行时依赖本机环境"。
+                //
+                // 原来的判据只看字面路径（`/` 或 `X:\` 开头），而
+                // `$HOME/.config/abook/settings.toml` 这种写法的第一个字符是
+                // `$`，斜杠前面紧挨着 `E` 之类字母，`boundary` 判据不成立，
+                // 于是一路走过去也不报警。`%LOCALAPPDATA%` 同理。
+                //
+                // 判据应该是"这个路径是不是由本机环境变量决定的"，而不是
+                // "它长得像不像一个路径"。凡是靠 `$VAR` / `%VAR%` / `${VAR}`
+                // 展开才能确定位置的，都破坏了 Skill 的可移植性——换台机器、
+                // 换个人用，路径就变了。
+                if has_env_path(t) {
+                    problems.push(format!(
+                        "行{ln}: 路径依赖本机环境变量（Skill 须自带依赖）: {}",
+                        cut(t, 60)
+                    ));
+                }
             }
             // 跨 Skill 引用：拿同级目录里真实存在的 Skill 名去比对，而不是只认
             // 几个我写死的短语。引用一个确实存在的兄弟 Skill 是最常见的越界方式。
@@ -560,12 +581,19 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                         .flatten()
                         .filter(|e| e.path().is_dir())
                         .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                        .filter(|s| s != &name && !s.starts_with('.'))
+                        // 排除自己。`design-patterns-advisor` 里出现 `design`
+                        // 是它自己名字的一部分，不是"引用了另一个 Skill"。
+                        // 名字互相包含在真实库里很常见（`design` / `design-tokens`
+                        // / `design-review` / `design-patterns-advisor`），不排除
+                        // 自己的话，每个这样命名的 Skill 都必然报一片。
+                        .filter(|s| {
+                            s != &name && !name.contains(s.as_str()) && !s.starts_with('.')
+                        })
                         .collect();
                     for (n, line) in txt.lines().enumerate() {
                         let t = line.trim();
                         for sib in &siblings {
-                            if t.contains(sib.as_str()) {
+                            if mentions_skill_ref(t, sib) {
                                 problems.push(format!(
                                     "行{}: 引用了另一个 Skill `{sib}`（Skill 之间不互相依赖）: {}",
                                     n + 1,
@@ -610,9 +638,16 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                             cut(t, 50)
                         ));
                     }
-                    if t.contains("../") {
+                    if has_relative_escape(t) {
                         problems.push(format!(
                             "{disp} 行{}: 相对路径逃出 Skill 目录: {}",
+                            n + 1,
+                            cut(t, 50)
+                        ));
+                    }
+                    if has_env_path(t) {
+                        problems.push(format!(
+                            "{disp} 行{}: 路径依赖本机环境变量（Skill 须自带依赖）: {}",
                             n + 1,
                             cut(t, 50)
                         ));
@@ -636,7 +671,11 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                                     continue;
                                 }
                                 let sib = e.file_name().to_string_lossy().to_string();
-                                if sib != name && !sib.starts_with('.') && t.contains(sib.as_str()) {
+                                if sib != name
+                                    && !name.contains(sib.as_str())
+                                    && !sib.starts_with('.')
+                                    && mentions_skill_ref(t, &sib)
+                                {
                                     problems.push(format!(
                                         "{disp} 行{}: 引用了另一个 Skill `{sib}`: {}",
                                         n + 1,
@@ -723,25 +762,263 @@ fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, 
     }
 }
 
+/// 这一行是不是真的在引用另一个 Skill（而不只是碰巧出现这几个字符）。
+///
+/// 光有整词边界还不够：真实库里 `design` 会在 `refactoringguru.cn/design-patterns/`
+/// 这种 URL 里、`.design/<slug>/` 这种目录约定里大量出现；`pro` 会在
+/// `professional`、`prompt` 里出现。这些都不是"引用另一个 Skill"。
+///
+/// 所以判据落在**引用的形态**上，而不是字符是否相邻：
+///   1. `xxx/SKILL.md`        目录引用，最明确
+///   2. `../xxx`              跳到兄弟目录（相对逃逸已单独报，这里也算引用）
+///   3. 反引号或引号包住的 `xxx`  显式点名
+///   4. 同一行提到 skill / 技能  在讲 Skill 的句子里点它的名
+///
+/// 四条之外一律不算。宁可漏掉偶发的隐式引用，也不要把整库文档链接标红——
+/// 一份 18668 条的报告没人会读，那等于没有这个检查。
+fn mentions_skill_ref(line: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if line.contains(&format!("{name}/SKILL.md")) {
+        return true;
+    }
+    if line.contains(&format!("../{name}")) {
+        return true;
+    }
+    for q in ['`', '"', '\''] {
+        if line.contains(&format!("{q}{name}{q}")) {
+            return true;
+        }
+    }
+    let lower = line.to_lowercase();
+    let talks_skill = lower.contains("skill") || line.contains("技能");
+    if talks_skill && mentions_name(line, name) {
+        return true;
+    }
+    false
+}
+
+/// 这一行是不是真的提到了另一个 Skill 的名字。
+///
+/// 原来是 `t.contains(sib)`，纯子串匹配。真实库里有一批极短的 Skill 名：
+/// `pro`、`yes`、`dist`。于是 `professional`、`prompt`、`process`、
+/// `distribute`、`yes/no` 全被判成"引用了另一个 Skill"——`design-patterns-advisor`
+/// 一个文件就报了 1211 处，几乎全是普通英文单词。
+///
+/// 名字越短越容易撞，所以判据要从"出现过这几个字符"变成"作为一个词出现过"：
+/// 前后都不能紧邻字母、数字、下划线。Skill 名本身可以含连字符
+/// （`lark-shared`），所以连字符只在**名字内部**算名字的一部分，出现在
+/// 名字两端时算边界。
+fn mentions_name(line: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let lb: Vec<char> = line.chars().collect();
+    let nb: Vec<char> = name.chars().collect();
+    if nb.len() > lb.len() {
+        return false;
+    }
+    let is_wordish = |c: char| c.is_alphanumeric() || c == '_';
+    for start in 0..=(lb.len() - nb.len()) {
+        if lb[start..start + nb.len()] != nb[..] {
+            continue;
+        }
+        let before_ok = start == 0 || !is_wordish(lb[start - 1]);
+        let end = start + nb.len();
+        let after_ok = end >= lb.len() || !is_wordish(lb[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 fn has_abs_path(t: &str) -> bool {
     let b: Vec<char> = t.chars().collect();
+    let at = |i: usize| b.get(i).copied().unwrap_or(' ');
+    // 这个位置是不是落在 URL 里。
+    //
+    // 判据：往前找到 `://` 就算 URL。`https://gsap.com/docs/v3` 里的两个斜杠
+    // 前面紧挨着 `:`，原来的边界判据把 `:` 也算成边界，于是**每一个 URL 都被
+    // 报成了"绝对路径"**——真实库 118 个 Skill 里有 116 个中招，这个检查等于
+    // 废掉：没人会去读一份把所有文档链接都标红的报告。
+    //
+    // 斜杠之间有空白、引号、括号就说明已经出了这个片段，不再往后找。
+    let in_url = |i: usize| -> bool {
+        let mut k = i;
+        while k > 0 {
+            k -= 1;
+            if b[k] == ':' && at(k + 1) == '/' && at(k + 2) == '/' {
+                return true;
+            }
+            if b[k].is_whitespace() || matches!(b[k], '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>')
+            {
+                return false;
+            }
+        }
+        false
+    };
+    // `/x` 只有一段，不是路径，是斜杠命令（`/pua`、`/graphify`、`/design-review`）
+    // 或除法。真正的绝对路径至少有 `/a/b` 两段。
+    //
+    // 不加这一条，所有 slash 命令都会被标成"绝对路径"。
+    let segments_from = |i: usize| -> usize {
+        let mut n = 0;
+        let mut j = i;
+        let mut in_seg = false;
+        while j < b.len() {
+            let c = b[j];
+            if c == '/' {
+                if in_seg {
+                    n += 1;
+                }
+                in_seg = false;
+            } else if c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | '`' | ',') {
+                break;
+            } else {
+                in_seg = true;
+            }
+            j += 1;
+        }
+        if in_seg {
+            n += 1;
+        }
+        n
+    };
     for i in 0..b.len() {
-        if b[i] == '/' && i > 0 {
-            let prev = b[i - 1];
-            let boundary = prev.is_whitespace()
-                || matches!(prev, '"' | '\'' | '(' | '[' | '=' | ':' | '`' | '>');
-            let nxt = b.get(i + 1).copied().unwrap_or(' ');
-            if boundary && nxt.is_alphabetic() {
+        if b[i] == '/' {
+            if in_url(i) {
+                continue;
+            }
+            // 行首的 `/` 也算绝对路径：多行文本里路径常独占一行，
+            // 原来 `i > 0` 直接把它排除了。
+            let boundary = if i == 0 {
+                true
+            } else {
+                let prev = b[i - 1];
+                prev.is_whitespace()
+                    || matches!(prev, '"' | '\'' | '(' | '[' | '=' | '`' | '>')
+            };
+            if boundary && at(i + 1).is_alphabetic() && segments_from(i) >= 2 {
                 return true;
             }
         }
         // 盘符：字母 + `:` + `\` 或 `/`
+        //
+        // 必须限定在**词首**。`https://` 里那个 `s:` 就是 `s` + `:` + `/`，
+        // 形态与盘符完全一样，于是每一个 https 链接都被判成 Windows 路径——
+        // 这是上一版最大的误报来源，比"斜杠命令"那条严重得多。
+        // 真正的盘符前面不会是字母数字（`C:\Users`、`(C:\`、`磁盘=C:\`）。
         if b[i].is_ascii_alphabetic()
-            && b.get(i + 1) == Some(&':')
-            && matches!(b.get(i + 2), Some('\\') | Some('/'))
+            && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+            && at(i + 1) == ':'
+            && matches!(at(i + 2), '\\' | '/')
         {
             return true;
         }
+    }
+    false
+}
+
+/// 这一行里有没有相对路径逃出 Skill 目录（`../`）。
+///
+/// 两种情况要排除：
+/// - `.../`：省略号后面跟斜杠，是"省略中间层级"的写法，不是上跳一级。
+/// - URL 里的 `../`：那是服务端路径，跟本地目录无关。
+fn has_relative_escape(t: &str) -> bool {
+    let b: Vec<char> = t.chars().collect();
+    let at = |i: usize| b.get(i).copied().unwrap_or(' ');
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == '.' && b[i + 1] == '.' && b[i + 2] == '/' {
+            let prev_is_dot = i > 0 && b[i - 1] == '.';
+            // URL 里：往前找 `://`
+            let mut k = i;
+            let mut in_url = false;
+            while k > 0 {
+                k -= 1;
+                if b[k] == ':' && at(k + 1) == '/' && at(k + 2) == '/' {
+                    in_url = true;
+                    break;
+                }
+                if b[k].is_whitespace() || matches!(b[k], '"' | '\'' | '(' | ')' | '[' | ']') {
+                    break;
+                }
+            }
+            if !prev_is_dot && !in_url {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 这一行里的路径是不是靠本机环境变量展开才能确定。
+///
+/// 认三种写法：`$VAR/...`、`${VAR}/...`、`%VAR%\...`。
+///
+/// 为什么这算越界：`$HOME/.config/x` 在哪台机器上指向哪儿，取决于那台机器的
+/// 环境。Skill 的全部内容应当随 Skill 一起交付、单独运行即可工作，凡是位置
+/// 由运行环境决定的引用，换台机器就断了，而交付者看不出来——他本机跑得好好的。
+///
+/// 判据刻意收窄到"变量后面紧跟路径分隔符"：单纯提一句 `$PATH` 或
+/// `export FOO=1` 是正常的 shell 说明，不是外部路径依赖，不该误伤。
+fn has_env_path(t: &str) -> bool {
+    let b: Vec<char> = t.chars().collect();
+    let at = |i: usize| b.get(i).copied().unwrap_or(' ');
+    let is_sep = |c: char| c == '/' || c == '\\';
+    let mut i = 0;
+    while i < b.len() {
+        // `~/` 与 `~\`：家目录相对路径。
+        //
+        // 它和 `$HOME/` 是同一件事的两种写法：位置取决于运行这个 Skill 的是谁。
+        // 原来完全没管，于是 `python3 ~/.claude/skills/design/scripts/cip/...`
+        // 一路走过去都不报警——而那正是最常见的"依赖本机既有目录"写法。
+        if b[i] == '~' && is_sep(at(i + 1)) {
+            return true;
+        }
+        // $VAR/ 与 ${VAR}/
+        if b[i] == '$' {
+            let mut j = i + 1;
+            if at(j) == '{' {
+                j += 1;
+                let start = j;
+                while at(j).is_alphanumeric() || at(j) == '_' {
+                    j += 1;
+                }
+                if j > start && at(j) == '}' && is_sep(at(j + 1)) {
+                    return true;
+                }
+            } else {
+                let start = j;
+                while at(j).is_alphanumeric() || at(j) == '_' {
+                    j += 1;
+                }
+                if j > start && is_sep(at(j)) {
+                    return true;
+                }
+            }
+        }
+        // %VAR% 形态单独出现也算。
+        //
+        // 与 `$VAR` 不同：Windows 里 `%…%` 包里装的基本都是路径类变量
+        // （LOCALAPPDATA、APPDATA、TEMP、USERPROFILE），而且这个写法在
+        // Skill 正文里出现，本身就是"照着本机环境去找东西"。
+        // shell 说明里不会用它表示普通变量，所以这里不必要求跟分隔符，
+        // 放宽了也不会误伤 `export FOO=1` 那类写法。
+        if b[i] == '%' {
+            let start = i + 1;
+            let mut j = start;
+            while at(j).is_alphanumeric() || at(j) == '_' {
+                j += 1;
+            }
+            if j > start && at(j) == '%' {
+                return true;
+            }
+        }
+        i += 1;
     }
     false
 }
@@ -796,4 +1073,21 @@ fn slugify(t: &str) -> String {
         out.truncate(40);
     }
     out
+}
+
+#[cfg(test)]
+mod lint_probe_tests {
+    #[test]
+    fn probe() {
+        let cases = [
+            ("- 原文链接：https://refactoringguru.cn/design-patterns/catalog", "URL"),
+            ("| f | [references/patterns/factory-method.md](./patterns/factory-method.md) | [x](https://refactoringguru.cn/design-patterns/factory-method) |", "MIX"),
+            ("python3 ~/.claude/skills/design/scripts/cip/generate.py", "HOME"),
+            ("ls -l /dev/kvm", "LOCAL"),
+            ("/pua", "SLASH-CMD"),
+        ];
+        for (s, tag) in cases {
+            println!("{tag}: abs={} env={} esc={}", super::has_abs_path(s), super::has_env_path(s), super::has_relative_escape(s));
+        }
+    }
 }

@@ -115,6 +115,11 @@ pub struct Files {
     pub dir: Option<PathBuf>,
     pub items: Vec<Item>,
     pub bytes: u64,
+    /// 扫描时发现的、上次复制中断留下的半截临时文件。
+    ///
+    /// 单独列出来而不是当场删掉：扫描本身必须只读（`attach list` 也会走这里），
+    /// 由显式写入路径调用 [`clean_stale_tmp`] 去清。
+    pub stale: Vec<PathBuf>,
 }
 
 impl Files {
@@ -179,12 +184,19 @@ pub fn scan(rec_path: &Path) -> Files {
             // 复制过程中断会留下 `.名字.tmp<pid>.<纳秒>` 这样的半截文件。
             // 它的存在说明那次复制没走到底（进程被 SIGKILL/SIGXFSZ 杀掉时
             // 清理代码根本没机会执行）。留在目录里会被当成一份完整附件统计，
-            // 而它其实不完整——这比没有更坏。所以这里识别出来直接删掉。
+            // 而它其实不完整——这比没有更坏。
             //
-            // 判据收得很窄：以 `.` 开头、含 `.tmp`、结尾是全数字，三者同时满足
-            // 才认。用户自己起名叫 `.tmp` 开头的正常附件不会误伤。
+            // **但这里只跳过，不删。** 一开始我在这个函数里直接 remove_file，
+            // 结果是 `attach list`、`attach get`、`attach sync`、`attach edit`、
+            // `attach commit` 这些**本该只读**的命令全都开始删文件——连
+            // `attach list --dry-run` 都会删。一个叫「列一下附件」的命令删掉了
+            // 磁盘上的东西，这比残留文件坏得多：残留文件看得见、可以自己清，
+            // 而被一个查询命令悄悄删掉的东西，没人会想到去查。
+            //
+            // 清理改由显式写入路径调用 [`clean_stale_tmp`]：那些命令本来就声明
+            // 了会改库，删自己遗留的半截文件属于分内之事。
             if is_stale_tmp(&p) {
-                let _ = fs::remove_file(&p);
+                out.stale.push(p.clone());
                 continue;
             }
             let meta = match fs::metadata(&p) {
@@ -539,6 +551,13 @@ fn add(a: &Args) -> R<i32> {
     // 顺序反过来（先写清单再放文件）在复制失败时会留下一条"声称有附件、实际
     // 没有"的记录。这里顺序对了就够了：文件已在，清单没写上的情况校验能发现，
     // 而且下次任何一次附件操作都会自动补齐。
+    //
+    // 这里是真正的写入路径（dry-run 已在上面返回），顺手清掉上次中断复制
+    // 留下的半截临时文件。只读命令（list/get/edit）不走这一步。
+    let swept = clean_stale_tmp(&path);
+    if swept > 0 {
+        crate::say_line!("顺手清掉 {} 个上次中断留下的半截临时文件", swept);
+    }
     let changed = commit_manifest(&path)?;
     let f = scan(&path);
     crate::say_line!(
@@ -640,6 +659,10 @@ fn remove(a: &Args) -> R<i32> {
     // explain away.
     for d in all_dirs(&path) {
         let _ = fs::remove_dir(d);
+    }
+    let swept = clean_stale_tmp(&path);
+    if swept > 0 {
+        crate::say_line!("顺手清掉 {} 个上次中断留下的半截临时文件", swept);
     }
     let changed = commit_manifest(&path)?;
     crate::say_line!(
@@ -868,6 +891,25 @@ pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
 /// 判据三者同时满足：文件名以 `.` 开头、中间含 `.tmp`、结尾全是数字。
 /// 对应的正是 [`tmp_sibling`] 生成的形态，所以收得很窄，不会误删用户
 /// 自己命名成 `.tmp` 开头的正常附件。
+/// 清掉上次中断复制留下的半截临时文件。
+///
+/// **只允许显式写入路径调用**（add / rm / commit / sync）。`scan()` 本身
+/// 只把它们记进 `Files::stale`，一个字节都不删——因为 `attach list`、
+/// `attach get` 这种只读命令也要走 scan，让它们顺手删文件是错的。
+///
+/// 返回删掉的条数。判据见 [`is_stale_tmp`]，收得很窄，不会碰到用户自己
+/// 命名成 `.tmp` 开头的正常附件。
+pub fn clean_stale_tmp(rec_path: &Path) -> usize {
+    let files = scan(rec_path);
+    let mut n = 0;
+    for p in files.stale {
+        if fs::remove_file(&p).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 fn is_stale_tmp(p: &Path) -> bool {
     let Some(name) = p.file_name().map(|s| s.to_string_lossy().to_string()) else {
         return false;
@@ -1513,6 +1555,10 @@ fn commit(a: &Args) -> R<i32> {
             human_bytes(it.bytes)
         );
         return Ok(0);
+    }
+    let swept = clean_stale_tmp(&path);
+    if swept > 0 {
+        crate::say_line!("顺手清掉 {} 个上次中断留下的半截临时文件", swept);
     }
     commit_manifest(&path)?;
     crate::say_line!(
