@@ -914,7 +914,18 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         }
     }
 
-    println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", routes.len(), branch_agg.len(), rec_rows.len());
+    // 三个数字都取自**实际要打印的行**，不取中间集合的大小。
+    //
+    // 原来写的是 `routes.len()` 和 `branch_agg.len()`：前者是过滤前的总数，带
+    // `--q` 时就不对；后者是 Atlas 聚合表的条目数，那份表里可能有一个分支根本
+    // 没有对应的 Index.md 路由，于是标题出现 "路由 26 条（分支 20 / 记录 7）"
+    // 这种自相矛盾的算术（20+7=27）。实际印出来的是 19 行分支 + 7 行记录。
+    //
+    // 抬头数字与实际行数不符是读者最先会去数的地方，数一次对不上就再也不敢信
+    // 这张表。
+    let n_branch = br_rows.len();
+    let n_rec = rec_rows.len();
+    println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", n_branch + n_rec, n_branch, n_rec);
     if !br_rows.is_empty() {
         println!();
         println!("【知识分支】时间 / 体积 / 行数 / 条目数 —— 聚合值，据此判断该不该进去翻");
