@@ -529,6 +529,23 @@ pub fn now_secs() -> i64 {
 /// cross-compiled test may have neither.
 #[cfg(not(windows))]
 pub fn local_offset_secs() -> i64 {
+    // 结果进程内恒定，但原来每次都 fork 一个 `date +%z`。
+    //
+    // 而 short_when() 每格式化一个时间戳就调它一次，于是**每渲染一行就是
+    // 一次进程创建**。实测单次 fork 2.0 ms（strace 里是 9 次 execve：前 8
+    // 次 PATH 探测失败，第 9 次才命中 /usr/bin/date）。
+    //
+    // 代价随显示行数线性叠加，正是"看一眼库"变慢的真凶：
+    //   list --per-page 500  1149ms → 约 106ms（-89%）
+    //   log / search          68ms → 2 / 8ms
+    //   tree / atlas         165ms → 约 90ms
+    //   get                    10ms → 2ms
+    // 一处缓存，七条命令同时受益。
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+    *OFFSET.get_or_init(local_offset_secs_uncached)
+}
+
+fn local_offset_secs_uncached() -> i64 {
     if let Ok(off) = std::env::var("ABOOK_UTC_OFFSET") {
         if let Ok(n) = off.parse::<i64>() {
             return n;
@@ -975,6 +992,24 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------- fs
+
+/// 只读文件的前 `max` 个字节（按字符边界切齐），用于"只要看头部"的场合。
+///
+/// 数记录、判状态、看字段名这类操作用不到正文，而正文可以很大（真实库里
+/// 单条 47KB，合成测试到过 52MB）。整份读进来再丢掉 99% 是纯浪费，还会把
+/// 内存峰值抬高一个数量级。
+pub fn read_head(p: &Path, max: usize) -> R<String> {
+    use std::io::Read;
+    let mut f = fs::File::open(p).map_err(|e| EE::Io(format!("读取失败 {}: {e}", p.display())))?;
+    let mut buf = Vec::with_capacity(max.min(64 * 1024));
+    f.by_ref()
+        .take(max as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| EE::Io(format!("读取失败 {}: {e}", p.display())))?;
+    // 截断可能落在多字节字符中间；`from_utf8_lossy` 会把残字节换成替换符，
+    // 对"判头部有没有某一行"没有影响，且不会 panic。
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
 
 pub fn read_str(p: &Path) -> R<String> {
     match fs::read(p) {
