@@ -13,6 +13,7 @@
 
 use crate::sha256;
 use crate::util::*;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Substitution table used to fold seed digits into parameter choices.
@@ -273,6 +274,21 @@ pub fn read_entry(root: &Path, ident: &str) -> R<Entry> {
     if !p.exists() {
         return notfound(format!("保险箱无此条目: {ident}"));
     }
+    // 读到就顺手收紧权限。
+    //
+    // 权限只在 write_entry 里设，于是库里已有的旧条目会一直是 644——而它们
+    // 恰恰是最该收紧的那批：早期写入的、可能已经跟着备份或压缩包流转过。
+    // 等"下次重写时自然变好"是不现实的，重写只在换值或升级格式时发生。
+    // 读取是每条凭据高频发生的接触点，在这里补一次代价为零。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(md) = fs::metadata(&p) {
+            if md.permissions().mode() & 0o077 != 0 {
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
     let raw = read_str(&p)?;
     let (txt, verified) = decrypt_checked(&raw)?;
     let mut it = txt.splitn(2, '\n');
@@ -365,6 +381,28 @@ pub fn scan_vault(root: &Path) -> (Vec<Entry>, Vec<(String, String)>) {
 }
 
 /// Write one entry; verifies by decrypting back and comparing.
+/// 目录权限收到 0700（仅属主可进）。
+///
+/// 失败不报错：非 Unix 平台没有这个概念，某些文件系统（FAT、部分网络盘）
+/// 也不支持改权限。能设就设，设不了不该让写入失败——那会让工具在那些环境
+/// 上完全不能用，而它本来只是加固。
+#[cfg(unix)]
+fn restrict_dir(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o700));
+}
+#[cfg(not(unix))]
+fn restrict_dir(_p: &Path) {}
+
+/// 条目文件权限收到 0600（仅属主可读写）。
+#[cfg(unix)]
+fn restrict_file(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_file(_p: &Path) {}
+
 pub fn write_entry(root: &Path, ident: &str, purpose: &str, body: &str) -> R<PathBuf> {
     if ident.contains('\'') || ident.contains('\n') {
         return usage("标识不得包含单引号或换行");
@@ -372,7 +410,14 @@ pub fn write_entry(root: &Path, ident: &str, purpose: &str, body: &str) -> R<Pat
     if purpose.contains('\n') {
         return usage("用途不得包含换行");
     }
+    // 权限要收紧。密文里的种子就在文件第一行，同机任何用户只要能读这个
+    // 文件就能解出全部明文——所以文件权限是这套方案里唯一真正起作用的
+    // 访问控制。默认的 755 目录 + 644 文件等于把凭据摊开给所有本地用户。
+    //
+    // 0700 / 0600 是这套设计能给出的最大边界：它挡的是"同机其他用户与
+    // 后台进程"，挡不住能以你的身份运行的程序。
     ensure_dir(&vault_dir(root))?;
+    restrict_dir(&vault_dir(root));
     let plain = if body.is_empty() {
         format!("{ident}|{purpose}")
     } else {
@@ -382,6 +427,7 @@ pub fn write_entry(root: &Path, ident: &str, purpose: &str, body: &str) -> R<Pat
     let enc = encrypt_text(&r, &plain)?;
     let p = entry_path(root, ident);
     write_atomic(&p, &enc)?;
+    restrict_file(&p);
     // read-back verification
     let back = decrypt_text(&read_str(&p)?)?;
     if back.trim_end() != plain.trim_end() {

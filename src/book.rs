@@ -288,28 +288,112 @@ impl BookFile {
         true
     }
 
-    /// Index rows from the "## Active Routes" table: (path, summary, when).
+    /// Index rows: (path, summary, when).
+    ///
+    /// Index.md 是给 AI 开工时看的那张「记忆库平面图」——有哪些分支、各自管
+    /// 什么、什么时候该翻。没有它，AI 不知道该往哪儿搜，只能全库乱翻。
+    ///
+    /// 原来这个函数只认一种格式：`## Active Routes` 节下的全角竖线行
+    /// （`路径｜用途｜何时读取`）。而真实库里的 Index.md 是 **markdown 表格**，
+    /// 而且那些记录级路由行落在文末、前面没有 `## Active Routes` 标题。
+    /// 两个条件都不满足，于是 `abook index` 对一份有 20 个分支路由的索引
+    /// 报出「路由 0 条」——入口存在，内容读不出来。
+    ///
+    /// 现在两种格式都认，且不依赖特定小节标题：
+    ///
+    /// 1. **markdown 表格**：按表头判断列义，而不是按位置硬编码。表头里带
+    ///    `BRANCH`/`分支` 的才算路由表——Index.md 里还有一张 `UNIT | 来源范围`
+    ///    的迁移对照表，那张不是路由，不能混进来。
+    /// 2. **全角竖线行**：`路径｜用途｜何时读取`，任意位置都算。
     pub fn routes(&self) -> Vec<(String, String, String)> {
-        let mut v = Vec::new();
-        let mut insec = false;
+        let mut v: Vec<(String, String, String)> = Vec::new();
+        // 当前 markdown 表格的列映射：列序号 -> 语义
+        let mut tbl: Option<(usize, usize, usize)> = None;
         for line in self.content.lines() {
             let t = line.trim();
-            if let Some(h) = t.strip_prefix("## ") {
-                insec = h.trim().eq_ignore_ascii_case("Active Routes");
+            if t.is_empty() {
+                tbl = None;
                 continue;
             }
-            if !insec || t.is_empty() {
+            // ---- markdown 表格 ----
+            if t.starts_with('|') {
+                let cells: Vec<String> = t
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|c| c.trim().to_string())
+                    .collect();
+                // 分隔行 |---|---|
+                let is_sep = !cells.is_empty()
+                    && cells.iter().all(|c| {
+                        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')
+                    });
+                if is_sep {
+                    continue;
+                }
+                // 表头行：判断这张表是不是路由表
+                let looks_header = cells.iter().any(|c| {
+                    let u = c.to_uppercase();
+                    u.contains("BRANCH") || c.contains("分支")
+                });
+                if looks_header {
+                    let find = |needles: &[&str]| -> usize {
+                        cells
+                            .iter()
+                            .position(|c| {
+                                let u = c.to_uppercase();
+                                needles.iter().any(|n| u.contains(n))
+                            })
+                            .unwrap_or(usize::MAX)
+                    };
+                    let b = find(&["BRANCH", "分支"]);
+                    let w = find(&["READ_WHEN", "READWHEN", "何时", "何时读取"]);
+                    let n = find(&["正式", "候选", "COUNT", "记录数"]);
+                    tbl = if b == usize::MAX {
+                        None
+                    } else {
+                        Some((b, n, w))
+                    };
+                    continue;
+                }
+                if let Some((b, n, w)) = tbl {
+                    let get = |i: usize| -> String {
+                        if i == usize::MAX {
+                            String::new()
+                        } else {
+                            cells
+                                .get(i)
+                                .map(|x| x.trim_matches('`').trim().to_string())
+                                .unwrap_or_default()
+                        }
+                    };
+                    let path = get(b);
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let summary = get(n);
+                    let when = get(w);
+                    v.push((path, summary, when));
+                }
                 continue;
             }
-            if t.starts_with('|') || t.contains("路径｜用途") {
-                continue;
-            }
-            let parts: Vec<&str> = t.split('｜').collect();
-            if parts.len() >= 2 {
-                let p = parts[0].trim().to_string();
-                let s = parts[1].trim().to_string();
-                let w = parts.get(2).map(|x| x.trim().to_string()).unwrap_or_default();
-                v.push((p, s, w));
+            // 非表格行：表格结束
+            tbl = None;
+            // ---- 全角竖线行 ----
+            if t.contains('｜') {
+                let parts: Vec<&str> = t.split('｜').collect();
+                // 表头字样本身不算路由
+                if t.contains("路径｜用途") || t.contains("BRANCH｜") {
+                    continue;
+                }
+                if parts.len() >= 2 {
+                    let p = parts[0].trim().trim_matches('`').trim().to_string();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    let s = parts[1].trim().to_string();
+                    let w = parts.get(2).map(|x| x.trim().to_string()).unwrap_or_default();
+                    v.push((p, s, w));
+                }
             }
         }
         v

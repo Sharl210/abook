@@ -518,6 +518,18 @@ fn add(a: &Args) -> R<i32> {
         }
         return Ok(0);
     }
+    // 体积阈值也要在**动磁盘之前**查。
+    //
+    // 它原来只在 place() 里查，而那时目录已经建好了。于是"超过 50 MB 被拦下"
+    // 虽然没复制文件，却在库里留下一个空的 `<记录>-refs/` 目录——之后 list
+    // 会说这条记录有附件目录但零附件，而用户以为这次操作根本没发生。
+    //
+    // 顺序原则：所有可能失败的前置条件先查完，再动磁盘。一旦开始建目录、
+    // 复制文件，后面每一步失败都会留下痕迹。
+    {
+        let sz = fs::metadata(&sp).map(|m| m.len()).unwrap_or(0);
+        check_size(&sp, sz, a.has("force"))?;
+    }
     // 附件目录本身若是符号链接，写进去等于写到别处。
     //
     // `-refs -> /somewhere/else` 时 `dir.is_dir()` 为真（跟随链接），随后
@@ -773,6 +785,29 @@ pub struct Moved {
 /// `move_mode` 由调用方的 `--move` 决定，而且**默认是复制**：只有用户明确
 /// 说"搬过去"时才移动。默认移动会让源文件凭空消失——调用方说的是"加进附件
 /// 目录"，不是"从原处拿走"。语义优先于速度，任何时候都是。
+/// 体积阈值检查，单独成函数是为了能在**创建目录之前**调用。
+///
+/// 原来它写在 `place` 里，而 `place` 调用时附件目录已经 `create_dir_all` 过了。
+/// 于是"超过 50 MB 被拦下"这件事虽然没复制文件，却在库里留下一个空的
+/// `<记录>-refs/` 目录——下次 `attach list` 会说这条记录有附件目录但零附件，
+/// 而用户以为操作根本没发生。
+///
+/// 顺序应该是：先把所有可能失败的前置条件查完，再动磁盘。
+pub fn check_size(src: &Path, bytes: u64, force: bool) -> R<()> {
+    if bytes > SOFT_MAX && !force {
+        return Err(EE::Blocked(format!(
+            "附件 {} 共 {}，超过 {} 上限（上限是为控制记忆库体积）。\
+             需要用户明确同意才放进来：加 --force 表示已获授权。\
+             用户已讲过\"你决定\"/\"全权由你\"一类的话，那就是授权，直接加 --force 继续，\
+             不必再问一遍；没有这类授权才需要问。也可以先压缩、裁剪，或不放",
+            src.display(),
+            human_bytes(bytes),
+            human_bytes(SOFT_MAX)
+        )));
+    }
+    Ok(())
+}
+
 pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
     let meta = fs::metadata(src)?;
     let bytes = meta.len();
@@ -785,17 +820,7 @@ pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
     // 超限不是拒绝，是**要一句明确授权**。用户若已经讲过"你决定""全权由你"，
     // 那句就是授权，直接加 --force 继续，不必为每份文件再问一遍。
     let same_dev = same_device(src, dst);
-    if bytes > SOFT_MAX && !force {
-        return Err(EE::Blocked(format!(
-            "附件 {} 共 {}，超过 {} 上限（上限是为控制记忆库体积）。\
-             需要用户明确同意才放进来：加 --force 表示已获授权。\
-             用户已讲过\"你决定\"/\"全权由你\"一类的话，那就是授权，直接加 --force 继续，\
-             不必再问一遍；没有这类授权才需要问。也可以先压缩、裁剪，或不放",
-            src.display(),
-            human_bytes(bytes),
-            human_bytes(SOFT_MAX)
-        )));
-    }
+    check_size(src, bytes, force)?;
 
     if move_mode && same_dev {
         // rename 在同设备上是原子的：目标要么不存在，要么是完整的源文件。

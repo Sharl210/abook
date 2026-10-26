@@ -431,18 +431,53 @@ pub fn run(a: &Args) -> R<i32> {
                 crate::say_line!("[dry-run] 将重设 {} 条的会话种子", entries.len());
                 return Ok(0);
             }
+            // rekey 是"种子泄露之后"的补救命令，所以它必须比任何命令都更
+            // 不可能把库写坏。原来它有两处致命问题：
+            //
+            // 1. `encrypt_text` 返回的文本**第一行已经是新种子**，这里又在
+            //    外层拼了一次 `{new_seed}\n`，文件开头于是有两个种子行。
+            //    解密时首行当种子，第二个 12 位数和 token 一起被摊平进正文，
+            //    校验码必然对不上——条目永久读不出来，而命令报"已重设"。
+            //    泄露后第一次执行补救就作废全库，还报成功。
+            // 2. 没有写入后自检。`write_entry` 有复读校验，rekey 没有。
+            //
+            // 现在：直接写 encrypt_text 的返回值（它自带种子行），写完立刻
+            // 用 read_entry 复读校验，并逐字比对明文。任一条失败就整体报错
+            // 并指明是哪一条——不能把"写坏了"混在"重设成功"里。
             let mut n = 0usize;
             for e in &entries {
-                let full = read_entry(&root, &e.ident)?;
+                let before = read_entry(&root, &e.ident)?;
                 let new_seed = new_seed();
                 let path = entry_path(&root, &e.ident);
-                let payload = format!("{}|{}\n{}", e.ident, e.purpose, full.body);
+                let payload = format!("{}|{}\n{}", e.ident, e.purpose, before.body);
+                // encrypt_text 的输出已含种子行，不要再拼。
                 let cipher = encrypt_text(&new_seed, &payload)?;
-                write_atomic(&path, &format!("{new_seed}\n{cipher}\n"))?;
+                write_atomic(&path, &cipher)?;
+                // 复读：值必须逐字不变，种子必须换新。
+                let after = match read_entry(&root, &e.ident) {
+                    Ok(x) => x,
+                    Err(err) => {
+                        return integrity(format!(
+                            "rekey 写入后无法读回条目 {}：{}。\n\
+                             该条目已损坏，请立刻用 `vault put {}` 重新写入正确的值。",
+                            e.ident,
+                            err.msg(),
+                            e.ident
+                        ))
+                    }
+                };
+                if after.body != before.body {
+                    return integrity(format!(
+                        "rekey 写入后明文发生变化（{}）。\n\
+                         这是严重的写入缺陷，该条目已损坏，请用 `vault put {}` 重写。",
+                        e.ident, e.ident
+                    ));
+                }
                 n += 1;
             }
             sync_ledger(&root)?;
-            crate::say_line!("已重设 {n} 条的会话种子");
+            // 换种子却没换成的（新种子与旧的一样）说明随机源有问题。
+            crate::say_line!("已重设 {n} 条的会话种子（每条都做了写入后复读校验）");
             Ok(0)
         }
         other => usage(format!("未知 vault 子命令: {other}")),

@@ -862,6 +862,28 @@ pub fn cmd_doctor(a: &Args) -> R<i32> {
         fail += 1;
     }
     if a.has("fix") {
+        // `--fix --dry-run` 必须真的什么都不改。
+        //
+        // 原来 doctor 的参数表里根本没有 dry-run，于是"预览一下 --fix 会做
+        // 什么"这条路径不存在——只能用真实的 `doctor --fix` 去试，而它会
+        // 当场重建两张 Atlas 并同步保险箱名册。一个诊断命令的重活没有预演，
+        // 等于逼用户拿真库去赌。
+        if a.has("dry-run") {
+            for lib in [Lib::Canonical, Lib::Candidate] {
+                entries.push((
+                    lib.atlas().to_string(),
+                    "将重建（--dry-run 未改）".to_string(),
+                    true,
+                ));
+            }
+            entries.push(("名册".to_string(), "将同步（--dry-run 未改）".to_string(), true));
+            if want_json {
+                doctor_json(&root, &entries, fail);
+            } else {
+                println!("[dry-run] 上面两处会重建、名册会同步，本次没有改动任何文件");
+            }
+            return Ok(if fail > 0 { 5 } else { 0 });
+        }
         let _ = fail;
         for lib in [Lib::Canonical, Lib::Candidate] {
             let r = crate::cmd_admin::refresh_atlas(&root, lib, false)?;
