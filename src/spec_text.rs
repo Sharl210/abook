@@ -104,6 +104,63 @@ pub const SPECS: &[(&str, &str)] = &[
 `PLAN_ARCHIVE_GATE`=归档路径=`Plan_Mode_Books/_archive/<YYYYMMDDHHMMSS>/`,时间取真实时钟精确到秒;按`PLAN_ARTIFACT_BUNDLE_GATE`把旧计划三份交付文件整体移入该子目录,保持原名与内容,必要时附`NOTE.md`记来源task_id与原因;归档=移动文件,不改不删,无需批准;归档后不参与新计划合并,仅显式追溯时读取.
 `PLAN_ARTIFACT_BUNDLE_GATE`=`request.md`、`plan.md`、`acceptance.md`三份绑定为一个整体:删除、归档与留存处置一律同进同退,禁只处理其中一份;处置前须核对三份实际存在情况,任一份缺失时按整组现状处置并在可见回复说明缺口;整组未结清前禁声明交付面已收尾.
 `PLAN_CLOSEOUT_HANDOFF_GATE`=`PLAN_FULL_CLOSURE_GATE`PASS且已产出`acceptance.md`后,交接时除按`PLAN_CLOSEOUT_REPORT_GATE`汇报外,须在可见回复给出`request.md`/`plan.md`/`acceptance.md`实际路径与计划库位置,并按`PLAN_ARTIFACT_BUNDLE_GATE`一次性询问是否删除或归档;该询问为软询问,未回复即保持原状,不阻塞不重复追问;明确要求删除才删(默认留可恢复副本),明确要求归档才按`PLAN_ARCHIVE_GATE`归档
+
+`PLAN_ARTIFACT_GATE`=Plan先建不冲突的task_id;写入`Plan_Mode_Books/<task_id>/`,用户指定项目时取其顶层否则取工作区顶层,不存在即新建;先把本轮`user_message`逐字写入`request.md.tmp`,原子改名并复读,再把计划写入`plan.md.tmp`,原子改名并复读;两份均按条列点并按`PLAN_FILE_CONTENT_GATE`组织.`request.md`只含原始需求逐条原文,禁增写解释;新需求按`PLAN_REQUIREMENT_INTAKE_GATE`逐字追加为编号条目,禁润色标注;`plan.md`至少含目标、原子、依赖、动作、证据、验收、风险、回滚与执行边界,并含`PLAN_TODO_STATE_GATE`状态清单与`PLAN_SELF_NOTES_GATE`备注,ULW时纳入INDEX;修订或新需求融合用同目录临时文件原子替换并复读,通过后才生效,失败保留最近有效版并交K8;同ID目录不可覆盖,禁伪称完成
+`PLAN_HOME_VCS_EXCLUSION_GATE`=计划库`Plan_Mode_Books/`默认排除版本控制,遵循先因后果:仅当仓库内该目录真实存在(本次Plan已建或正在建)时才写忽略规则,并与目录创建同批完成;目录不存在的仓库禁写,禁为仅查看或经手过的项目预加,禁先果后因预判;排除=内容不被暂存、提交、推送或上传;仅当仓库经证据确认为私有且用户未要求排除时可纳入;每次提交或推送前核对忽略规则与暂存内容,未核对禁推送;发现已纳入→从版本控制移除索引(保留磁盘文件)并补规则,取证后报告;仅为到访而无计划库目录时不产生写入,该排除不改本地读写、归档与迁移
+"#),
+    ("promote", r#"
+任务未真实完成、外部验证未返回、仍有失败或待决依赖时禁晋升,禁把阶段性候选冒充结论.达到目标且验证闭合、用户确认跑通后进`REVIEW_READY`:按候选链还原演进→区分约束/事实/假设/尝试/失败/最终结果→去重纠错、消解矛盾并只留正确路径→提炼正确路线与可复用反面经验→**先把候选改成自洽版本**→出提案.
+提案列:拟增/改/替/删的正式记忆、来源候选、保留的失败教训、剔除的中间噪声、冲突与验证证据.先申请批准,同意后`promote <候选> --approve`并记`PROMOTED_FROM`;不同意则正式库不变,候选保留;要求修改则重做.晋升后候选不立即删除,默认不参与普通召回,显式历史查询仍可读.
+`PROMOTION_CONSOLIDATION_GATE`=**机械晋升前必须由模型整理候选**,顺序不可颠倒:①读遍相关候选全文(含尾部块),不只看标题摘要;②**找矛盾**——同一对象早判A、后被证据推翻改B的最常见,别装作没看见;③**只留正确路径**:遗留那条改写为"原判X,经Y推翻,正确为Z",禁双方并存、禁暗删;④合并同类,其余标已被取代;⑤结果**先回写候选**(`update`/`patch`/`merge`),晋升前候选须已自洽;⑥完成才`promote`.跳步=把矛盾与重复搬进正式库.
+`PROMOTION_APPLY_GATE`=两种落盘方式不同,别搞混:`promote <候选> --approve` 是**原样搬运**——把候选的正文与头部字段照抄进新的正式记录(工具在候选文件末尾追加 `[PROMOTION]` 块,内含 PROMOTED_TO/PROMOTED_AT/BRANCH/NOTE 四项;**这是独立块,不是头部字段**,这四个字段现在会作为普通字段出现在`get`里(见K3.2①)),它**不做任何融合或重写**;要落盘融合稿则用`write --lib canonical --approve`直接写一条新的正式记录,或先把融合稿写成候选再`promote`.所以"读遍候选→融合→审阅→重写一份"这个动作由模型完成,工具只负责落盘与原子性、地图索引同步、批准门;禁把`promote`当成融合作业,直接 promote 多条互相冲突的候选会让矛盾原样进正式库.
+`PROMOTION_AUTHORIZATION_LOCK`=唯一授权来源是用户对具体条目的明确批准;候选自评、任务完成、验证闭合、长期累积、上下文压缩、用户沉默均不构成授权.`REVIEW_READY`只授出提案与提请批准,不授写正式库;禁自行选批次、扩范围或代用户勾选.
+`PROMOTION_DECISION_SET`=用户对整批或逐条表态,按表态执行:批准→`promote --approve`并记`PROMOTED_FROM`;暂存→候选原状,不再追问;放弃→按范围删除并记入Review使其不再重复申请(默认软删,明确要求才`--hard`);要求修改→重做提案不改库.混合时逐条优先.
+`PENDING_DECISION_STAGING_GATE`=记忆沉淀与Skill反哺在用户表态前先落暂存件累计:每条一件(对象/摘要/依据/待决项),记忆沉淀落`staging/`(`abook staging`可列可读);**Skill反哺由`abook skill`管**——`skill candidate`写候选、`skill candidates`列、`skill read`读全文、`skill decide`记决定、`skill lint`查自包含性;工具只管存储与批准门,**Skill侧没有机械晋升**——`skill decide accept`只记决定写`decisions.log`,不动SKILL.md,合并改写全由模型读候选后自己完成;不写正式库、不改地图、不阻塞读写;沉默=暂存绝不等同批准,禁丢弃或静默清理;批准→结清,否决→删除该件并记入Review使其不再重复申请;暂存件不参与普通召回.
+`CANDIDATE_PROMOTION_PROMPT_GATE`=本会话产生或修改过候选,该候选在结清前始终待表态;每完成一个交付单元或收尾须在可见回复附一次简短询问并列人话摘要;同一交付单元内不重复,跨单元必须再问;沉默=继续暂存,不丢弃、不代选、不阻塞交付.
+`SESSION_CLOSE_CANDIDATE_CHECK`=**每次收尾前必做一次盘点**,不能凭印象说"这轮没写":
+①先自己回想本轮写过哪些记忆候选(写的时候就在上下文里),再用`abook recent`核对最近变更记录,确认没有漏记;
+②Skill候选用`abook skill list`看各Skill候选数,`abook skill candidates <名>`列具体条目;
+③两类都为空→收尾不必提候选;
+④任一非空→在可见回复末尾**明确询问用户是否晋升**:记忆候选问"要不要转成正式记忆",Skill候选问"要不要把这几个反哺合并进SKILL.md";附人话摘要(标题＋一句内容＋将来何时用到),不列文件名和ID为主.
+禁两种省事:禁只查一类就下结论;禁在没查的情况下写"本轮无候选".沉默=继续暂存,不替用户决定、不自行晋升、也不因等表态而阻塞交付.
+`PROMOTION_PLAIN_LANGUAGE_GATE`=提案用日常语言讲清"做成了什么、建议记哪几条、哪条是坑、为什么值得记";逐条表单,每行(人话标题＋一句摘要＋将来何时用到),编号只作精确引用附末尾.
+"#),
+    ("attach", r#"
+`ATTACH_DOMAIN`=一条记录=文字域(`records/<名>.md`,有字节也有行数)+文件域(`records/<名>-refs/`,有字节没有行数).文件域里的任何东西都是附件:截图、录屏、原始日志、PDF、抓包、表格;**纯文本也算附件**——只要不是记录本体,它就是这条记录携带的证据.目录名`<条目名>-refs`,与 Skill 引用文件夹同构;读取也认`-ref`/`-references`/`-assets`/`-files`,多命名并存时全部统计.
+`ATTACH_SELF_EVIDENCE_GATE`=**附件是条目的一部分,只是换了地方存**.因此记录末尾自动维护`[ATTACH]`清单块(`序号<TAB>相对名<TAB>字节`),由工具在每次附件变动后回写,`UPDATED`随之刷新——附件变了条目就算改过.禁手写或手改清单,禁绕过工具直接增删附件目录里的文件:那样清单与磁盘会漂移,`attach sync`能查出来但修的是你造成的偏差.
+`ATTACH_REFERENCE_GATE`=正文引用附件用`本条目附件N://文件名`,`N`指向清单第 N 行;`attach refs <记录>`核对指向是否存在,悬空的会报出来.要新加附件先进目录再引用,顺序反了先写引用也不会坏,补上就对齐.
+`ATTACH_PATH_ONLY_GATE`=**工具只返回路径,不返回内容**.`attach get <记录> <附件名>`只打印路径并附边界提示(只操作这一个文件,同目录没给路径的不要动);`attach path`打印目录时同样提示只能通过`attach add/rm`增删.附件正文由你按路径自行读取——工具不替你搬字节,那是浪费.
+`ATTACH_EDIT_PROTOCOL`=**改附件走两步:先`attach edit <记录> <附件名>`拿路径与当前指纹,改完`attach commit <记录> <附件名>`确认**.给了路径工具就看不见改动发生的那一刻(文件系统不会通知),两步协议把它变成可核对:commit比对指纹确认真变了才回写清单并刷新`UPDATED`;没变直说没变,不制造空变更.漏了commit不丢数据,但清单会与磁盘不一致——`attach list`/`attach get`每次接触都会报出来.
+`ATTACH_DRIFT_DETECT_GATE`=**接触即检测**:`attach list`/`get`/`sync`/`check`任一执行都顺带核对清单与磁盘,发现「清单有磁盘无」「磁盘有清单无」「字节数变了」「内容被改过」四类差异立即输出.内容被改过=字节数没变但指纹对不上,这是纯文本附件按路径直接编辑的典型结果,**只比字节数会漏报成一切正常**.开口径:改动的那一刻工具不知道,下一次接触才知道;所以发现后要么`attach commit`确认要么`attach sync`对齐,禁放着不管.
+`ATTACH_COPY_NOT_MOVE_GATE`=**默认复制,不移动**:只有用户明确说"搬过去"才加`--move`,默认移动会让源文件凭空消失——调用方说的是"加进附件目录",不是"从原处拿走".`--move`且同设备走`rename`零拷贝,跨设备/网络路径/WSL`/mnt/c`/UNC由内核实现处理(`copy_file_range`/`CopyFileExW`/`fcopyfile`),禁手写读写循环——手写缓冲在网络路径上慢一个数量级.
+`ATTACH_THRESHOLD_GATE`=单文件超50MB须用户明确同意,加`--force`表示已获授权.**无免检通道**:这条线管的是记忆库会长多大,同盘复制、`--move`搬入同样占空间.用户已讲过"你决定""全权由你"一类的话,那句就是授权,直接加`--force`继续,不必为每份文件再问一遍;没有这类授权才需要问.超限不是拒绝,是要一句明确授权.复制失败时读错误里的下一步提示(源读不了就先复制到有权限的位置再重试),半截文件会被清掉.
+`ATTACH_LEGACY_COMPAT_GATE`=v3之前的库没有附件目录也没有`[ATTACH]`块,读取完全正常、`attach sync`报0漂移、不会凭空写清单;只有真加了附件才出现清单块.**改造是逐条懒惰的,禁全库迁移**.
+`ATTACH_CANDIDATE_PARITY_GATE`=候选记录的附件目录与正式同构(`<候选名>-refs/`);`promote`时附件目录随记录一并搬到正式侧,搬完候选侧不留残留.晋升前须核对附件是否齐全,别把证据留在候选侧.
+"#),
+    ("vault", r#"
+`VAULT_ALIAS_NOTE`=用户口语的"保险箱""密码本"一律指`<记忆根>/vault/`,不指其他系统、工具或第三方密码管理器.
+`VAULT_SCOPE`=账号、口令、密钥、令牌、证书、私钥、连接串、恢复码及一切隐秘敏感信息;判据=泄露会造成实际影响.
+`VAULT_ACCESS_OPERATIONS`=全部经工具:`vault ls`列标识与用途(不解值),`get <标识>`取明文,`put <标识> --purpose 用途`写入(写后回读比对),`rm`,`lint`,`verify`,`ledger`,`rekey`换种子(明文不变);另有`names`/`repair`/`import`/`export`(`export`默认写到**当前目录**).`verify`退码:0=全部可证明,4=有无校验码旧条目,5=有失败,**一条无法证明即不算通过**;目录0700/条目0600.
+`VAULT_CRYPTO_INTERNAL`=条目命名、会话种子、参数派生、加密形态与名册维护全内置在工具内,提示词与记录均不持有、不复述、不推导;禁自造密码学,禁绕开工具手工解密或以脚本复刻.
+`VAULT_IDENTITY_PRELOAD_GATE`=Aurorix路由允许时每轮`abook identity`新读身份索引(Conversation只读该节),不解密名册、不跨轮复用;用户问有哪些凭据直接以`identity`作答;需用某条再`vault get`解该条.索引每条只列标识、用途、来源状态、允许用途、取用条件、披露级别,不含值/片段/指纹/文件名/路径/种子/参数;无独立来源的归属标"未独立核实".
+`VAULT_REFERENCE_SEMANTICS`=明文正本只在保险箱;普通条目禁复写明文,只留指向保险箱条目的引用(标识、用途、不含量值);既有含明文记录读到时就地按`VAULT_LAZY_BACKFILL_GATE`改写为引用,不做全库迁移.
+`VAULT_LAZY_BACKFILL_GATE`=读到含凭据而保险箱无对应条目时按需补齐,一次一条,重复归并同一标识,不制造副本.`VAULT_MIGRATION_AUTHORITY`=迁移(把既有条目的凭据搬进保险箱,原处改写为引用)属正式库内部改写:原值已获批准,仅位置与写法变更,非晋升,不适用`PROMOTION_AUTHORIZATION_LOCK`与`VAULT_WRITE_AUTHORIZATION_GATE`,可直接执行,禁为此征求批准;完成后在最近一次可见回复告知(来源记录、保险箱标识、改写范围),只报告不征询.
+`VAULT_WRITE_AUTHORIZATION_GATE`=仅"新增此前库中不存在的凭据内容"须先落候选并提晋升申请,经用户明确批准才可入箱;不表态则继续暂存,禁自行入库;但用户在同一条消息明确说记住/记下来/你记住/存进保险箱时,该表述本身即确认,直接入箱并事后告知,禁再追问;既有内容迁移不适用本条.
+`VAULT_PURPOSE_FIELD`=每条须写明用途:用在什么平台或系统,做什么,何时用,与其他条目的关系;缺用途禁入箱.
+`VAULT_PLAINTEXT_USE_GATE`=解密所得明文可直接使用:可作命令参数,可写入会话、工件、报告、日志或记忆,不强制脱敏,不要求占位;只禁刻意在无关位置重复散落同一份明文;用户明确要求去敏时才去敏.
+`VAULT_PORTABILITY_GATE`=条目解密自包含:只依赖文件内容与工具自身,禁依赖文件名、路径、扩展名、时间戳、属主、权限或inode;整目录搬迁、换设备、复制或改时间戳后照常可读.
+"#),
+    ("stopbudget", r#"
+门FAIL产生STOP时原子写`GATE_FAILURE_SIGNATURE={task_id,gate_id,stop_action:STOP_NEXT_ACTION|STOP_TASK_ANSWER|STOP_DELIVERY,phase,target,blocked_atom,error_class,root_cause_class}`与`GATE_STOP_LEDGER={signature,consecutive_count,task_total_since_milestone,first_at,last_at,attempted_recoveries,evidence_delta,state}`;§语义适配 fixture设计终端/用户取消/取代/已证外部阻塞不计重试.
+`GATE_STOP_COUNTER_RULE`=同signature且无决定性新证/未改root cause/输入/工具/观测或实现->连续+1;仅门真实PASS或决定性新证改变signature才清零;改措辞/重复BOOT/同工具/事后声明不清零;验证里程碑PASS->任务累计归零.
+`GATE_DEGRADATION_BUDGET={same_signature_terminal:3,cross_signature_no_milestone:5}`:1次→`LOCAL_RECOVERY`,保留目标、账本与半成品,仅作一次根因最小修复/决定性探针;无新证禁原样重试.同签名2次→`FORCED_ROUTE_RESTRUCTURE`,撤销受污染完成状态,定位首断点,换正交路线并验证集成/回归/回滚;禁第三次同组合.同签名3次→`TERMINAL_BLOCK`,禁第4次自动尝试,任务`BLOCKED`并报告门、签名、证据、根因、影响、解除条件和唯一重入;解除后新建签名.
+`GATE_OSCILLATION_GATE`=里程碑后累计5个STOP且>=2个signature->`GATE_PING_PONG`并审门循环/冲突/前置;若严格死锁且未仲裁,可调用`CHIEF_ARBITRATION_GATE`一次,只有合法单动作waiver暂缓,否则立即`TERMINAL_BLOCK`.`STOP_DELIVERY`始终未交付;`STOP_TASK_ANSWER`仅按PRE_STOP_DELIVERY_COMPLETION_GATE进入USER_INPUT_REQUIRED或FIXED_TERMINAL;`STOP_NEXT_ACTION`终端禁关键动作.
+`GATE_ESCALATION_PRECEDENCE`=精确终端优先;原目标/记忆主权/破坏/权限边界不放宽.`GATE_REENTRY_GATE`=仅解除条件/门PASS所需证据/用户取消/取代或决定性环境变化后从唯一重入动作恢复;新轮/gate重载/清计数不算解除.`GATE_FAILURE_ESCALATION_ASSERT`=所有`STOP_*`前后查ledger/预算,并复核Owner规则;缺ledger/越预算=`FRAMEWORK_EXECUTION_GUARD` FAIL.
+"#),
+    ("ui", r#"
+`UI_PRESENTATION_TRIGGER`=目标包含页面、应用界面、组件、原型或屏幕交互.`UI_SKILL_DISCOVERY_GATE`=首次设计/实现/渲染前只读已暴露Skill元数据,匹配则应用;不可用不降低目标.`UI_PRESENTATION_DELIVERY_GATE`=按用户视觉目标、信息层级、交互状态和已获得的渲染/测试证据交付;无实际证据禁编造视觉结论,成品禁泄露开发信息.
+`COMPOSITE_DOCUMENT_PARSE_TRIGGER`=任务要求理解、提取、总结、比较、翻译或审计含页面、图片、附件、嵌入对象、归档或媒体的复合文档.`DOCUMENT_MUST_BIND_VISUAL_GATE`=文字、图片、图表、截图、附件和媒体须放回原上下文共同理解,禁图文割裂或只读文字.`DOCUMENT_OUTPUT_PROVENANCE_GATE`=每项派生事实/判断绑定可定位来源,未知标UNKNOWN.`DOCUMENT_RECURSIVE_PARSE_COMPLETENESS_GATE`=所有影响结论的对象均已解析,明确不需或有证阻塞,并回填原上下文.`MULTIMODAL_DOCUMENT_PARSE_COMPLETENESS_GATE`=图文上下文、来源与阻塞披露共同PASS.
+`UI_METHOD`=读取用户视觉目标→发现可用Skill/渲染证据→实现或调整信息层级与交互状态→以实际渲染/测试复核→扫描发布面;无渲染证据只说明未知,不编造结论.`DOCUMENT_METHOD`=列出影响结论的文字/图片/图表/附件/媒体→逐项回到所在上下文理解→将判断绑定来源→覆盖全部关键对象或列出阻塞;图文冲突或缺失保留不确定性.
 "#),
 ];
 
@@ -116,4 +173,9 @@ pub const SUMMARIES: &[(&str, &str)] = &[
     ("security", "安全执行规范：工件范围、证据优先级、调查方法、工具聚焦、分析重点"),
     ("compaction", "目标压缩规范：九步无损压缩方法与禁令"),
     ("plan", "Plan 模式规范：22 个门 + 语义追加，生命周期/TODO/验收/闭环/归档全量"),
+    ("promote", "晋升规范：整理门、落盘方式、批准权威、决定集、暂存件、收尾盘点、平实语言"),
+    ("attach", "附件域规范：目录规则、清单回写、两步编辑协议、漂移检测、复制语义、旧库兼容"),
+    ("vault", "凭据保险箱规范：范围、访问操作、身份索引预读、引用语义、懒补齐、入箱授权、用途字段"),
+    ("stopbudget", "停止预算规范：失败签名、账本、计数规则、三级退化预算、振荡检测、重入条件"),
+    ("ui", "UI 与复合文档规范：触发、Skill 发现、交付门、图文绑定、来源可溯、递归解析完备"),
 ];
