@@ -34,6 +34,21 @@ use std::process::Command;
 /// 三个镜像都是 raw.githubusercontent.com 的前缀代理,所以 `{base}/{rel}` 这套
 /// 拼装对它们全部成立。jsDelivr 用 `gh/{repo}@{branch}` 表示分支,形态不同但拼
 /// 完同样是"base + 相对路径",因此并列在这里不破坏统一处理。
+/// 这次要试哪些源。
+///
+/// 关键规则：调用方显式给了源，就**只**用它，不回退。
+///
+/// 把 `--url` 插到列表最前面然后继续回退，会造成一个很难察觉的假验证：用户以为
+/// 在内网镜像上验证新版，实际镜像不可达后被 GitHub 接上，最后打印"已是最新"。
+/// 屏幕上只有一行"不可达"紧跟一个成功结论，没有任何提示说"你指定的源没被用上"。
+/// 验证的意义就是确认那个源能用，悄悄换源等于把验证做废。
+fn pick_sources(repo: &str, url: Option<&str>) -> Vec<(String, String)> {
+    match url {
+        Some(u) => vec![("--url".to_string(), u.trim_end_matches('/').to_string())],
+        None => sources(repo),
+    }
+}
+
 fn sources(repo: &str) -> Vec<(String, String)> {
     let raw = format!("https://raw.githubusercontent.com/{repo}/downloads");
     vec![
@@ -76,18 +91,47 @@ fn ver_tuple(v: &str) -> (u64, u64, u64) {
 /// 一个对象里的一层数组。找的是 `"target":"<三元组>"` 那一段,然后在它之后读到
 /// 下一个 `}` 为止——字段顺序由 CI 固定生成,不会跨行跳动。
 fn pick_entry(manifest: &str, target: &str) -> Option<(String, u64, String)> {
-    let key = format!("\"target\":\"{}\"", target);
-    let at = manifest.find(&key)?;
+    // 按 JSON 的语义找条目，不做"紧凑字符串"假设。
+    //
+    // 原先用 `"target":"<triple>"` 这种把冒号两侧空白都写死的模式，而 CI 恰好
+    // 生成的就是紧凑格式，于是它一直工作。一旦用 `python3 -m json.tool`、
+    // `jq` 或 `json.dumps` 重新格式化（冒号后多一个空格），查找立刻落空——
+    // 而报出来的话是"里面没有 x86_64-unknown-linux-musl"，把 JSON 解析问题
+    // 说成了"这个源没有你要的架构"。
+    //
+    // 同一份 manifest 换个工具打印就不认，说明解析写错了对象：manifest 是 JSON，
+    // 不是某个脚本拼接出来的固定格式文本。
+    let key = format!("\"target\"");
+    let mut from = 0usize;
+    let at = loop {
+        let at = manifest[from..].find(&key)? + from;
+        // 取 `"target"` 之后、下一个 `"` 之前的值，逐字符跳过空白。
+        let rest = &manifest[at + key.len()..];
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix(':')?;
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let end = rest.find('"')?;
+        if &rest[..end] == target {
+            break at;
+        }
+        from = at + key.len();
+    };
     let tail = &manifest[at..];
     let end = tail.find('}')?;
     let obj = &tail[..end];
     // 字符串字段。`size` 不走这里——它在 manifest 里是裸数字(`"size":1617896`),
     // 加引号去找会静默读成 0,而 0 在"跳过下载"和"校验"两处都被当成合法值。
+    // 字段提取同样不能把冒号两侧的空白写死。`"sha256":"..."` 只在紧凑排版下
+    // 成立，而 `"sha256": "..."` 是同一个 JSON 的另一种合法写法——换了排版就
+    // 读成 None，再往上表现成"这个源没有你要的架构"。
     let sfield = |name: &str| -> Option<String> {
-        let k = format!("\"{}\":\"", name);
-        let s = obj.find(&k)? + k.len();
-        let e = obj[s..].find('"')? + s;
-        Some(obj[s..e].to_string())
+        let k = format!("\"{}\"", name);
+        let at = obj.find(&k)? + k.len();
+        let rest = obj[at..].trim_start().strip_prefix(':')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
     };
     let nfield = |name: &str| -> Option<u64> {
         let k = format!("\"{}\":", name);
@@ -107,13 +151,18 @@ fn pick_entry(manifest: &str, target: &str) -> Option<(String, u64, String)> {
         return None;
     }
     // version 在文件顶层而不是条目里;老 manifest 没有它,回落到空。
+    // 同样不假设紧凑排版:第三处把空白写死的地方,改一处漏另一处的效果是
+    // "条目认出来了、版本读不到",而提示语会说成"manifest 未声明版本"。
     let version = {
-        let k = "\"version\":\"";
+        let k = "\"version\"";
         manifest
             .find(k)
-            .and_then(|s| {
-                let s = s + k.len();
-                manifest[s..].find('"').map(|e| manifest[s..s + e].to_string())
+            .and_then(|at| {
+                let rest = manifest[at + k.len()..].trim_start();
+                let rest = rest.strip_prefix(':')?.trim_start();
+                let rest = rest.strip_prefix('"')?;
+                let end = rest.find('"')?;
+                Some(rest[..end].to_string())
             })
             .unwrap_or_default()
     };
@@ -248,10 +297,16 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     // `--url` 必须同时作用于 manifest 与文件。只作用一半会出现"文件从镜像取、
     // manifest 从 GitHub 取",而镜像存在的理由恰恰是 GitHub 不通——那时它两个都
     // 取不到,却报得像只有文件失败。
-    let mut srcs = sources(&repo);
-    if let Some(u) = a.get("url") {
-        srcs.insert(0, ("--url".to_string(), u.trim_end_matches('/').to_string()));
-    }
+    // 用户显式给了源，就只用它。
+    //
+    // 原先是把 `--url` 插到列表最前面然后继续回退，于是 `--url` 指向一个不可达的
+    // 镜像时，后面的 GitHub 会接上并成功，最终打印"已是最新"。用户以为自己在测
+    // 内网镜像，实际测的永远是公网——而回退发生时屏幕上也只是一行"不可达"，后面
+    // 紧跟一个成功结论，没有任何提示说"你指定的源没被用上"。
+    //
+    // 指定了源却悄悄换了源，等于把"验证"这件事做废：验证的意义就是确认那个源能用。
+    let srcs = pick_sources(&repo, a.get("url"));
+    let explicit = a.get("url").is_some();
     let mut failures: Vec<String> = Vec::new();
     let mut entry: Option<(String, u64, String, String)> = None; // sha,size,ver,源名
     let mpath = dir.join(".abook-manifest.json");
@@ -289,10 +344,16 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     let (want_sha, want_size, remote_ver, from) = match entry {
         Some(e) => e,
         None => {
+            // 显式指定源时不提"回退到 GitHub"，那条路已被主动关掉。
+            let hint = if explicit {
+                "指定了 --url 就只认这个源，不会回退到公网。请确认目录/基地址存在且含 manifest.json 与 <triple>/abook。"
+            } else {
+                "1) 直接指定镜像: abook upgrade --url <基地址>\n  2) 手取 https://raw.githubusercontent.com/REPO/downloads/TARGET/abook 放进安装目录\n  3) 若是私有仓库, 设置 GITHUB_TOKEN 走 API 路径"
+            };
             return blocked(format!(
-                "所有源都取不到可用的 manifest。\n  逐条结果:\n    {}\n可行做法:\n  1) 直接指定镜像: abook upgrade --url <基地址>\n  2) 手取 https://raw.githubusercontent.com/{repo}/downloads/{target}/abook 放进 {}\n  3) 若是私有仓库, 设置 GITHUB_TOKEN 走 API 路径",
+                "取不到可用的 manifest。\n  逐条结果:\n    {}\n可行做法:\n  {}",
                 failures.join("\n    "),
-                dir.display()
+                hint.replace("REPO", &repo).replace("TARGET", target)
             ))
         }
     };
@@ -500,7 +561,9 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
 }
 
 fn count_entries(manifest: &str) -> usize {
-    manifest.matches("\"target\":").count()
+    // 数 `"target"` 这个键本身，不带冒号——带上就把空白写死了，
+    // 换一种排版就数成 0 条，而 0 条会被读成"manifest 是空的"。
+    manifest.matches("\"target\"").count()
 }
 
 #[cfg(test)]
@@ -509,6 +572,76 @@ mod tests {
 
     /// 版本比较最容易错的地方:字符串比较会把 1.6.9 判成比 1.6.15 新,而表现是
     /// "永远说已是最新",没有报错可循。
+    /// 同一份 manifest 换个工具打印，语义完全一样，工具必须都认。
+    ///
+    /// 这条钉住的是一个真实缺陷：解析曾把 `"target":"x"` 这种紧凑写法写死，
+    /// CI 恰好生成紧凑格式，于是一直工作。任何人用 `jq` 或 `json.dumps` 重新
+    /// 格式化（冒号后多一个空格），查找立刻落空，而报出来的话是"这个源没有你
+    /// 要的架构"——把 JSON 解析问题说成了"没有这个架构"。
+    ///
+    /// 三处都写死过：target 查找、条目字段提取、顶层 version 提取。改一处漏
+    /// 另一处的表现还各不相同（分别是"没有该架构"和"manifest 未声明版本"），
+    /// 所以三条一起测。
+    #[test]
+    fn manifest_parsing_ignores_formatting_whitespace() {
+        let compact = r#"{"schema":"abook-downloads/1","version":"1.7.0","files":[
+{"target":"x86_64-unknown-linux-musl","os":"linux","arch":"x86_64","libc":"musl","file":"x86_64-unknown-linux-musl/abook","size":123,"sha256":"abc"},
+{"target":"aarch64-apple-darwin","os":"macos","arch":"aarch64","libc":"libSystem","file":"aarch64-apple-darwin/abook","size":456,"sha256":"def"}]}"#;
+        let spaced = r#"{
+  "schema": "abook-downloads/1",
+  "version": "1.7.0",
+  "files": [
+    {
+      "target": "x86_64-unknown-linux-musl",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "musl",
+      "file": "x86_64-unknown-linux-musl/abook",
+      "size": 123,
+      "sha256": "abc"
+    }
+  ]
+}"#;
+        for (label, m) in [("紧凑", compact), ("带空格", spaced)] {
+            let (sha, size, ver) = pick_entry(m, "x86_64-unknown-linux-musl")
+                .unwrap_or_else(|| panic!("{label} 排版读不出条目"));
+            assert_eq!(sha, "abc", "{label}: sha");
+            assert_eq!(size, 123, "{label}: size");
+            assert_eq!(ver, "1.7.0", "{label}: version");
+        }
+        // 条目数同样不能把空白写死：数成 0 会被读成"manifest 是空的"。
+        assert_eq!(count_entries(compact), 2);
+        assert_eq!(count_entries(spaced), 1);
+        // 不存在的目标必须是 None，而不是回落到第一条。
+        assert!(pick_entry(spaced, "riscv64gc-unknown-linux-gnu").is_none());
+    }
+
+    /// 显式指定的源不得回退。
+    ///
+    /// 这条钉住的是"假验证"：`--url` 指向不可达镜像时，若后面还挂着五个公网源，
+    /// GitHub 会接上并成功，最终打印"已是最新"。用户以为在验证内网镜像，实际
+    /// 验证的永远是公网，而且屏幕上没有任何提示说明源被换掉了。
+    ///
+    /// 显式指定源的语义就是"要么它行，要么失败"。
+    #[test]
+    fn explicit_url_never_falls_back_to_public_sources() {
+        let only = pick_sources("Sharl210/abook", Some("https://mirror.internal/abook/"));
+        assert_eq!(only.len(), 1, "显式指定源时不该再有别的源: {only:?}");
+        assert_eq!(only[0].0, "--url");
+        // 末尾斜杠要归一，否则拼出来是 `...//manifest.json`。
+        assert_eq!(only[0].1, "https://mirror.internal/abook");
+
+        // 本地目录形态同样只留一条。
+        let local = pick_sources("Sharl210/abook", Some("/tmp/mirror"));
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].1, "/tmp/mirror");
+
+        // 没指定时保留完整回退链，且第一条是 GitHub。
+        let all = pick_sources("Sharl210/abook", None);
+        assert_eq!(all.len(), 5, "{all:?}");
+        assert_eq!(all[0].0, "GitHub");
+    }
+
     #[test]
     fn version_ordering_is_numeric_not_lexical() {
         assert!(ver_tuple("1.6.15") > ver_tuple("1.6.9"));
