@@ -169,22 +169,56 @@ pub fn run(a: &Args) -> R<i32> {
             // 一份损坏的凭据条目在 verify 眼里根本不存在：它自检剩下的条目，
             // 全部通过，报告"0 失败"。自检用一个会把问题藏起来的列表去查问题，
             // 结构上就不可能发现问题。
+            // 保险箱目录本身读不到，与"保险箱是空的"是两件事，不能都报通过。
+            //
+            // `read_dir` 失败在这里曾是 `if let Ok(...)`，错误被静默吞掉，随后
+            // `list_entries` 也返回空列表，于是两边都是 0——`ABOOK_ROOT` 指到
+            // 一个没有 vault/ 的目录，verify 照样回答"自检 0 条，失败 0 条"，
+            // 退出码 0。凭据没备份、路径配错、权限不对，全都表现为"一切正常"。
+            let vdir = crate::vault::vault_dir(&root);
+            if !vdir.is_dir() {
+                if a.has("json") {
+                    crate::say_line!(
+                        "{{\"ok\":false,\"reason\":{}}}",
+                        jstr("保险箱目录不存在——这不等于库是空的")
+                    );
+                } else {
+                    crate::say_line!(
+                        "FAIL 保险箱目录 {} 不存在。\n     这不等于没有凭据：要么库里本来就没建起来，\n     要么 ABOOK_ROOT / HOME 指错了地方。",
+                        vdir.display()
+                    );
+                }
+                return Ok(3);
+            }
             let mut unreadable: Vec<String> = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(crate::vault::vault_dir(&root)) {
-                let mut on_disk: Vec<String> = rd
-                    .flatten()
-                    .filter(|e| e.path().is_file())
-                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                    .filter(|n| !n.starts_with('.'))
-                    .collect();
-                on_disk.sort();
-                let known: std::collections::HashSet<String> =
-                    list_entries(&root).iter().map(|e| entry_name(&e.ident)).collect();
-                for n in on_disk {
-                    if !known.contains(&n) {
-                        // 解不开、或者解出来但没有标识。两种都属于"这个文件
-                        // 里的凭据现在拿不到了"，必须报出来。
-                        unreadable.push(n);
+            match std::fs::read_dir(&vdir) {
+                Err(e) => {
+                    if a.has("json") {
+                        crate::say_line!(
+                            "{{\"ok\":false,\"reason\":{}}}",
+                            jstr(&format!("保险箱目录读不到：{e}"))
+                        );
+                    } else {
+                        crate::say_line!("FAIL 保险箱目录读不到：{e}");
+                    }
+                    return Ok(6);
+                }
+                Ok(rd) => {
+                    let mut on_disk: Vec<String> = rd
+                        .flatten()
+                        .filter(|e| e.path().is_file())
+                        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                        .filter(|n| !n.starts_with('.'))
+                        .collect();
+                    on_disk.sort();
+                    let known: std::collections::HashSet<String> =
+                        list_entries(&root).iter().map(|e| entry_name(&e.ident)).collect();
+                    for n in on_disk {
+                        if !known.contains(&n) {
+                            // 解不开、或者解出来但没有标识。两种都属于"这个文件
+                            // 里的凭据现在拿不到了"，必须报出来。
+                            unreadable.push(n);
+                        }
                     }
                 }
             }
