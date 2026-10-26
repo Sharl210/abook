@@ -57,6 +57,24 @@ fn main() {
     }
     println!("cargo:rustc-env=ABOOK_SRC_FP={h:016x}");
     println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
+
+    // 打了新 tag 却没重编，二进制会一直自称上一个版本。
+    //
+    // 版本号是 `git describe` 算出来的，但 cargo 不知道"tag 列表"是构建输入，
+    // 于是只要源码没动它就认为无事可做，直接报 `Finished in 0.00s`，
+    // 编出来的还是旧版本号。本地刚踩过：打完 v1.6.10 再 build，`version`
+    // 仍然回答 1.6.9，必须先 `touch src/main.rs` 强制重编才对。
+    //
+    // 把决定版本号的 git 元数据声明成构建依赖，让 cargo 自己发现"该重编了"。
+    // 只盯三个小文件/目录，不是整个 `.git`（那个每次操作都在变，会把增量
+    // 编译彻底废掉）。三个都不存在时（tarball、浅目录导出）就不声明，
+    // 让版本号走 `CARGO_PKG_VERSION` 兜底。
+    for p in [".git/HEAD", ".git/packed-refs", ".git/refs/tags"] {
+        if Path::new(p).exists() {
+            println!("cargo:rerun-if-changed={p}");
+        }
+    }
+
     println!("cargo:rustc-env=ABOOK_VERSION={}", version());
 }
 
