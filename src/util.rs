@@ -1357,8 +1357,20 @@ impl LibLock {
                             .unwrap_or(0);
                         let aged = started > 0
                             && (now_secs() as u64).saturating_sub(started) > STALE_LOCK_SECS;
-                        let dead = pid > 0 && !pid_alive(pid);
-                        if aged && dead {
+                        // 进程确实没了就是确定事实，不用再等满 600 秒。
+                        //
+                        // 原来的条件是 `aged && dead`，等于"已经死了也得等十分钟"——
+                        // 下次写库的人被白白挡十次 30 秒等待，才能继续。而
+                        // `pid_alive` 在 /proc 存在时给的是确定答案，`pid > 0`
+                        // 说明锁文件里的 pid 也是读得出来的，这时候"死了"不需要
+                        // 年龄来兜底。
+                        //
+                        // 年龄只在**判断不了是否存活**时才有意义（读不到 pid，
+                        // 或平台没有 /proc）——那时宁可多等，也不能抢走一个
+                        // 正在写长任务的活锁。
+                        let dead_certain = pid > 0 && !pid_alive(pid);
+                        let unknown_and_aged = pid == 0 && aged;
+                        if dead_certain || unknown_and_aged {
                             let _ = std::fs::remove_file(&path);
                             continue;
                         }

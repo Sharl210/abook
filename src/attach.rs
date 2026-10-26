@@ -176,6 +176,17 @@ pub fn scan(rec_path: &Path) -> Files {
                 stack.push(p);
                 continue;
             }
+            // 复制过程中断会留下 `.名字.tmp<pid>.<纳秒>` 这样的半截文件。
+            // 它的存在说明那次复制没走到底（进程被 SIGKILL/SIGXFSZ 杀掉时
+            // 清理代码根本没机会执行）。留在目录里会被当成一份完整附件统计，
+            // 而它其实不完整——这比没有更坏。所以这里识别出来直接删掉。
+            //
+            // 判据收得很窄：以 `.` 开头、含 `.tmp`、结尾是全数字，三者同时满足
+            // 才认。用户自己起名叫 `.tmp` 开头的正常附件不会误伤。
+            if is_stale_tmp(&p) {
+                let _ = fs::remove_file(&p);
+                continue;
+            }
             let meta = match fs::metadata(&p) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -787,8 +798,23 @@ pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
     // 这几种情况调用方都有办法自己解决——先把文件搬到它读得动的地方，再拿
     // 那个路径重来一次。所以错误信息必须写清"卡在哪一步"和"接着该怎么做"，
     // 而不是让调用方对着 `Permission denied` 猜。
+    //
+    // 关键：**不能直接写到目标路径**。
+    //
+    // 本节原来直接 `fs::copy(src, dst)`，这在 `--force` 覆盖已有附件时是致命的：
+    // `fs::copy` 会先把目标截断成 0 字节再往里写，一旦中途失败（磁盘满、超文件
+    // 大小限制、进程被 SIGXFSZ/SIGKILL 杀掉、网络盘断开），旧附件内容就已经没了，
+    // 而旧错误路径上的 `remove_file(dst)` 还会把残骸一并删掉——旧内容彻底不可恢复。
+    // 实测：`ulimit -f 1` 下对一份已有内容的附件做 `--force` 覆盖（源 1 MB），
+    // 进程被 SIGXFSZ 终止，目标变成 1024 字节全零，原内容消失。
+    //
+    // 所以改成：先复制到**目标同目录**的临时文件（必须同目录，rename 才不会跨
+    // 设备、才能原子），完整复制成功后再 rename 覆盖目标。rename 是原子的：目标
+    // 要么还是原来那份完整的旧文件，要么已经是完整的新文件，不存在半截状态。
+    // 失败时只清临时文件，旧目标一个字节都不动。
     let readable = fs::File::open(src).is_ok();
-    if let Err(e) = fs::copy(src, dst) {
+    let tmp = tmp_sibling(dst);
+    if let Err(e) = fs::copy(src, &tmp) {
         let hint = if !readable {
             format!(
                 "读不了源文件（{e}）。先把文件复制到你有权限的位置，再用那个路径重试：\n                 \tcp '<源>' <可写目录>\n                 \tabook attach add <记录> <可写目录里的那份>\n                 安卓上 /data/data 被 tmpfs 遮罩，取真实路径用 /proc/1/root/data/data/...；                 提权先 su -c id 再判断，SELinux 拒绝会显示成 No such file"
@@ -802,10 +828,18 @@ pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
                  直接复制大文件容易中断"
             )
         };
-        // 半截文件必须清掉：留在附件目录里会被 scan 统计成一份完整附件，
-        // 而它其实不完整——这比没有更坏。
-        let _ = fs::remove_file(dst);
+        // 只清临时文件。目标路径上的旧附件**必须保持原样**——它可能是一份完好
+        // 的证据，这次覆盖失败与它无关，不该被牵连。
+        let _ = fs::remove_file(&tmp);
         return Err(EE::Io(hint));
+    }
+    // 落到目标位置。rename 覆盖是原子的：失败时旧文件仍在原处。
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(EE::Io(format!(
+            "复制完成但落到目标位置失败（{e}）。旧附件保持原样未被改动；\
+             检查目标目录权限后重试"
+        )));
     }
     // 复制后删源，只在调用方要求搬走时做。删之前已经确认目标大小一致，
     // 所以这里失败也不会造成数据丢失——源还在。
@@ -823,6 +857,46 @@ pub fn place(src: &Path, dst: &Path, move_mode: bool, force: bool) -> R<Moved> {
 /// 看的是**最近的已存在祖先目录**：目标文件通常还不存在，`dst` 本身
 /// `metadata` 会失败。跨设备时 `rename` 会返回 `EXDEV`，所以这个判断只是
 /// 用来决定先试哪条路，判错不会出错，最多多一次失败的 `rename`。
+/// 目标同目录下的临时文件名。
+///
+/// **必须和目标在同一个目录**：`fs::rename` 只在同一设备内原子，跨目录跨设备会
+/// 退化成「先删目标再复制」，那正是我们要避免的半截状态。
+///
+/// 名字里带 pid 与纳秒，是为了并发下两个进程不会撞到同一个临时文件上。
+/// 是不是一次中断的复制留下的半截临时文件。
+///
+/// 判据三者同时满足：文件名以 `.` 开头、中间含 `.tmp`、结尾全是数字。
+/// 对应的正是 [`tmp_sibling`] 生成的形态，所以收得很窄，不会误删用户
+/// 自己命名成 `.tmp` 开头的正常附件。
+fn is_stale_tmp(p: &Path) -> bool {
+    let Some(name) = p.file_name().map(|s| s.to_string_lossy().to_string()) else {
+        return false;
+    };
+    if !name.starts_with('.') || !name.contains(".tmp") {
+        return false;
+    }
+    let tail: String = name
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    !tail.is_empty()
+}
+
+fn tmp_sibling(dst: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = dst
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".to_string());
+    let dir = dst.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!(".{name}.tmp{pid}.{nanos}"))
+}
+
 fn same_device(a: &Path, b: &Path) -> bool {
     let da = device_of(a);
     let db = device_of(b);
