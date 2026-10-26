@@ -227,6 +227,22 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
     Ok(if res.hits.is_empty() { 3 } else { 0 })
 }
 
+/// Advise the caller which version it just read.
+///
+/// Suppressed under `--json` (where `version` is a real field) and under
+/// `--quiet`, so machine consumers and scripts that pipe the body are unaffected.
+fn print_version_footer(ver: &str, a: &Args) {
+    if a.has("json") || a.has("quiet") {
+        return;
+    }
+    // The fingerprint appears exactly once: a footer that repeats it (once as
+    // "[version X]" and once inside a suggested command) makes `grep -o` and any
+    // other simple extractor return two values, and a caller that takes them all
+    // ends up passing a two-line fingerprint -- which then reproduces the version
+    // twice inside the mismatch message.
+    eprintln!("[version {ver}] 写回时带上 --if-version 可防止覆盖他人改动");
+}
+
 pub fn cmd_show(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     let sel = a.need_pos(0, "记录选择器（路径 / 文件名 / ID）")?;
@@ -237,12 +253,14 @@ pub fn cmd_show(a: &Args) -> R<i32> {
     // something that expects prose got headers and a body glued together.
     // Both names still route here; only the output differs.
     if a.cmd == "cat" {
+        let ver = file_version(&path);
         if a.has("json") {
             println!(
-                "{{\"path\":{},\"lib\":{},\"body\":{},\"updated\":{}}}",
+                "{{\"path\":{},\"lib\":{},\"body\":{},\"version\":{},\"updated\":{}}}",
                 jstr(&rel(&root, &path)),
                 jstr(lib.name()),
                 jstr(&rec.body),
+                jstr(&ver),
                 rec.updated()
             );
         } else {
@@ -250,12 +268,17 @@ pub fn cmd_show(a: &Args) -> R<i32> {
             if !rec.body.ends_with('\n') {
                 println!();
             }
+            // The version goes last so it never contaminates piped body text, and
+            // it is printed at all so a caller can hand it back on write. Without
+            // it, "read then edit" has no way to notice that something changed in
+            // between -- the write simply wins.
+            print_version_footer(&ver, a);
         }
         return Ok(0);
     }
     if a.has("json") {
         println!(
-            "{{\"path\":{},\"lib\":{},\"fields\":{{{}}},\"body\":{},\"deviations\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
+            "{{\"path\":{},\"lib\":{},\"fields\":{{{}}},\"body\":{},\"version\":{},\"deviations\":{},\"created\":{},\"updated\":{},\"when\":{}}}",
             jstr(&rel(&root, &path)),
             jstr(lib.name()),
             rec.fields
@@ -264,6 +287,7 @@ pub fn cmd_show(a: &Args) -> R<i32> {
                 .collect::<Vec<_>>()
                 .join(","),
             jstr(&rec.body),
+            jstr(&file_version(&path)),
             rec.devs.len(),
             rec.created(),
             rec.updated(),
@@ -350,6 +374,10 @@ pub fn cmd_show(a: &Args) -> R<i32> {
         println!("[PROMOTION]");
         println!("{}", p.trim_end());
     }
+    // Printed after everything else so it is never mistaken for record content,
+    // and always printed so a caller can carry it into the write. See
+    // `util::file_version` for why the caller must hold it across the gap.
+    print_version_footer(&file_version(&path), a);
     // Deviations are the tolerance ledger: which rule fired, on what text.
     // Without `--verbose`/`--deviations` they stay hidden so ordinary output
     // is unchanged.

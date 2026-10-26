@@ -226,26 +226,10 @@ fn unmap_record(root: &Path, lib: Lib, relpath: &str) -> R<()> {
 }
 
 fn sync_global_counts(root: &Path) -> R<()> {
-    let gp = root.join("Global.md");
-    if !gp.exists() {
-        return Ok(());
-    }
-    let mut g = BookFile::load(&gp)?;
-    let c = list_md(&root.join(Lib::Canonical.dir())).len();
-    let n = list_md(&root.join(Lib::Candidate.dir())).len();
-    g.set_state("CANONICAL_RECORDS", &c.to_string());
-    g.set_state("CANDIDATE_RECORDS", &n.to_string());
-    for lib in [Lib::Canonical, Lib::Candidate] {
-        if let Ok(at) = Atlas::load(&root.join(lib.atlas())) {
-            let key = if lib == Lib::Canonical {
-                "CANONICAL_ATLAS_COVERED_THROUGH"
-            } else {
-                "CANDIDATE_ATLAS_COVERED_THROUGH"
-            };
-            g.set_state(key, &at.get("COVERED_THROUGH"));
-        }
-    }
-    write_atomic(&gp, &g.render())
+    // One implementation for every write path. This used to be a second copy that
+    // counted with `list_md` and wrote only `Global.md`'s body, so a count could be
+    // right by one rule and wrong by the other depending on which command ran.
+    crate::cmd_write_sync::sync_counts(root)
 }
 
 pub fn cmd_write(a: &Args) -> R<i32> {
@@ -598,6 +582,13 @@ pub fn cmd_update(a: &Args) -> R<i32> {
             }
         }
     }
+    // `update` replaces field values wholesale, so an agent that read the record
+    // minutes ago and edits from memory would silently revert anything written in
+    // between. The fingerprint it was shown is the only evidence of what it
+    // actually read.
+    if let Some(want) = a.get("if-version") {
+        require_version(&path, want)?;
+    }
     write_atomic(&path, &rec.render())?;
     let back = Record::parse(&path, lib)?;
     if back.get("TITLE").is_empty() {
@@ -694,6 +685,9 @@ pub fn cmd_restore(a: &Args) -> R<i32> {
     rec.set("STATUS", "ACTIVE");
     // Reactivating is an edit like any other, so it counts as touched.
     rec.set("UPDATED", &now_iso_local());
+    if let Some(want) = a.get("if-version") {
+        require_version(&path, want)?;
+    }
     write_atomic(&path, &rec.render())?;
     let back = Record::parse(&path, lib)?;
     map_record(&root, &back, &opt(a, "branch"))?;

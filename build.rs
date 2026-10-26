@@ -56,4 +56,55 @@ fn main() {
         println!("cargo:rerun-if-changed={}", f.display());
     }
     println!("cargo:rustc-env=ABOOK_SRC_FP={h:016x}");
+    println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
+    println!("cargo:rustc-env=ABOOK_VERSION={}", version());
+}
+
+/// The version this binary announces.
+///
+/// Why not just `CARGO_PKG_VERSION`: that field only changes when a human
+/// remembers to edit it, and nobody did -- the repo shipped tags v1.0.0 through
+/// v1.6.1 while `Cargo.toml` still said 1.0.0, so every published binary
+/// misreported itself as the first release. `version` could not be used to tell
+/// two builds apart, and the release page described a version the download did
+/// not claim. Trusting a hand-edited field is the bug; deriving the answer from
+/// the tag cannot drift from it.
+///
+/// Order: the release tag CI checked out, then `git describe`, then
+/// `Cargo.toml`. The last one only applies to a tarball with no VCS metadata.
+fn version() -> String {
+    // CI builds on a tag checkout; GITHUB_REF_NAME is exactly `v1.6.1` there.
+    if let Ok(r) = std::env::var("GITHUB_REF_NAME") {
+        let v = r.trim().trim_start_matches('v').to_string();
+        if is_semverish(&v) {
+            return v;
+        }
+    }
+    // Local build: nearest tag, so a laptop build also reports something real.
+    // `--dirty` is deliberately absent -- a dirty tree already shows up as a
+    // changed `src=` fingerprint, and appending it here would make two builds
+    // of the same tag announce different versions.
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .output()
+    {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .trim_start_matches('v')
+                .to_string();
+            if is_semverish(&v) {
+                return v;
+            }
+        }
+    }
+    std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into())
+}
+
+/// `1.6.1`, `1.6`, `1` -- starts with a digit, holds only digits and dots.
+/// Guards against `git describe` handing back a branch or commit name.
+fn is_semverish(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        && s.chars().all(|c| c.is_ascii_digit() || c == '.')
 }

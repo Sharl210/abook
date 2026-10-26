@@ -2,9 +2,19 @@
 //!   [MEMORY_BOOK_V2] ... [/MEMORY_BOOK_V2]
 //!   [MEMORY_CONTENT] ... [/MEMORY_CONTENT]
 //! Trailing content after the final tag is preserved verbatim.
+//!
+//! The header pair is spelled two ways in practice: the format documentation
+//! says `[MEMORY_BOOK_V2]`, while every real `Global.md` and `Index.md` in the
+//! shipped library opens with `[MEMORY_FILE_CONTENTS]`. Both are accepted here;
+//! parsing only the documented one left the real headers invisible.
 
 use crate::util::*;
 use std::path::Path;
+
+/// Opening tags of the header block, as found in real files and in the spec.
+const HEADER_OPEN: &[&str] = &["[MEMORY_FILE_CONTENTS]", "[MEMORY_BOOK_V2]"];
+/// Closing tags of the header block.
+const HEADER_CLOSE: &[&str] = &["[/MEMORY_FILE_CONTENTS]", "[/MEMORY_BOOK_V2]"];
 
 #[derive(Clone, Debug, Default)]
 pub struct BookFile {
@@ -34,11 +44,17 @@ impl BookFile {
         let mut state = 0u8; // 0 out, 1 meta, 2 content -> 3 tail
         for line in raw.lines() {
             let t = line.trim();
-            if t == "[MEMORY_BOOK_V2]" {
+            // Two header tag pairs exist in the wild: the format doc names
+            // `[MEMORY_BOOK_V2]`, but every real Global.md and Index.md opens
+            // with `[MEMORY_FILE_CONTENTS]`. Recognizing only the documented pair
+            // meant the header of the shipped library never parsed -- and since
+            // `render()` splices `head_raw` back verbatim, a write silently
+            // discarded every header field it thought it had set.
+            if HEADER_OPEN.contains(&t) {
                 state = 1;
                 continue;
             }
-            if t == "[/MEMORY_BOOK_V2]" {
+            if HEADER_CLOSE.contains(&t) {
                 state = 0;
                 continue;
             }
@@ -141,6 +157,90 @@ impl BookFile {
             s.push('\n');
         }
         self.content = s;
+    }
+
+    /// Value of `KEY=` in the header block (Global.md / Index.md entry header).
+    ///
+    /// Separate from [`state`](Self::state): the real files carry the record
+    /// counts **twice**, once in the header (`CANDIDATE_RECORDS=437`) and once in
+    /// the body's `## Current State` (`CANDIDATE_RECORDS=438`). The two drifting
+    /// apart is what made the tool report a count the file itself contradicted.
+    pub fn header(&self, k: &str) -> Option<String> {
+        for line in self.head_raw.lines() {
+            if let Some((kk, v)) = line.split_once('=') {
+                if kk.trim() == k {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Set `KEY=` in the header block, editing only that one line.
+    ///
+    /// Works on `head_raw`, which `render()` splices back byte-for-byte, so this
+    /// is the only way a header field can actually change. Missing keys are
+    /// inserted just before the header's closing tag, keeping the block intact.
+    pub fn set_header(&mut self, k: &str, v: &str) -> bool {
+        if self.head_raw.is_empty() {
+            // No header block at all: fall back to the meta list, which `render`
+            // writes out when it has no raw bytes to preserve.
+            if let Some(e) = self.meta.iter_mut().find(|(kk, _)| kk == k) {
+                e.1 = v.to_string();
+            } else {
+                self.meta.push((k.to_string(), v.to_string()));
+            }
+            return true;
+        }
+        let mut lines: Vec<String> = self.head_raw.lines().map(|s| s.to_string()).collect();
+        let mut hit = false;
+        for line in lines.iter_mut() {
+            if let Some((kk, _)) = line.split_once('=') {
+                // Only rewrite a field line, not prose that happens to contain `=`.
+                if kk.trim() == k && !kk.trim().starts_with(['#', '-', '*', '|']) {
+                    *line = format!("{k}={v}");
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if !hit {
+            let pos = lines
+                .iter()
+                .position(|l| HEADER_CLOSE.contains(&l.trim()))
+                .unwrap_or(lines.len());
+            lines.insert(pos, format!("{k}={v}"));
+        }
+        let mut out = lines.join("\n");
+        if self.head_raw.ends_with('\n') {
+            out.push('\n');
+        }
+        self.head_raw = out;
+        true
+    }
+
+    /// Update a count-style key everywhere the file carries it: header and body.
+    ///
+    /// Returns whether anything was written. Writing only the body occurrence (the
+    /// old behaviour) left `Global.md` stating two different record counts and
+    /// never touched `Index.md` at all, which has the field only in its header.
+    pub fn set_everywhere(&mut self, k: &str, v: &str) -> bool {
+        let mut wrote = false;
+        if self.header(k).is_some() {
+            self.set_header(k, v);
+            wrote = true;
+        }
+        if self.state(k).is_some() {
+            self.set_state(k, v);
+            wrote = true;
+        }
+        if !wrote {
+            // Neither place has it yet: put it in the header, which is the
+            // authoritative spot for facts about the library as a whole.
+            self.set_header(k, v);
+            wrote = true;
+        }
+        wrote
     }
 
     /// Value of `KEY=` in the content section (Global.md Current State).

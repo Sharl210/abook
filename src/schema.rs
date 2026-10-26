@@ -313,7 +313,7 @@ fn wanted(only: &[String], tag: &str) -> bool {
 
 /// 可用类别，供 `--only` 提示。
 pub const FIX_CLASSES: &[(&str, &str)] = &[
-    ("id", "ID 对齐文件名"),
+    ("id", "ID 缺失时补文件名（已有则不动）"),
     ("format", "补 FORMAT"),
     ("enum", "KIND/MATURITY/AUTHORITY/STATUS/SIZE 枚举大小写归正"),
     ("refs", "引用值还原为规范身份"),
@@ -326,23 +326,27 @@ pub const FIX_CLASSES: &[(&str, &str)] = &[
 pub fn autofix(p: &mut Parsed, lib: Lib, filename: Option<&str>, only: &[String]) -> Vec<String> {
     let mut done = Vec::new();
 
-    // ID 先对齐，因为身份错了后面所有引用都跟着错。
+    // ID 只在**缺失**时补，绝不在已有时覆盖。
     //
-    // 只在一个方向动：文件名是规范形态、而 ID 字段不是。反过来不动——
-    // 文件名是磁盘上的位置，改它等于搬家；改 ID 字段只是把标签写对。
+    // 这里曾经是「文件名合规范、ID 不合规范就覆盖成文件名」，而 `is_scheme_name`
+    // 只认 `N-<15位时间戳>-<8位hex>` 一种形态。正式库的 523 条记录用的是
+    // `AB2-IMS-051` 这类逻辑 ID，全部被判成"不合规范"，于是 `repair --only id
+    // --apply` 一次把 523 个逻辑 ID 全换成了文件名——而地图里的条目仍写着旧 ID，
+    // 所有 `RELATED_IDS` / `PROMOTED_FROM` 引用当场断裂。更糟的是三条自检
+    // （state / reconcile / doctor）都报健康，因为它们查的是计数而不是 ID 形态。
+    //
+    // 现在的判据只有一条：ID 为空才补。ID 是人给它起的名字，工具没有资格替它改名。
+    // 形态检查留给人用 `lint`/`audit` 看，不当修的依据——"看起来不像我们的格式"
+    // 不等于"错了"，尤其当整个库都用这种格式的时候。
+    //
     // 带分号的老式复合行（`ID=x;PROJECT=y;...`）不碰，那是旧库字段打包写法。
     if wanted(only, "id") {
         if let Some(f) = filename {
             let raw = p.get("ID");
-            if !raw.contains(';') {
-                let cur = raw.trim();
+            if !raw.contains(';') && raw.trim().is_empty() {
                 let stem = f.trim_end_matches(".md");
-                if crate::rec::Record::is_scheme_name(f)
-                    && !crate::rec::Record::is_scheme_name(&format!("{cur}.md"))
-                {
-                    set(p, "ID", stem);
-                    done.push(format!("ID={stem}（对齐文件名）"));
-                }
+                set(p, "ID", stem);
+                done.push(format!("ID={stem}（原缺失，补文件名）"));
             }
         }
     }

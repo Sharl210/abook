@@ -144,8 +144,19 @@ pub fn digest_hex(data: &[u8]) -> String {
 }
 
 /// First `n` hex chars of SHA-256 over `data`.
+///
+/// Hex is emitted two characters per digest byte, so an 8-character prefix needs
+/// only the first 4 bytes hashed. The old version built the complete 64-character
+/// string and then kept 8 of them, allocating the other 56 for nothing. This is on
+/// the hot path: `file_version` runs on every `show`, `cat` and `get`, and record
+/// ids are derived the same way.
 pub fn digest_prefix(data: &[u8], n: usize) -> String {
-    let full = digest_hex(data);
-    full.chars().take(n).collect()
+    let mut h = Sha256::new();
+    h.update(data);
+    let full = h.finish();
+    let need = (n + 1) / 2;
+    let mut s = hex(&full[..need.min(full.len())]);
+    s.truncate(n);
+    s
 }
 

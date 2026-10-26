@@ -70,6 +70,74 @@ fn set_line(raw: &mut String, k: &str, v: &str) {
     *raw = out;
 }
 
+/// One entry of the `FILES=` list form.
+///
+/// A different library layout (`FORMAT=AGENTSBOOK_V2_EXPERIMENT`, as shipped by
+/// the AgentsBook v2 migration scripts) lists records as
+///
+/// ```text
+/// FILES=
+///   - AB2-CMP-074|FAILURE|VERIFIED|canonical/records/C-xxx.md|<title>
+/// ```
+///
+/// instead of a comma-separated `PATH=`. The title is free text and may itself
+/// contain `|`, so only the first four separators are structural.
+#[derive(Clone, Debug, Default)]
+pub struct FilesEntry {
+    pub id: String,
+    pub kind: String,
+    pub maturity: String,
+    pub path: String,
+    pub title: String,
+}
+
+impl FilesEntry {
+    /// Parse one `  - a|b|c|path|title` line; `None` when it is not one.
+    fn parse(line: &str) -> Option<FilesEntry> {
+        let t = line.trim();
+        let rest = t.strip_prefix("- ")?;
+        let parts: Vec<&str> = rest.splitn(5, '|').collect();
+        if parts.len() < 4 || parts[3].trim().is_empty() {
+            return None;
+        }
+        let path = parts[3].trim();
+        // A record path always names a markdown file. Requiring that keeps an
+        // ordinary `- some bullet` line in a summary from being read as an
+        // entry and rewritten as one.
+        if !path.ends_with(".md") {
+            return None;
+        }
+        // The id column is a record id or short unit code: never prose. A summary
+        // bullet that happens to contain four pipes and a `.md` name would
+        // otherwise be read as an entry and then *written back* as one, inventing
+        // a record the library does not have.
+        let idcol = parts[0].trim();
+        if idcol.is_empty() || idcol.split_whitespace().count() != 1 {
+            return None;
+        }
+        if !idcol
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
+        {
+            return None;
+        }
+        Some(FilesEntry {
+            id: parts[0].trim().to_string(),
+            kind: parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
+            maturity: parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
+            path: path.to_string(),
+            title: parts.get(4).map(|s| s.trim().to_string()).unwrap_or_default(),
+        })
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "  - {}|{}|{}|{}|{}",
+            self.id, self.kind, self.maturity, self.path, self.title
+        )
+    }
+}
+
 impl Branch {
     pub fn get(&self, k: &str) -> String {
         self.fields
@@ -99,8 +167,220 @@ impl Branch {
         }
     }
 
+    /// True when this card lists records as `FILES=` entry lines.
+    ///
+    /// Three signals, because the shipped library is not uniform: some cards
+    /// put `- ...` lines directly under `BRANCH=`, some put them after
+    /// `SUMMARY=`, and one uses `FILES=` as a marker with the entries further
+    /// down. Keying off the `FILES=` marker alone read every variant as an
+    /// empty card.
+    pub fn uses_files(&self) -> bool {
+        if !self.files().is_empty() || self.fields.iter().any(|(k, _)| k == "FILES") {
+            return true;
+        }
+        self.raw.split_inclusive('\n').any(|l| {
+            let t = l.trim_end_matches(['\n', '\r']);
+            t.starts_with("FILES=")
+        })
+    }
+
+    /// The text that holds this card's entry lines.
+    ///
+    /// `raw` wins when present -- it is what gets written and what the user's
+    /// editor showed. A card created during this run has no source bytes, so its
+    /// list only exists in the parsed field.
+    fn files_source(&self) -> String {
+        if !self.raw.is_empty() {
+            return self.raw.clone();
+        }
+        self.get("FILES")
+    }
+
+    /// Every `- id|kind|maturity|path|title` line on this card, in source order.
+    ///
+    /// Read from the raw bytes rather than from `fields`: the parser folds the
+    /// whole list into one multi-line field value, which is lossy for anything
+    /// we want to rewrite line by line.
+    pub fn files(&self) -> Vec<FilesEntry> {
+        self.files_source()
+            .lines()
+            .filter_map(FilesEntry::parse)
+            .collect()
+    }
+
+    /// Append one entry after the last existing one.
+    ///
+    /// Insertion keeps the list in place: the library's order carries meaning to
+    /// whoever reads the map, so a new entry goes to the end of its own branch
+    /// rather than to the end of the card or the file. When the card has no
+    /// entries yet, it lands under its `FILES=` marker if there is one.
+    pub fn push_files_entry(&mut self, entry: &FilesEntry) {
+        let line = entry.render();
+        let mut lines: Vec<String> = self
+            .raw
+            .split_inclusive('\n')
+            .map(|s| s.to_string())
+            .collect();
+
+        let last_entry = lines
+            .iter()
+            .rposition(|l| FilesEntry::parse(l).is_some());
+        let anchor = match last_entry {
+            Some(i) => Some(i + 1),
+            None => lines.iter().position(|l| l.starts_with("FILES=")).map(|i| i + 1),
+        };
+        match anchor {
+            Some(i) => lines.insert(i, format!("{line}\n")),
+            None => {
+                if !self.raw.is_empty() && !self.raw.ends_with('\n') {
+                    lines.push("\n".to_string());
+                }
+                lines.push(format!("{line}\n"));
+            }
+        }
+        self.raw = lines.concat();
+        self.refresh_files_field();
+    }
+
+    /// Replace this card's whole entry list with `entries`.
+    ///
+    /// Needed when *creating* an entry rather than renaming one: `raw` is what
+    /// gets written and `fields` is what queries read, so both have to carry the
+    /// new row. Building the row from a default `FilesEntry` and pushing it
+    /// through `sync_files_entries` left `kind`, `maturity` and `title` empty --
+    /// the row existed, counted towards the totals, and told a reader nothing.
+    pub fn set_files(&mut self, entries: &[FilesEntry]) {
+        // Drop every entry line currently in the card, keeping everything else
+        // (BRANCH, COUNT, SUMMARY, prose) in place.
+        let kept: Vec<String> = self
+            .raw
+            .split_inclusive('\n')
+            .filter(|l| FilesEntry::parse(l).is_none())
+            .map(|s| s.to_string())
+            .collect();
+        self.raw = kept.concat();
+        // Remove the old field so the marker is rebuilt rather than appended to.
+        self.fields.retain(|(k, _)| k != "FILES");
+        let joined = entries
+            .iter()
+            .map(|e| e.render())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !joined.is_empty() {
+            self.fields.push(("FILES".into(), joined.clone()));
+        }
+        // Write the rows into `raw` right after the `FILES=` marker when there is
+        // one, otherwise append a marker plus the rows at the end.
+        let mut out = String::new();
+        let mut placed = false;
+        for line in self.raw.split_inclusive('\n') {
+            out.push_str(line);
+            if !placed && line.trim_end().starts_with("FILES=") {
+                for e in entries {
+                    out.push_str(&e.render());
+                    out.push('\n');
+                }
+                placed = true;
+            }
+        }
+        if !placed && !joined.is_empty() {
+            if !out.ends_with('\n') && !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("FILES=\n");
+            for e in entries {
+                out.push_str(&e.render());
+                out.push('\n');
+            }
+        }
+        self.raw = out;
+        self.refresh_files_field();
+    }
+
+    /// Drop every entry whose path basename is `base`.
+    pub fn drop_files_entry(&mut self, base: &str) {
+        let mut changed = false;
+        let kept: Vec<String> = self
+            .raw
+            .split_inclusive('\n')
+            .filter(|l| {
+                match FilesEntry::parse(l) {
+                    Some(e) => {
+                        if e.path.rsplit('/').next().unwrap_or(&e.path) == base {
+                            changed = true;
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    None => true,
+                }
+            })
+            .map(|s| s.to_string())
+            .collect();
+        if changed {
+            self.raw = kept.concat();
+            self.refresh_files_field();
+        }
+    }
+
+    /// Keep the parsed `FILES` field in step with the bytes we just edited.
+    ///
+    /// `raw` is what gets written; `fields` is what queries read. They are two
+    /// views of one card, and `render()` prefers `raw` -- so a stale `fields`
+    /// would answer from an old list while the file on disk says something else.
+    fn refresh_files_field(&mut self) {
+        let entries = self.files();
+        let joined = entries
+            .iter()
+            .map(|e| e.render())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(e) = self.fields.iter_mut().find(|(k, _)| k == "FILES") {
+            e.1 = joined;
+        } else if self.uses_files() {
+            self.fields.push(("FILES".into(), joined));
+        }
+    }
+
+    /// Make this card's `FILES=` list match `elems` (paths), preserving the
+    /// existing lines for paths that stay.
+    fn sync_files_entries(&mut self, elems: &[String]) {
+        let want: Vec<String> = elems
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+            .collect();
+        for e in self.files() {
+            let base = e.path.rsplit('/').next().unwrap_or(&e.path).to_string();
+            if !want.contains(&base) {
+                self.drop_files_entry(&base);
+            }
+        }
+        for p in elems {
+            let base = p.rsplit('/').next().unwrap_or(p).to_string();
+            if !self
+                .files()
+                .iter()
+                .any(|e| e.path.rsplit('/').next().unwrap_or(&e.path) == base)
+            {
+                let mut e = FilesEntry::default();
+                e.id = base.trim_end_matches(".md").to_string();
+                e.path = p.clone();
+                self.push_files_entry(&e);
+            }
+        }
+    }
+
     /// Raw PATH entries with directory inheritance applied. Duplicates kept.
     pub fn paths(&self) -> Vec<String> {
+        // The `FILES=` layout wins whenever it is present: its entries are the
+        // complete list, while any `PATH=` on such a card is a human note about
+        // the directory (one card literally says
+        // `PATH=candidate/records/（下列 FILES 的父目录）`) and must never be
+        // mistaken for a record.
+        if self.uses_files() {
+            return self.files().iter().map(|e| e.path.clone()).collect();
+        }
         let raw = self.get("PATH");
         let mut out = Vec::new();
         let mut dir: Option<String> = None;
@@ -129,6 +409,9 @@ impl Branch {
     /// inside one card is normal (185 full paths / 136 bare names), so a
     /// round trip through `paths()` + `set_paths()` silently re-spells them.
     pub fn raw_paths(&self) -> Vec<String> {
+        if self.uses_files() {
+            return self.files().iter().map(|e| e.path.clone()).collect();
+        }
         self.get("PATH")
             .split([',', '，'])
             .map(|s| s.trim().to_string())
@@ -139,10 +422,20 @@ impl Branch {
     /// Replace `PATH=` with these elements verbatim. No dedupe, no directory
     /// abbreviation: what you pass is what gets written.
     pub fn set_paths_raw(&mut self, elems: &[String]) {
+        if self.uses_files() {
+            // Rewriting a `PATH=` line here would leave the card with two
+            // layouts and no readers. Edit the list it actually has instead.
+            self.sync_files_entries(elems);
+            return;
+        }
         self.set("PATH", &elems.join(","));
     }
 
     pub fn set_paths(&mut self, paths: &[String]) {
+        if self.uses_files() {
+            self.sync_files_entries(paths);
+            return;
+        }
         let mut dir: Option<String> = None;
         let mut out: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
@@ -275,6 +568,30 @@ impl Atlas {
                     continue;
                 }
             }
+            // `- id|kind|maturity|path|title` is a list entry, not a wrapped
+            // value. This test has to run *before* the `=` split: a record title
+            // may legitimately contain `=` (a real one reads "根因=无语音机型…"),
+            // and then the line used to take the field-shaped path, fail the
+            // uppercase-key check and be appended to the previous field. For a
+            // card that places entries straight under `BRANCH=`, the branch *name*
+            // swallowed a whole record title, so `branch` lookups matched nothing
+            // and a later move created a second card for the same branch.
+            if let Some(e) = FilesEntry::parse(t) {
+                if let Some(b) = &mut cur {
+                    let line = e.render();
+                    match b.fields.iter_mut().find(|(kk, _)| kk == "FILES") {
+                        Some(f) if f.1.is_empty() => f.1 = line,
+                        Some(f) => {
+                            f.1.push('\n');
+                            f.1.push_str(&line);
+                        }
+                        None => b.fields.push(("FILES".into(), line)),
+                    }
+                } else {
+                    a.preamble.push(t.to_string());
+                }
+                continue;
+            }
             let (k, v) = match t.split_once('=') {
                 Some((k, v)) => (k.trim(), v.trim()),
                 None => {
@@ -312,7 +629,16 @@ impl Atlas {
                 let start_new = match &cur {
                     None => true,
                     Some(b) => {
-                        b.get("BRANCH").len() > 0 && (b.get("PATH").len() > 0 || b.get("STATUS").len() > 0)
+                        // `FILES=` counts as "complete enough to stand on its
+                        // own". Without it, every card in the shipped library
+                        // that carries `BRANCH` + `SUMMARY` + `FILES` (no
+                        // `PATH`, no `STATUS`) was treated as unfinished and
+                        // had its BRANCH overwritten by the next card's name,
+                        // silently folding several branches into one.
+                        b.get("BRANCH").len() > 0
+                            && (b.get("PATH").len() > 0
+                                || b.get("STATUS").len() > 0
+                                || b.uses_files())
                     }
                 };
                 if start_new {
@@ -345,6 +671,22 @@ impl Atlas {
                 if let Some(b) = &cur {
                     if !b.get("PATH").is_empty() {
                         continue;
+                    }
+                }
+            }
+            // Same rule for `FILES=`. Some cards list entries *before* the marker
+            // (and interleave `COUNT=`), then start the marked list with a bare
+            // `FILES=`. Letting that empty assignment overwrite the field dropped
+            // every entry already collected above it: one real card has 16 such
+            // entries, so `--json` reported 44 entries while the byte-exact view
+            // reported all 59. Two answers to the same question is worse than
+            // either, and the short one is the one queries read.
+            if k == "FILES" && v.is_empty() {
+                if let Some(b) = &cur {
+                    if b.files().is_empty() || !b.get("FILES").is_empty() {
+                        if !b.get("FILES").is_empty() {
+                            continue;
+                        }
                     }
                 }
             }
@@ -475,7 +817,17 @@ impl Atlas {
                     s.push_str(&format!("## {}\n", b.heading));
                 }
                 for (k, v) in &b.fields {
-                    s.push_str(&format!("{k}={v}\n"));
+                    // A `FILES` list is a marker followed by entry lines:
+                    //   FILES=
+                    //     - id|kind|maturity|path|title
+                    // Writing `FILES={entries}` glued the first entry onto the
+                    // marker line, which no reader of this format accepts -- the
+                    // card then held one record the map could not show.
+                    if k == "FILES" && !v.is_empty() && !v.starts_with('\n') {
+                        s.push_str(&format!("{k}=\n{v}\n"));
+                    } else {
+                        s.push_str(&format!("{k}={v}\n"));
+                    }
                 }
                 emitted_any = true;
             }
@@ -546,6 +898,24 @@ impl Atlas {
         }
         None
     }
+
+    /// True when most cards in this map list records as `FILES=` entries.
+    ///
+    /// A map is written in one style by whoever maintains it, so the majority is
+    /// the map's own answer to "what shape should a new card be". Without this,
+    /// adding a record to the FILES-style library created a one-line `PATH=`
+    /// card: the record landed on disk and `state` counted it, but
+    /// `grep -c '^  - ' Atlas.md` did not -- four counts that are supposed to
+    /// agree stopped agreeing, and every later reconciliation had to guess which
+    /// one lied.
+    pub fn prefers_files(&self) -> bool {
+        let total = self.branches.len();
+        if total == 0 {
+            return false;
+        }
+        let files = self.branches.iter().filter(|b| b.uses_files()).count();
+        files * 2 > total
+    }
 }
 
 /// Resolve one `PATH=` element against the library root.
@@ -568,8 +938,43 @@ pub fn resolve_path(root: &std::path::Path, lib: crate::rec::Lib, elem: &str) ->
 pub const DEFAULT_BRANCH: &str = "unclassified";
 
 /// Append a record path to a branch, creating the branch when missing.
+/// Metadata a new `FILES=` entry has to carry.
+///
+/// A map entry is `id|kind|maturity|path|title`. Creating one with only `id` and
+/// `path` produced `id|||path|` -- a row that still counts towards the map's
+/// totals but tells a reader nothing, and that `atlas --card` shows as a record
+/// with no kind, no maturity and no title. It also made the same record appear
+/// twice (once complete, once empty) after `restore`, because `delete` removes
+/// the entry and `restore` has to guess the branch again.
+#[derive(Default, Clone)]
+pub struct EntryMeta {
+    pub kind: String,
+    pub maturity: String,
+    pub title: String,
+}
+
 pub fn add_to_branch(a: &mut Atlas, branch: &str, rec_rel: &str) -> bool {
+    add_to_branch_meta(a, branch, rec_rel, &EntryMeta::default())
+}
+
+/// `add_to_branch`, telling the new entry what the record actually is.
+pub fn add_to_branch_meta(
+    a: &mut Atlas,
+    branch: &str,
+    rec_rel: &str,
+    meta: &EntryMeta,
+) -> bool {
     let base = rec_rel.rsplit('/').next().unwrap_or(rec_rel).to_string();
+    let files_style = a.prefers_files();
+    // One record belongs to one branch. Checking only the *target* branch let the
+    // same record land in a second branch whenever the caller could not recover
+    // where it used to live (which is exactly what `delete` + `restore` does),
+    // and the map then reported more records than the library holds.
+    if let Some(home) = a.branch_of(rec_rel) {
+        if home != branch {
+            return false;
+        }
+    }
     if let Some(idx) = a.branches.iter().position(|b| b.name() == branch) {
         let mut ps = a.branches[idx].paths();
         if ps.iter().any(|p| p.rsplit('/').next().unwrap_or(p) == base) {
@@ -577,10 +982,17 @@ pub fn add_to_branch(a: &mut Atlas, branch: &str, rec_rel: &str) -> bool {
         }
         ps.push(rec_rel.to_string());
         a.branches[idx].set_paths(&ps);
-        let c = a.branches[idx].count();
-        a.branches[idx].set("COUNT", &c.to_string());
-        let rev = a.branches[idx].get("REVISION").parse::<u64>().unwrap_or(0) + 1;
-        a.branches[idx].set("REVISION", &rev.to_string());
+        // A FILES card is maintained by hand and carries `id|kind|maturity|
+        // path|title` plus free-form prose. Injecting COUNT/REVISION into it
+        // would be the tool editing lines the user never asked it to touch, and
+        // an earlier version did exactly that. Only PATH-style cards get the
+        // bookkeeping fields.
+        if !a.branches[idx].uses_files() {
+            let c = a.branches[idx].count();
+            a.branches[idx].set("COUNT", &c.to_string());
+            let rev = a.branches[idx].get("REVISION").parse::<u64>().unwrap_or(0) + 1;
+            a.branches[idx].set("REVISION", &rev.to_string());
+        }
         return true;
     }
     // Reuse a card that exists but currently maps nothing.
@@ -590,7 +1002,18 @@ pub fn add_to_branch(a: &mut Atlas, branch: &str, rec_rel: &str) -> bool {
         .position(|b| b.count() == 0 && b.get("PATH").is_empty())
     {
         a.branches[idx].set("BRANCH", branch);
-        a.branches[idx].set("PATH", rec_rel);
+        if a.branches[idx].uses_files() || files_style {
+            // Keep the card in its own layout: an entry line, no `PATH=`.
+            let mut e = FilesEntry::default();
+            e.id = base.trim_end_matches(".md").to_string();
+            e.path = rec_rel.to_string();
+            e.kind = meta.kind.clone();
+            e.maturity = meta.maturity.clone();
+            e.title = meta.title.clone();
+            a.branches[idx].set_files(&[e]);
+        } else {
+            a.branches[idx].set("PATH", rec_rel);
+        }
         a.branches[idx].set("COUNT", "1");
         let rev = a.branches[idx].get("REVISION").parse::<u64>().unwrap_or(0) + 1;
         a.branches[idx].set("REVISION", &rev.to_string());
@@ -608,7 +1031,19 @@ pub fn add_to_branch(a: &mut Atlas, branch: &str, rec_rel: &str) -> bool {
     b.fields.push(("MAXSIZE".into(), "0".into()));
     b.fields.push(("SUMMARY".into(), String::new()));
     b.fields.push(("READ_WHEN".into(), String::new()));
-    b.fields.push(("PATH".into(), rec_rel.to_string()));
+    if files_style {
+        // Match the map: a `FILES=` marker plus one entry. The id is the file
+        // stem, which is what every entry in the shipped library uses.
+        let mut e = FilesEntry::default();
+        e.id = base.trim_end_matches(".md").to_string();
+        e.path = rec_rel.to_string();
+        e.kind = meta.kind.clone();
+        e.maturity = meta.maturity.clone();
+        e.title = meta.title.clone();
+        b.fields.push(("FILES".into(), e.render()));
+    } else {
+        b.fields.push(("PATH".into(), rec_rel.to_string()));
+    }
     b.fields.push(("REVISION".into(), "1".into()));
     b.fields.push(("STATUS".into(), "ACTIVE".into()));
     a.branches.push(b);

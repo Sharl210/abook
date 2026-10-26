@@ -40,6 +40,19 @@ pub const KNOWN_KEYS: &[&str] = &[
     "AT", "AUTHORIZED_BY", "CANDIDATE_SOURCE", "DECISION", "EFFECT", "NOTE",
     "NOTE_UNCERTAINTY", "PATH_CORRECTION", "PROMOTION_RECORD", "REVISION_ID",
     "TITLE_ALT", "VERIFIED_BY",
+    // Second pass, same method, full-library scan. These 13 were found as
+    // genuine `KEY=` at a field boundary across all 960 records.
+    //
+    // This list is no longer cosmetic. `extract_pairs` used to split on any
+    // `;` that merely looked like the start of a key, which carved
+    // `...git;a=shortlog;h=refs/heads/x` into three pieces: the real SUMMARY
+    // was cut to 44 chars and the remainder was minted as bogus fields `A` and
+    // `H` (see `C-20261010T210433-d6b85445`). Gating that split on this list is
+    // what fixes it, so a name missing here now costs data rather than merely
+    // producing a noisy self-test warning.
+    "APPROVED_BY", "COLLISION_NOTE", "EVIDENCE2", "EVIDENCE3", "NOTE_ID_REASSIGNED",
+    "PREVIOUS_REVISION", "PROMOTED_FILE", "PROMOTED_RECORD", "RELATED_CANDIDATES",
+    "REVISED_AT", "REVISION_HASH", "SKILL_FEEDBACK", "VOPS",
     // 版本标记：真库里有些记录用 `V262=` 这种形式标注它属于哪一版。
     // 自检每次读真库都会重新发现它们——不认识就会被当成上一字段的续行，
     // 那一条字段值会莫名其妙变长，而头部看不出问题。按前缀认，不逐个列。

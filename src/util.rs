@@ -14,6 +14,9 @@ pub enum EE {
     NotFound(String),
     Blocked(String),
     Integrity(String),
+    /// A concurrent writer changed the file we were about to overwrite, and the
+    /// two changes touch the same lines so neither can be dropped silently.
+    IntegrityConflict(Conflict),
     Io(String),
     Other(String),
 }
@@ -68,12 +71,14 @@ impl EE {
             EE::NotFound(_) => 3,
             EE::Blocked(_) => 4,
             EE::Integrity(_) => 5,
+            EE::IntegrityConflict(_) => 5,
             EE::Io(_) => 6,
             EE::Other(_) => 1,
         }
     }
     pub fn msg(&self) -> &str {
         match self {
+            EE::IntegrityConflict(c) => &c.msg_text,
             EE::Usage(m)
             | EE::NotFound(m)
             | EE::Blocked(m)
@@ -88,6 +93,7 @@ impl EE {
             EE::NotFound(_) => "NOT_FOUND",
             EE::Blocked(_) => "BLOCKED",
             EE::Integrity(_) => "INTEGRITY",
+            EE::IntegrityConflict(_) => "CONFLICT",
             EE::Io(_) => "IO",
             EE::Other(_) => "ERROR",
         }
@@ -1049,6 +1055,127 @@ pub fn write_atomic(p: &Path, data: &str) -> R<()> {
     done
 }
 
+/// Fingerprint of one file's bytes, for "did this change since I read it?".
+///
+/// Eight hex characters of SHA-256 over the whole file. Short enough to paste into
+/// a `--if-version` argument, wide enough that two different states of the same
+/// record will not collide by accident.
+///
+/// Reading returns it alongside the content; `write_atomic_cas` compares it. The
+/// fingerprint is what makes the gap between *an agent reading a file* and *the
+/// agent's write command running* safe. That gap is measured in minutes, not
+/// microseconds: an agent reads a record, thinks, composes an edit, and only then
+/// writes. Any check that re-reads the file at command start sees the current
+/// content and passes -- useless. The caller has to carry the fingerprint it saw
+/// and hand it back, so the comparison is against the version the caller actually
+/// reasoned about.
+pub fn file_version(p: &Path) -> String {
+    match fs::read(p) {
+        Ok(b) => crate::sha256::digest_prefix(&b, 8),
+        // Absent file: a stable marker, not an error. A caller that read "nothing"
+        // and then writes is protected the same way.
+        Err(_) => "-".to_string(),
+    }
+}
+
+/// Refuse to write when the file is no longer the version the caller read.
+///
+/// `expect` is the fingerprint the caller was given when it read the file. An
+/// empty value or `-` means "caller did not state a version" and the write
+/// proceeds (that is the old behaviour, kept for commands that never read the
+/// file first, such as `write` creating a new record).
+pub fn require_version(p: &Path, expect: &str) -> R<()> {
+    let expect = expect.trim();
+    if expect.is_empty() || expect == "-" {
+        return Ok(());
+    }
+    let now = file_version(p);
+    if now == expect {
+        return Ok(());
+    }
+    Err(EE::Integrity(format!(
+        "版本不符，拒绝覆盖: {}\n\
+         你读到的是版本 {expect}，磁盘上现在是 {now}。\n\
+         说明在你读取之后，另一个进程或你自己之前的另一次修改已经改过这个文件。\n\
+         请重新读取（abook show 会给出新版本号），确认当前内容后重做你的修改。",
+        p.display()
+    )))
+}
+
+/// Why a compare-and-swap write refused to land.
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    /// Which top-level part disagreed: a header field name, or `正文`.
+    pub part: String,
+    /// What this process loaded, before its own edit.
+    pub base: String,
+    /// What it wanted to write.
+    pub mine: String,
+    /// What is on disk now.
+    pub theirs: String,
+    /// Rendered once at construction so `msg()` can hand out a `&str`.
+    pub msg_text: String,
+}
+
+impl Conflict {
+    pub fn build(part: String, base: String, mine: String, theirs: String) -> Conflict {
+        let mut c = Conflict {
+            part,
+            base,
+            mine,
+            theirs,
+            msg_text: String::new(),
+        };
+        c.msg_text = c.render_msg();
+        c
+    }
+
+    /// The message a user sees. It has to answer "what now?", not just "no".
+    fn render_msg(&self) -> String {
+        format!(
+            "{} 在读取之后被另一个写入者改过，且改动落在同一处，无法自动合并。\n\
+             你读到的版本与磁盘上的版本都保留着：请重新读取这一条，再重做你的修改。\n\
+             （工具不会替你二选一——那样会静默丢掉另一边的内容。）",
+            self.part
+        )
+    }
+}
+
+/// Write `data` only if `p` still holds `expected`, then verify by re-reading.
+///
+/// `write_atomic` already guarantees a reader never sees a half-written file, but
+/// it happily overwrites whatever is there. That is wrong for a read-modify-write
+/// command: this process read the file, spent time computing, and only then writes
+/// -- and any other writer (a second `abook`, an editor, a script) that landed in
+/// between is silently erased. Nothing reports it, because from the writer's point
+/// of view the write succeeded.
+///
+/// So the rename is made conditional on the bytes being what we read. The check
+/// happens immediately before the rename, which shrinks the window to the few
+/// instructions in between rather than the whole command.
+pub fn write_atomic_cas(p: &Path, data: &str, expected: &str) -> R<()> {
+    match fs::read(p) {
+        Ok(cur) => {
+            let cur = String::from_utf8_lossy(&cur).to_string();
+            if cur != expected {
+                return Err(EE::Integrity(format!(
+                    "文件在读取之后被改过，拒绝覆盖: {}",
+                    p.display()
+                )));
+            }
+        }
+        // Vanished: treat as a conflict too. Recreating a file another process just
+        // deleted is the same lost-update in the other direction.
+        Err(_) => {
+            return Err(EE::Integrity(format!(
+                "文件在读取之后被删除，拒绝重建: {}",
+                p.display()
+            )));
+        }
+    }
+    write_atomic(p, data)
+}
+
 /// Write only when the bytes would actually change. Derived views (atlas,
 /// index, Global counters) are recomputed on every write; rewriting them
 /// unchanged would make every edit look like it touched the whole library.
@@ -1137,6 +1264,158 @@ pub fn emit_line(s: impl AsRef<str>) {
         }
         println!("{s}");
     });
+}
+
+/// Default character budget for `emit_block` when the caller did not pass
+/// `--all`. Chosen so a typical terminal, a chat message and a model context all
+/// fit one block without the transport silently cutting it.
+fn compact_chars() -> usize {
+    std::env::var("ABOOK_BLOCK_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 500)
+        .unwrap_or(12_000)
+}
+
+/// Commands that write to the library and therefore need the exclusive lock.
+///
+/// Kept as a list rather than a per-command flag because the lock has to be taken
+/// before dispatch, and dispatch is the only place that sees every command.
+/// Anything missing here writes without the lock -- which is exactly how two
+/// concurrent `write`s both returned 0 while the map and the counts lost one of
+/// them.
+pub const WRITE_COMMANDS: &[&str] = &[
+    "write", "copy", "merge", "split", "update", "append", "prepend", "patch", "set", "unset",
+    "rename", "move", "delete", "restore", "promote", "demote", "commit", "refresh", "recount",
+    "repair", "normalize", "sync", "leftover", "init", "attach", "vault",
+];
+
+/// True when this command may modify files under the library root.
+pub fn is_write_command(cmd: &str) -> bool {
+    let c = crate::spec::canonical(cmd);
+    WRITE_COMMANDS.contains(&c.as_str())
+}
+
+/// An exclusive, cross-process lock on the whole library.
+///
+/// Taken for every write command, released when the value drops. Plain
+/// `create_new` on a lock file: portable, no external crate, and the kernel
+/// closes the handle on any exit path including panic, so a crash cannot leave
+/// the library permanently locked.
+///
+/// A stale lock (process killed between create and remove) is broken after
+/// [`STALE_LOCK_SECS`]. Without that, one crash would lock the library forever;
+/// with it, a genuinely long write still holds the lock because the timestamp is
+/// refreshed by the holder.
+pub struct LibLock {
+    path: std::path::PathBuf,
+}
+
+/// How long a lock file may sit untouched before another process may break it.
+const STALE_LOCK_SECS: u64 = 600;
+
+impl LibLock {
+    /// Acquire, waiting up to `wait_secs` for a competing writer to finish.
+    pub fn acquire(root: &std::path::Path, wait_secs: u64) -> R<LibLock> {
+        let path = root.join(".abook.lock");
+        if let Some(d) = path.parent() {
+            let _ = fs::create_dir_all(d);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = write!(f, "{} {}\n", std::process::id(), now_secs());
+                    return Ok(LibLock { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Break a lock left behind by a killed process.
+                    if let Ok(txt) = std::fs::read_to_string(&path) {
+                        let started = txt
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        if started > 0 && (now_secs() as u64).saturating_sub(started) > STALE_LOCK_SECS {
+                            let _ = std::fs::remove_file(&path);
+                            continue;
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                        return integrity(format!(
+                            "库被另一个写入者占用（{holder}）；等待 {wait_secs} 秒仍未释放。\
+另一个 abook 正在写这个库，或上次异常退出留下了锁（{} 秒后会自动解除）",
+                            STALE_LOCK_SECS
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+                Err(e) => return Err(EE::Io(format!("无法获取库锁 {}: {e}", path.display()))),
+            }
+        }
+    }
+}
+
+impl Drop for LibLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Line/character/byte totals for a block of text.
+pub fn block_stats(text: &str) -> (usize, usize, usize) {
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    (body.lines().count(), body.chars().count(), body.len())
+}
+
+/// Print a long block of text with its size stated before and after.
+///
+/// Why this exists: a reader -- human or model -- that cannot see the total has
+/// no way to tell "this is the whole thing" from "this stopped at the transport
+/// cut". Truncation is then invisible, and a conclusion gets built on half the
+/// material while believing it read all of it. The header states the totals up
+/// front; the footer repeats them, so the end of the output carries the answer
+/// too in case the head scrolled away or the middle was elided.
+///
+/// Both lines and characters are reported. Lines alone mislead on prose (one
+/// long paragraph is one line); characters alone mislead on tables.
+pub fn emit_block(label: &str, text: &str, want_all: bool) {
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    let (lines, chars, bytes) = block_stats(body);
+    emit_line(format!(
+        "── {label} 开始 ── 全文 {lines} 行 / {chars} 字 / {bytes} B"
+    ));
+    let budget = compact_chars();
+    if want_all || chars <= budget {
+        print!("{body}");
+        if !body.is_empty() {
+            println!();
+        }
+        emit_line(format!(
+            "── {label} 结束 ── 全文 {lines} 行 / {chars} 字 / {bytes} B；本次完整输出，未截断"
+        ));
+        return;
+    }
+    // Over budget and the caller did not ask for everything. Say exactly how
+    // much is missing -- returning less than the whole silently is the very
+    // failure this header exists to prevent.
+    let keep: String = body.chars().take(budget).collect();
+    let (klines, kchars, _) = block_stats(&keep);
+    print!("{keep}");
+    if !keep.ends_with('\n') {
+        println!();
+    }
+    emit_line(format!(
+        "── {label} 未读完 ── 已输出 {klines}/{lines} 行、{kchars}/{chars} 字，尚缺 {} 字；\
+加 --all 看全文（或用 --page N 翻页）",
+        chars.saturating_sub(kchars)
+    ));
 }
 
 thread_local! {

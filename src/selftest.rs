@@ -983,35 +983,45 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
                 Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
                 Err(_) => String::new(),
             };
-            // Collect the distinct key names by asking every record for its
-            // fields is too heavy; instead read the raw headers of a sample of
-            // records and take every `KEY=` token that starts a field.
+            // Collect field names by running the *real* parser over every
+            // record, not by hand-splitting lines.
+            //
+            // The earlier version scanned with `line.split(';')` + `find('=')`
+            // + `trim()`, which is wider than `parse::key_end_at` (that one
+            // bails on a space, so `TOKEN = re.compile(...)` is not a field).
+            // The mismatch mattered twice: it reported twelve names that live in
+            // record *bodies*, and `set("FILES")`-style entries as fields -- all
+            // false positives that hid the real signal. Asking `Record::parse`
+            // makes this check and the parser agree by construction.
+            //
+            // `.take(400)` is gone too: the library already holds 523 canonical
+            // records, so a 400-file sample reported whatever `read_dir`
+            // happened to yield first and its list drifted between runs.
             let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             let mut files = 0usize;
-            for lib in ["canonical/records", "candidate/records"] {
-                let d = root.join(lib);
+            let mut parse_failed = 0usize;
+            for (lib, sub) in [
+                (crate::rec::Lib::Canonical, "canonical/records"),
+                (crate::rec::Lib::Candidate, "candidate/records"),
+            ] {
+                let d = root.join(sub);
                 let Ok(rd) = std::fs::read_dir(&d) else { continue };
-                for e in rd.flatten().take(400) {
-                    let p = e.path();
+                let mut paths: Vec<std::path::PathBuf> =
+                    rd.flatten().map(|e| e.path()).collect();
+                paths.sort();
+                for p in paths {
                     if p.extension().and_then(|x| x.to_str()) != Some("md") {
                         continue;
                     }
                     let Ok(txt) = std::fs::read_to_string(&p) else { continue };
                     files += 1;
-                    for line in txt.lines() {
-                        // Fields start either at line start or after an ASCII `;`.
-                        for frag in line.split(';') {
-                            let f = frag.trim_start();
-                            let Some(eq) = f.find('=') else { continue };
-                            let k = f[..eq].trim();
-                            if !k.is_empty()
-                                && k.len() < 40
-                                && k.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                                && k.chars().any(|c| c.is_ascii_uppercase())
-                            {
-                                seen.insert(k.to_string());
+                    match crate::rec::Record::parse_str(&txt, &p, lib) {
+                        Ok(r) => {
+                            for (k, _) in &r.fields {
+                                seen.insert(k.clone());
                             }
                         }
+                        Err(_) => parse_failed += 1,
                     }
                 }
             }
@@ -1638,13 +1648,20 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
         // `state` exits 5 when it finds consistency problems, which is a
         // legitimate answer, so it cannot stand in for "did the pre-command
         // global flag work". `version` always exits 0 and prints a banner.
+        //
+        // The expected banner is built from VERSION, never spelled out. These
+        // two assertions used to hardcode "abook 1.0.0", so the moment the
+        // version was made to follow the release tag both flipped to FAIL and
+        // the real question -- did the flag reach the command? -- was buried
+        // under a stale literal.
+        let banner = format!("abook {}", crate::VERSION);
         let (pre, pre_rc) = run(&["--root", &root.to_string_lossy(), "version"]);
         let (per_help, help_rc) = run(&["list", "--help"]);
         let (bare, bare_rc) = run(&["--root"]);
         let ok = pre_rc == 0
-            && pre.contains("abook 1.0.0")
+            && pre.contains(&banner)
             && help_rc == 0
-            && per_help.contains("abook 1.0.0")
+            && per_help.contains(&banner)
             && bare_rc == 2
             && bare.contains("需要一个值")
             && !bare.contains("未知命令");
@@ -2861,12 +2878,60 @@ STATUS=ACTIVE\n\
         };
 
         // (a) paging is honoured rather than fixed at some hidden default
-        let (p1, _, _) = run(&["review", "--per-page", "1"]);
-        let (p1b, _, _) = run(&["review", "--per-page", "1", "--page", "2"]);
-        let (pa, _, _) = run(&["review", "--limit", "1"]);
+        //
+        // Run against a throwaway root with three review files, not the live
+        // library. The old version asserted `p1 != p1b` against whatever the
+        // real `review/` held; with a single file `Page::from_args` clamps
+        // `--page 2` back to page 1, so the two outputs are necessarily equal
+        // and the check could never pass on a healthy small library. A fixture
+        // makes the assertion test paging instead of the data.
+        let pdir = std::env::temp_dir().join(format!(
+            "abook-page-{}-{}",
+            std::process::id(),
+            crate::util::now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&pdir);
+        let mut fixture_ok = std::fs::create_dir_all(pdir.join("review")).is_ok();
+        if fixture_ok {
+            for n in 1..=3 {
+                if std::fs::write(
+                    pdir.join(format!("review/2026010{n}-page-{n}.md")),
+                    format!("# page {n}\n\nbody {n}\n"),
+                )
+                .is_err()
+                {
+                    fixture_ok = false;
+                }
+            }
+        }
+        let ppr = |args: &[&str]| -> String {
+            match std::process::Command::new(&exe)
+                .args(args)
+                .arg("--root")
+                .arg(&pdir)
+                .output()
+            {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                Err(_) => String::new(),
+            }
+        };
+        let (p1, p1b, pa) = if fixture_ok {
+            (
+                ppr(&["review", "--per-page", "1"]),
+                ppr(&["review", "--per-page", "1", "--page", "2"]),
+                ppr(&["review", "--limit", "1"]),
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        };
         let counted = |t: &str| -> usize { t.lines().filter(|l| l.contains(".md")).count() };
-        let page_ok = counted(&p1) == 1 && counted(&p1b) == 1 && counted(&pa) == 1 && p1 != p1b;
-        if page_ok {
+        let _ = std::fs::remove_dir_all(&pdir);
+        let page_ok =
+            counted(&p1) == 1 && counted(&p1b) == 1 && counted(&pa) == 1 && p1 != p1b;
+        if !fixture_ok {
+            skip += 1;
+            msgs.push("SKIP  建不出分页夹具目录，跳过分页检查".into());
+        } else if page_ok {
             pass += 1;
             msgs.push("PASS  staging/review 分页生效，--limit 与 --page 各自独立".into());
         } else {

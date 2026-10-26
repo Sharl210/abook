@@ -6,6 +6,7 @@
 
 mod atlas;
 mod book;
+mod merge;
 mod parse;
 mod rx;
 mod search;
@@ -38,7 +39,16 @@ mod out;
 
 use util::*;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+// Comes from build.rs, which derives it from the release tag (`v1.6.1` ->
+// `1.6.1`). `CARGO_PKG_VERSION` was the old source and it lied: the field was
+// never bumped across v1.0.0..v1.6.1, so every published binary claimed 1.0.0.
+pub(crate) const VERSION: &str = env!("ABOOK_VERSION");
+
+/// How long a write command waits for the library lock before giving up.
+///
+/// Long enough that two ordinary writes serialise instead of failing, short
+/// enough that a wedged process does not hang a build script for minutes.
+const LOCK_WAIT_SECS: u64 = 30;
 
 fn help_text() -> String {
     format!(
@@ -709,6 +719,40 @@ fn main() {
     // read command emits its own JSON and must not also receive a wrapper, or
     // it prints two documents and neither parses.
     let mut captured = false;
+    // Take the library-wide exclusive lock before any write command runs.
+    //
+    // This is not about one file being half-written -- `write_atomic` already
+    // covers that. It is about read-modify-write spanning *several* files: a write
+    // reads Atlas.md, adds one entry, writes it back, then does the same for
+    // Index.md and Global.md. Two writers interleaving those steps each returned
+    // exit 0, both records landed on disk, and the map and the counts kept only
+    // one of them. Nothing noticed until a separate `state` run.
+    //
+    // Held for the whole process and released by `Drop` on every exit path.
+    // `--dry-run` skips it: a preview writes nothing, so making it queue behind a
+    // real write would only add waiting.
+    let _lib_lock = match parsed.as_ref() {
+        Ok(a)
+            if !root.as_os_str().is_empty()
+                && !a.has("dry-run")
+                && crate::util::is_write_command(&a.cmd) =>
+        {
+            match crate::util::LibLock::acquire(&root, LOCK_WAIT_SECS) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    crate::out::report_error(
+                        &crate::util::Args::empty(),
+                        e.tag(),
+                        e.msg(),
+                        e.code(),
+                    );
+                    // No lock was taken here, so there is nothing to release.
+                    std::process::exit(e.code());
+                }
+            }
+        }
+        _ => None,
+    };
     let code = match parsed {
         Ok(ref a) if a.has("json") && needs_capture(&spec::canonical(&a.cmd)) => {
             crate::util::begin_capture();
@@ -720,6 +764,11 @@ fn main() {
                     // would print a second, contradictory document.
                     let lines = crate::util::take_capture();
                     crate::out::report_error_lines(a, e.tag(), e.msg(), e.code(), &lines);
+                    // `process::exit` runs no destructors, so the library lock has
+                    // to be released by hand; otherwise every JSON-path error that
+                    // happened while holding it left the lock behind and locked
+                    // every later write out of the library.
+                    drop(_lib_lock);
                     std::process::exit(e.code());
                 }
             }
@@ -776,6 +825,8 @@ fn main() {
             crate::util::flush_write_report(&root);
         }
     }
+    // Same reason as above: release before exiting, or the file outlives us.
+    drop(_lib_lock);
     std::process::exit(code);
 }
 

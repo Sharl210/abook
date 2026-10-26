@@ -200,9 +200,18 @@ fn extract_pairs(line: &str) -> Option<Vec<(String, String)>> {
         for (i, c) in line[vstart..].char_indices() {
             if c == ';' {
                 let after = vstart + i + c.len_utf8();
-                if key_end_at(line, after).is_some() {
-                    cut = Some((vstart + i, after));
-                    break;
+                // The key must be one this library actually uses, not merely
+                // something shaped like a key. Without that gate, a URL inside
+                // a value splits the value: `.../mt6990.git;a=shortlog;h=refs/
+                // heads/x` used to cut SUMMARY at 44 chars and invent two
+                // fields named `A` and `H`. Across all 960 records this gate
+                // leaves 6371 real separators untouched and stops exactly the
+                // 4 bogus ones.
+                if let Some((kk, _)) = key_end_at(line, after) {
+                    if crate::rec::is_known_key(&kk) {
+                        cut = Some((vstart + i, after));
+                        break;
+                    }
                 }
             }
         }

@@ -95,31 +95,66 @@ pub fn move_branch(root: &Path, lib: Lib, relpath: &str, branch: &str) -> R<()> 
     Ok(())
 }
 
-/// Keep Global.md counts and covered timestamps in step with the disk.
+/// Keep the record counts and atlas timestamps in step with the disk, in
+/// **both** entry files and in **both** places each file states them.
+///
+/// This used to touch only `Global.md`, and only its body section. Two
+/// consequences, both observed on the real library:
+///
+/// * `Index.md` still said `CANDIDATE_RECORDS=437` after the map and the
+///   directory had moved to 443, so a reader following the documented order
+///   (Global -> Index -> Atlas) saw two different answers and no way to tell
+///   which one was stale.
+/// * `Global.md` states the same count twice: once in its
+///   `[MEMORY_FILE_CONTENTS]` header and once in the body's `## Current State`.
+///   Only the body was rewritten, so the file contradicted itself, and the header
+///   is the one a reader sees first.
+///
+/// The directory listing decides how many records exist; the map's
+/// `RECORD_COUNT` counts what the map can resolve. Those are deliberately *not*
+/// forced equal here -- `state` reports the difference instead of hiding it.
 pub fn sync_counts(root: &Path) -> R<()> {
-    let gp = root.join("Global.md");
-    if !gp.exists() {
-        return Ok(());
-    }
     let live = |lib: Lib| -> usize {
         crate::rec::load_lib(root, lib)
             .iter()
             .filter(|r| r.status() != "DELETED")
             .count()
     };
-    let mut g = BookFile::load(&gp)?;
-    g.set_state("CANONICAL_RECORDS", &live(Lib::Canonical).to_string());
-    g.set_state("CANDIDATE_RECORDS", &live(Lib::Candidate).to_string());
+    let canon = live(Lib::Canonical).to_string();
+    let cand = live(Lib::Candidate).to_string();
+    let mut covered: Vec<(&str, String)> = Vec::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         if let Ok(at) = Atlas::load(&root.join(lib.atlas())) {
             let key = if lib == Lib::Canonical {
-                "CANONICAL_ATLAS_COVERED_THROUGH"
+                "COVERED_THROUGH_CANONICAL"
             } else {
-                "CANDIDATE_ATLAS_COVERED_THROUGH"
+                "COVERED_THROUGH_CANDIDATE"
             };
-            g.set_state(key, &at.get("COVERED_THROUGH"));
+            let v = at.get("COVERED_THROUGH");
+            if !v.is_empty() {
+                covered.push((key, v));
+            }
         }
     }
-    write_if_changed(&gp, &g.render())?;
+    for name in ["Global.md", "Index.md"] {
+        let p = root.join(name);
+        if !p.exists() {
+            continue;
+        }
+        let mut g = BookFile::load(&p)?;
+        g.set_everywhere("CANONICAL_RECORDS", &canon);
+        g.set_everywhere("CANDIDATE_RECORDS", &cand);
+        for (k, v) in &covered {
+            g.set_everywhere(k, v);
+            // The body's Current State spells two of these without the
+            // `COVERED_THROUGH_` prefix; keep whichever form is present in step.
+            let short = k.trim_start_matches("COVERED_THROUGH_");
+            let alias = format!("{short}_ATLAS_COVERED_THROUGH");
+            if g.state(&alias).is_some() {
+                g.set_state(&alias, v);
+            }
+        }
+        write_if_changed(&p, &g.render())?;
+    }
     Ok(())
 }

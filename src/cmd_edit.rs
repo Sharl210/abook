@@ -115,8 +115,17 @@ pub fn save(root: &Path, rec: &mut Record, a: &Args, op: &str) -> R<bool> {
             .collect();
         return integrity(format!("待写入内容未通过校验: {}", msgs.join(" | ")));
     }
-    // Nothing to do. Verified before any side effect, so a no-op cannot touch
-    // the record, the map, the index or the change log.
+    // Version gate, immediately before the write.
+    //
+    // `--if-version` is the fingerprint the caller was shown when it *read* this
+    // record. Checking it here is what makes the read-think-write gap safe: an
+    // agent reads a record, spends minutes reasoning, and only then writes. Any
+    // check that re-reads the file at command start passes trivially, because it
+    // sees the current bytes -- the divergence happened before the command began.
+    // Only a fingerprint carried across that gap can catch it.
+    //
+    // Deliberately after the no-op check: an edit that changes nothing cannot
+    // overwrite anything, so it needs no version.
     let unchanged = body == rec.raw;
     if a.has("dry-run") {
         print!("{}", render_dry_run(rec, op, &rel(root, &rec.path), a.has("verbose")));
@@ -125,12 +134,26 @@ pub fn save(root: &Path, rec: &mut Record, a: &Args, op: &str) -> R<bool> {
     if unchanged {
         return Ok(false);
     }
+    if let Some(want) = a.get("if-version") {
+        require_version(&rec.path, want)?;
+    }
     write_atomic(&rec.path, &body)?;
     rec.rebase(&body);
     let back = Record::parse(&rec.path, rec.lib)?;
-    if back.body != rec.body && !rec.body.trim().is_empty() {
+    // Compare ignoring trailing whitespace.
+    //
+    // The body is stored between tags, so the writer appends the newline that
+    // separates it from `[/MEMORY_BODY]` while the in-memory body has none. An
+    // exact comparison therefore failed on *every* body edit whose last line did
+    // not already end in a blank -- and it failed *after* the write, so `split`
+    // reported `INTEGRITY: 写入复读不一致` while the file on disk had already been
+    // rewritten. A command that reports failure after changing the data is worse
+    // than one that fails cleanly: the caller believes nothing happened, then
+    // either retries (and gets "separator not found", because it was consumed) or
+    // gives up while the database is half-transformed.
+    if back.body.trim_end() != rec.body.trim_end() && !rec.body.trim().is_empty() {
         return integrity(format!(
-            "写入复读不一致: {}",
+            "写入已完成但复读不一致: {}（文件已改，请复核后再决定是否重做）",
             rel(root, &rec.path)
         ));
     }
