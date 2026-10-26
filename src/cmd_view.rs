@@ -1131,6 +1131,31 @@ pub fn cmd_list(a: &Args) -> R<i32> {
             truncate_chars(&rec.title(), 70)
         );
     }
+    // 零命中时说清楚"为什么是零"。
+    //
+    // `list --status CANDIDATE` 返回「共 0 条」曾让人以为候选库是空的。真相
+    // 是：一个记录属于哪个库由**目录**决定，候选记录的头部不会写
+    // `STATUS=CANDIDATE`。筛选零命中，可能确实没有匹配，也可能是这个条件本身
+    // 不适用于这套数据模型——两者用同一句话回答，读的人就会去修一个不存在的
+    // 毛病。没有输出比报错更容易误导，因为脚本和人都把"空"当成结论。
+    if rows.is_empty() {
+        if let Some(st) = a.get("status") {
+            let up = st.to_uppercase();
+            if up == "CANDIDATE" || up == "CANONICAL" {
+                crate::say_line!(
+                    "提示：`{up}` 不是 STATUS 取值——记录属于哪个库由所在目录决定。\n      \
+                     用 `abook list --lib {}` 列出该库，别用 --status。",
+                    if up == "CANDIDATE" { "candidate" } else { "canonical" }
+                );
+            } else {
+                crate::say_line!("提示：没有 STATUS={up} 的记录；可用取值见 `abook stats`。");
+            }
+        } else if a.get("q").is_some() || a.get("tag").is_some() || a.get("kind").is_some()
+            || a.get("lib").is_some()
+        {
+            crate::say_line!("提示：这个筛选条件没有匹配到任何记录。");
+        }
+    }
     println!("{}", pg.bar());
     Ok(0)
 }
