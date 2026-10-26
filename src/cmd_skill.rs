@@ -454,10 +454,20 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 crate::say_line!("[dry-run] 将把 {} 标为 {}", cand, decision);
                 return Ok(0);
             }
-            write_atomic(&p, &out)?;
+            // 先写日志，再改候选。
+            //
+            // 原来顺序反过来：候选的 STATUS 先落盘，然后写 decisions.log。日志
+            // 目录一旦不可写（权限、磁盘满），命令以 rc=6 失败——但候选已经被
+            // 改成 REJECT，而决策记录不存在。失败了却已经生效，且没有留下它
+            // 生效过的痕迹。
+            //
+            // 反过来先写日志：日志写不成就在动候选之前失败，数据不变；日志写成
+            // 之后候选写失败，则日志里有一条指向未生效决定的记录，这是可以发
+            // 现并纠正的偏差，比反向的"已生效但无记录"轻得多。
             let log = dir.join("decisions.log");
             let prev = if log.is_file() { read_str(&log)? } else { String::new() };
             write_atomic(&log, &format!("{prev}{} {cand} {decision} {reason}\n", st.iso_z))?;
+            write_atomic(&p, &out)?;
             crate::say_line!("{cand} → {}", decision.to_uppercase());
             if decision == "accept" {
                 crate::say_line!("记住：SKILL.md 的合并改写由你完成，工具不代做融合；改完跑 `abook skill lint {name}`");
@@ -479,18 +489,56 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
             for (n, line) in txt.lines().enumerate() {
                 let ln = n + 1;
                 let t = line.trim();
-                if t.contains("/home/") || t.contains("C:\\") || t.starts_with("参见 ") {
-                    problems.push(format!("行{ln}: 大意为绝对路径或外部引用: {}", cut(t, 60)));
+                // 绝对路径：原来只认 `/home/` 和 `C:\`，`/tmp/`、`/root/`、
+                // 盘符任意位置都能漏过去。判据应该是"任何以 / 或 X:\ 开头的
+                // 路径片段"，而不是列举几个我想到过的前缀。
+                if has_abs_path(t) {
+                    problems.push(format!("行{ln}: 绝对路径（Skill 须自带依赖）: {}", cut(t, 60)));
+                }
+                // 相对逃逸：`../` 会读到 Skill 目录之外，同样破坏自包含。
+                if t.contains("../") {
+                    problems.push(format!("行{ln}: 相对路径逃出 Skill 目录: {}", cut(t, 60)));
                 }
                 if t.contains("参见") || t.contains("见另一") || t.contains("依赖其它 Skill")
                     || t.contains("后续补充")
                 {
                     problems.push(format!("行{ln}: 占位或跨 Skill 引用: {}", cut(t, 60)));
                 }
-                if t.contains("~/AgentsBook") || t.contains("ABOOK_") || t.contains("记忆库")
-                    && t.contains("GATE")
+                // 记忆机制术语。原来写成 `A || B || C && D`，而 && 比 || 结合
+                // 更紧，等价于 `A || B || (C && D)`——只要出现 ABOOK_ 就报警，
+                // 而「记忆库」单独出现反而不报。这里改成显式括号 + 词表。
+                if t.contains("~/AgentsBook")
+                    || t.contains("ABOOK_")
+                    || t.contains("ABOOK_ROOT")
+                    || (t.contains("记忆库") && (t.contains("GATE") || t.contains("门")))
+                    || t.contains("MEMORY_ROUTE")
+                    || t.contains("AGENTSBOOK_V2")
                 {
-                    problems.push(format!("行{ln}: 疑似记忆机制术语: {}", cut(t, 60)));
+                    problems.push(format!("行{ln}: 疑似记忆机制术语（Skill 须能独立工作）: {}", cut(t, 60)));
+                }
+            }
+            // 跨 Skill 引用：拿同级目录里真实存在的 Skill 名去比对，而不是只认
+            // 几个我写死的短语。引用一个确实存在的兄弟 Skill 是最常见的越界方式。
+            if let Some(parent) = dir.parent() {
+                if let Ok(rd) = fs::read_dir(parent) {
+                    let siblings: Vec<String> = rd
+                        .flatten()
+                        .filter(|e| e.path().is_dir())
+                        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                        .filter(|s| s != &name && !s.starts_with('.'))
+                        .collect();
+                    for (n, line) in txt.lines().enumerate() {
+                        let t = line.trim();
+                        for sib in &siblings {
+                            if t.contains(sib.as_str()) {
+                                problems.push(format!(
+                                    "行{}: 引用了另一个 Skill `{sib}`（Skill 之间不互相依赖）: {}",
+                                    n + 1,
+                                    cut(t, 60)
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             // 超过 100 行的参考文件，头部应有目录
@@ -552,6 +600,33 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
 /// directory and rewrote whatever file the caller named -- including files
 /// outside the skills tree entirely. A candidate is identified by its file name,
 /// nothing about that needs to accept a path.
+/// 行内是否出现绝对路径片段。
+///
+/// 判据按形态而不按前缀列举：`/xxx` 前是行首或空白/引号/括号，或 `C:\` 这类
+/// 盘符。列举前缀的做法永远漏（曾经只认 `/home/`，于是 `/tmp` 畅通无阻）。
+fn has_abs_path(t: &str) -> bool {
+    let b: Vec<char> = t.chars().collect();
+    for i in 0..b.len() {
+        if b[i] == '/' && i > 0 {
+            let prev = b[i - 1];
+            let boundary = prev.is_whitespace()
+                || matches!(prev, '"' | '\'' | '(' | '[' | '=' | ':' | '`' | '>');
+            let nxt = b.get(i + 1).copied().unwrap_or(' ');
+            if boundary && nxt.is_alphabetic() {
+                return true;
+            }
+        }
+        // 盘符：字母 + `:` + `\` 或 `/`
+        if b[i].is_ascii_alphabetic()
+            && b.get(i + 1) == Some(&':')
+            && matches!(b.get(i + 2), Some('\\') | Some('/'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn cand_name(raw: &str) -> R<String> {
     let p = std::path::Path::new(raw);
     let bad = raw.is_empty()
