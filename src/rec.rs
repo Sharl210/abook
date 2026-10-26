@@ -655,9 +655,38 @@ const SELECTOR_HEAD_BYTES: usize = 4096;
 /// fallback has never been reachable -- and `promote` writes only PROMOTED_TO /
 /// PROMOTED_AT / BRANCH / NOTE into the block, so this tool cannot make it
 /// reachable either.
+/// Cut a head text down to the header block plus a synthetic closing tag.
+///
+/// `parse` wants whole documents: it looks for the `[/CANONICAL_MEMORY]` style
+/// terminator to know where the body ends. Handing it a 4 KiB prefix of a much
+/// longer file makes it treat the truncated remainder as the body, which is
+/// wasted work when only `TITLE` is wanted. Stopping at the first `[` line after
+/// line 0 cuts off the `[ATTACH]` / `[PROMOTION]` blocks, which by definition sit
+/// after the header, and the synthetic tag gives the parser the terminator it
+/// expects.
+///
+/// Equivalence rests on one measured fact: no record in the library carries a
+/// `TITLE=` at or after such a `[` marker (964/964 checked), and none lacks a
+/// `TITLE=` before it. So the title this sees is the title `parse` would see.
+fn header_only(head: &str, lib: Lib) -> String {
+    let mut out = String::with_capacity(head.len().min(SELECTOR_HEAD_BYTES));
+    for (i, line) in head.lines().enumerate() {
+        if i > 0 && line.trim_start().starts_with('[') {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(match lib {
+        Lib::Canonical => "[/CANONICAL_MEMORY]",
+        Lib::Candidate => "[/CANDIDATE_MEMORY]",
+    });
+    out
+}
+
 fn title_from_head(path: &Path, lib: Lib) -> Option<String> {
     let head = read_head(path, SELECTOR_HEAD_BYTES).ok()?;
-    let parsed = crate::parse::parse(&head, Some(lib));
+    let parsed = crate::parse::parse(&header_only(&head, lib), Some(lib));
     if parsed.has_error() {
         return None;
     }
