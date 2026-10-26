@@ -105,13 +105,15 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                     rec.body.chars().count(),
                     jstr(&truncate_chars(&rec.body, 60))
                 ));
+                let ver = crate::util::file_version(&path);
                 println!(
-                    "{{\"id\":{},\"path\":{},\"created\":{},\"updated\":{},\"when\":{},\"fields\":[{}]}}",
+                    "{{\"id\":{},\"path\":{},\"created\":{},\"updated\":{},\"when\":{},\"version\":{},\"fields\":[{}]}}",
                     jstr(&rec.id()),
                     jstr(&rel(&root, &path)),
                     rec.created(),
                     rec.updated(),
                     jstr(&crate::util::short_when(rec.updated())),
+                    jstr(&ver),
                     items.join(",")
                 );
                 return Ok(0);
@@ -122,6 +124,15 @@ pub fn cmd_get(a: &Args) -> R<i32> {
             // the real ones: a caller that greps for `UPDATED` finds a row in
             // either shape, and a record that predates the field still answers
             // instead of looking broken.
+            //
+            // VERSION 同样是伪字段，但它是**写保护**用的：这是本条记录当前
+            // 内容的指纹，读的时候拿上它，改的时候用 `--if-version` 带上。
+            //
+            // 为什么必须由读的人自己拿：命令内部的"写前重新检查一遍"永远
+            // 通过——它看到的就是当前字节。真正的危险窗口在两次命令之间：
+            // 读完、思考几分钟、再写，中间别人可能已经改过。只有跨过这个
+            // 窗口带下来的指纹才能发现分叉。所以指纹必须出现在读取输出里，
+            // 否则 `--if-version` 这个功能等于没法用。
             println!(
                 "UPDATED\t{}\t{}",
                 crate::util::short_when(rec.updated()).chars().count(),
@@ -148,6 +159,11 @@ pub fn cmd_get(a: &Args) -> R<i32> {
                 println!("{k}\t{}\t{}", v.chars().count(), truncate_chars(&v, 60));
             }
             println!("BODY\t{}\t{}", rec.body.chars().count(), truncate_chars(&rec.body, 60));
+            // 指纹必须出现在读取输出里，否则 --if-version 没法用。
+            let fp = crate::util::file_version(&path);
+            if !fp.is_empty() {
+                println!("VERSION\t{}\t{}", fp.chars().count(), fp);
+            }
             Ok(0)
         }
     }
