@@ -3044,13 +3044,21 @@ STATUS=ACTIVE\n\
             Some(name) => {
                 let (body, _, rc) = run(&["review", "--show", &name]);
                 let (_, _, rc_missing) = run(&["review", "--show", "确定不存在的文件.md"]);
-                if rc == 0 && body.trim().len() > 10 && rc_missing == 2 {
+                // 缺文件是「未找到」不是「用法错误」。docs/COMMANDS.md 的退出码表里
+                // 写得很清楚：3 = 未找到，2 = 用法错误（缺参数、未知命令、未知参数
+                // 名）。`--show` 打错名字属于前者——查询没命中，命令本身没写错。
+                //
+                // 这条断言原先钉的是 2，与工具自己的文档矛盾。矛盾的根源是当时
+                // 用 `usage()` 顺手回了这个错，而 `usage` 的码是 2。现在统一到 3，
+                // 断言跟着改：它要保证的从来是「缺文件是错误，不是空白成功」，而
+                // 具体哪个码应当由退出码表决定，不该由最早实现它的人的习惯决定。
+                if rc == 0 && body.trim().len() > 10 && rc_missing == 3 {
                     pass += 1;
-                    msgs.push("PASS  --show 能读全文，写错文件名返回退出码 2".into());
+                    msgs.push("PASS  --show 能读全文，写错文件名返回未找到（退出码 3）".into());
                 } else {
                     fail += 1;
                     msgs.push(format!(
-                        "FAIL  --show 正常rc={rc} 正文{}字节，缺文件rc={rc_missing}（应分别为 0 与 2）",
+                        "FAIL  --show 正常rc={rc} 正文{}字节，缺文件rc={rc_missing}（应分别为 0 与 3）",
                         body.trim().len()
                     ));
                 }

@@ -41,7 +41,8 @@
 | `recent` | 最近变更 |
 | `log [--page N]` | 变更记录，带大小 |
 | `history [关键词]` | 变更记录，`--page` |
-| `staging [关键词]` | 待决暂存件列表；`--show <名>` 读全文 |
+| `staging [关键词]` | 待决暂存件列表；`--show <名>` 读全文（归档件只给文件名也能读） |
+| `staging resolve <名> --decision 结论` | 结清一件：原文保留、结论追加、移入 `staging/closed/`；`--ref <记录ID>` 挂依据 |
 | `review [关键词]` | 晋升记录列表；`--show <名>` 读全文 |
 | `map [canonical\|candidate]` | 地图概览：分支数、路径数、收录时刻 |
 
@@ -124,9 +125,36 @@ L1 只做字面匹配；L2 加正则与编辑距离；L3 起进入 BM25 语义�
 | `promote <候选>` | 候选 → 正式（需 `--approve`） |
 | `promote --all` | 一次晋升全部未归档候选（需 `--approve`，见下） |
 | `demote <正式>` | 正式 → 候选（需 `--approve`） |
+| `staging resolve <名> --decision 结论` | 结清一件待决件：原文保留、结论追加、移入 `staging/closed/` |
 | `commit --slug S --body-file F` | 写一条 `canonical/commits` 变更记录 |
 
 写命令都支持 `--dry-run`，只打印将写入的内容摘要，不落盘。
+
+### `staging resolve`：把一件待决件结掉
+
+待决区是"还等人回答"的队列。回答完之后如果只是知道了、没地方落，文件就只能靠
+手工 `mv` 才离开，于是这个数字只增不减——长期不为零的待决数不再提示任何东西，
+真正需要人回答的那件就淹在里面。
+
+结清**不是删除**：原文一字不动保留，结论追加在末尾，整件移入 `staging/closed/`。
+待决数回答"还有几件在等人"，`closed/` 回答"当初是怎么定的"。删掉原文等于删掉
+当时的真实认知，而认知会过期恰恰是当初把它暂存起来的原因。
+
+```sh
+abook staging resolve keystore-vault-proposal --decision "保持现状" --ref C-20261001-xxxx
+abook staging resolve keystore-vault-proposal --decision "保持现状" --dry-run
+```
+
+- `--decision` 必填：缺少就以退出码 2 拒绝。允许"结清但不给结论"等于给了一条
+  把问题藏进子目录的快捷方式——数字归零，问题还在。
+- `--ref <记录ID>` 可选，把依据记进结清段。
+- 只接受 `staging/` 下的一层文件名。带 `..` 或分隔符会被拒：这个命令的用途只是
+  移一件待决件，不应能对库外文件动手。
+- 结清过的再结一次不报错，把当时记下的结论念出来，**不覆盖**。覆盖会让两条结论
+  叠在一起，读者不知道该信哪条。
+- 两边同名文件同时存在时报完整性错误（退出码 5），不替你挑一份：那说明上次只做了
+  一半，覆盖会丢结论，删原件会丢原文。
+- 归档件仍可读：`abook staging --show <名>` 只给文件名就会落到 `closed/` 里找。
 
 ### `promote --all`：批量晋升
 
