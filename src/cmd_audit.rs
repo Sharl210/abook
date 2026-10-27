@@ -452,10 +452,19 @@ pub fn cmd_refs(a: &Args) -> R<i32> {
         }
     }
 
-    // 会被当作"指向别处"的字段。前两个是晋升链，中间两个是替代链，
-    // RELATED_IDS 是通用关联——它们的共同点是：值必须是另一条记录的身份。
-    const REF_FIELDS: [&str; 5] =
-        ["PROMOTED_FROM", "PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"];
+    // 会被当作"指向别处"的字段。它们分成两类，判据不同：
+    //
+    // **活关联**——值必须指得着，指不着就是数据问题：
+    //   `PROMOTED_TO`（候选→正式，选中即指）、`SUPERSEDES`、`PREVIOUS_ID`（替代链）、
+    //   `RELATED_IDS`（通用关联）。
+    //
+    // **历史来源**除外：`PROMOTED_FROM` 记录"我从哪来"，**允许指向已不存在的记录**。
+    // 晋升改成移动语义后，候选在晋升成功时即被删除，所以每一条正式记录的
+    // `PROMOTED_FROM` 都必然指着一个已消失的候选——这是正确状态，不是损坏。
+    // 把它算进悬空，等于让每次晋升都自己制造一条告警，真悬空会被噪音淹没。
+    // 溯源与活引用语义不同，不该共用一套检查。
+    const REF_FIELDS: [&str; 4] =
+        ["PROMOTED_TO", "SUPERSEDES", "PREVIOUS_ID", "RELATED_IDS"];
 
     let mut dangling: Vec<(String, String, String)> = Vec::new(); // (记录, 字段, 悬空值)
     let mut checked = 0usize;

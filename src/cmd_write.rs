@@ -415,15 +415,16 @@ fn promote_core(
     canon.set("STATUS", "ACTIVE");
     canon.set("PROMOTED_FROM", &cand.id());
     canon.set("PROMOTED_AT", &st.iso_z);
-    // keep a link back to the candidate among related ids
-    let related = {
-        let mut v = split_list(&cand.get("RELATED_IDS"));
-        if !v.iter().any(|x| x == &cand.id()) {
-            v.push(cand.id());
-        }
-        v.join(",")
-    };
-    canon.set("RELATED_IDS", &related);
+    // 不把候选 ID 追加进 `RELATED_IDS`。
+    //
+    // 这里原本写着 "keep a link back to the candidate"，在**复制**语义下成立：
+    // 候选文件留在原地，这条反向链接指得着。改成**移动**语义后它必然悬空——
+    // 晋升成功就删掉了候选，正式记录却还留着一个指向已删 ID 的活关联，
+    // 于是 `abook refs` 会把刚做完的正确操作报成数据损坏。
+    //
+    // 溯源由 `PROMOTED_FROM` 一处承担即可：它是历史事实（"我从哪来"），
+    // 天然允许指向已不存在的记录；`RELATED_IDS` 是活关联，必须指得着。
+    // 两者语义不同，不该互相兼任。候选原有的 `RELATED_IDS` 已在上面继承。
 
     let dir = root.join(Lib::Canonical.dir());
     ensure_dir(&dir)?;
