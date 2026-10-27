@@ -445,7 +445,181 @@ fn note_dir(
 
 /// `staging` — pending decision items awaiting a human answer.
 pub fn cmd_staging(a: &Args) -> R<i32> {
+    if matches!(a.pos.first().map(|s| s.as_str()), Some("resolve") | Some("close")) {
+        return staging_resolve(a);
+    }
     note_dir(a, "staging", "暂存", "staging")
+}
+
+/// `staging resolve` — 结清一件待决暂存件。
+///
+/// 待决区此前只有列表和 `--show`，没有结清动作：回答完之后文件只能靠手工 `mv`
+/// 才能离开，于是「待决」这个数字只增不减。一个长期不为零的待决数不再提示任何
+/// 东西——它变成背景噪音，而真正需要人回答的那一件就淹在里面。缺这个动作的直接
+/// 后果是：想清楚了也没有地方把决定落下，只能绕过工具改库。
+///
+/// 结清不是删除。原文一字不动保留，结论追加在末尾，整件移入 `closed/` 子目录：
+/// 待决数回答「还有几件在等人」，`closed/` 回答「当初是怎么定的」。删掉原文等于
+/// 删掉当时的真实认知，而认知会过期恰恰是当初把它暂存起来的原因。
+pub fn staging_resolve(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let dir = root.join("staging");
+    let closed = dir.join("closed");
+
+    let raw = a.pos.get(1).cloned().unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Err(EE::Usage(
+            "用法: staging resolve <文件名> --decision \"结论\" [--ref <记录ID>] [--dry-run]".into(),
+        ));
+    }
+    // 只接受 staging/ 下的一层文件名。`..` 或分隔符一旦放进来，这个命令就能把
+    // 库外任意文件追加一段再删掉，而它的用途只是移一件待决件。
+    if raw.contains('/') || raw.contains('\\') || raw == ".." || raw == "." {
+        return Err(EE::Usage(format!(
+            "{raw} 不是 staging/ 下的文件名；这个命令只处理待决区里的单件，不接受路径"
+        )));
+    }
+    let name = if raw.ends_with(".md") { raw.clone() } else { format!("{raw}.md") };
+    let src = dir.join(&name);
+    let dst = closed.join(&name);
+
+    // 幂等：已经结清过的件再结一次不是错误，是把当时的结论再读一遍。
+    if !src.exists() {
+        if dst.exists() {
+            let prev = read_str(&dst).unwrap_or_default();
+            let decided = prev
+                .lines()
+                .find(|l| l.trim_start().starts_with("- 决定："))
+                .map(|l| l.trim_start().trim_start_matches("- 决定：").trim().to_string())
+                .unwrap_or_default();
+            if a.has("json") {
+                println!(
+                    "{{\"ok\":true,\"name\":{},\"already\":true,\"decision\":{}}}",
+                    jstr(&name),
+                    jstr(&decided)
+                );
+            } else {
+                println!("已结清: {name}");
+                if !decided.is_empty() {
+                    println!("当时结论: {decided}");
+                }
+                println!("位置: {}", dst.display());
+            }
+            return Ok(0);
+        }
+        let live = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.ends_with(".md"))
+                    .take(5)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let hint = if live.is_empty() {
+            "；待决区当前为空".to_string()
+        } else {
+            format!("；待决区现有: {}", live.join("、"))
+        };
+        return Err(EE::NotFound(format!("staging/ 里没有 {name}{hint}")));
+    }
+    // 两边同时存在说明上一次结清只做了一半（新件写成、原件没删掉）。这时覆盖
+    // 会丢掉 closed/ 里已经追加过的结论，所以停下来让人看一眼，而不是猜。
+    if dst.exists() {
+        return Err(EE::Integrity(format!(
+            "staging/{name} 与 staging/closed/{name} 同时存在，上一次结清只完成了一半；\
+先比对两份内容再决定留哪一份"
+        )));
+    }
+
+    let decision = a.get("decision").map(|s| s.trim().to_string()).unwrap_or_default();
+    if decision.is_empty() {
+        return Err(EE::Usage(format!(
+            "结清 {name} 要给出结论: --decision \"保持现状\" / \"批准入箱\" / 其它处置。\
+没有结论的结清只是把问题藏进子目录"
+        )));
+    }
+    // 结论是一条结论，不是一段正文：换行会让下面的 `- 决定：` 只剩第一行，读到
+    // 第一行的人会以为决策就是那半句。
+    let decision = decision.replace(['\n', '\r'], " ");
+    let ref_id = a.get("ref").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    let orig = read_str(&src)?;
+    let st = stamps();
+    let mut seg = String::new();
+    // 两个换行：原文末尾的换行已被 trim_end 吃掉，只留一个的话 `## 结清` 会紧贴
+    // 上一行，读起来像是原文的一部分，而不是后加的结论。
+    seg.push_str("\n\n## 结清\n\n");
+    seg.push_str(&format!("- 时间：{}\n", st.iso_local));
+    seg.push_str(&format!("- 决定：{decision}\n"));
+    if let Some(r) = &ref_id {
+        seg.push_str(&format!("- 依据记录：{r}\n"));
+    }
+    seg.push_str("- 处置：本件移入 staging/closed/，不再计入待决数\n");
+    let next = format!("{}{seg}", orig.trim_end());
+
+    // 这里不能复用 `Args::dry_run()`：那条判据是「没有 --apply/--write/--yes 就当
+    // 预演」，为的是让 `repair`/`normalize` 这类批量写入默认安全。结清一件待决件
+    // 本来就不该要求 `--apply`——它只有一个动作、只动一个文件、而且可逆（原文一字
+    // 不动搬进 closed/）。套用那条判据的结果是：用户敲了命令、看到「[预演]」，
+    // 以为结清了，实际什么都没发生。
+    if a.has("dry-run") {
+        println!("[预演] 将结清 {name}");
+        println!("结论: {decision}");
+        println!("去向: {}", dst.display());
+        println!("追加: {} 字节", seg.len());
+        return Ok(0);
+    }
+
+    ensure_dir(&closed)?;
+    // 先写新位置、复读确认，最后才删原件：中途断掉的结果是「原件还在、副本也在」，
+    // 而不是「原件没了、新件没写成」。
+    write_atomic(&dst, &next)?;
+    let back = read_str(&dst)?;
+    if back != next {
+        return Err(EE::Integrity(format!(
+            "结清写入复读不一致: {} 期望 {} 字节，实读 {} 字节",
+            dst.display(),
+            next.len(),
+            back.len()
+        )));
+    }
+    std::fs::remove_file(&src)
+        .map_err(|e| EE::Io(format!("原件删除失败 {}: {e}", src.display())))?;
+
+    let body = format!(
+        "结清待决暂存件 staging/{name}\n\n结论: {decision}\n{}去向: staging/closed/{name}\n\
+原文保留未删，只在末尾追加了结清段。",
+        ref_id.as_ref().map(|r| format!("依据记录: {r}\n")).unwrap_or_default()
+    );
+    let summary = format!("结清待决暂存件 {name}");
+    let target = format!("staging/closed/{name}");
+    crate::cmd_admin::write_commit(
+        &root,
+        &crate::cmd_admin::CommitInfo {
+            slug: "staging-resolve",
+            operation: "REPLACE",
+            library: "NONE",
+            summary: &summary,
+            target: &target,
+            scope: "移动 1 件待决暂存件并在末尾追加结论，不改动任何记录",
+            body: &body,
+        },
+    )?;
+
+    if a.has("json") {
+        println!(
+            "{{\"ok\":true,\"name\":{},\"moved_to\":{},\"decision\":{}}}",
+            jstr(&name),
+            jstr(&dst.display().to_string()),
+            jstr(&decision)
+        );
+    } else {
+        println!("已结清: {name}");
+        println!("结论: {decision}");
+        println!("去向: {}", dst.display());
+    }
+    Ok(0)
 }
 
 /// `review` — promotion proposals and their outcomes.
@@ -1560,5 +1734,162 @@ mod tests {
         assert_eq!(count_lines_of_file(&bin), None);
         assert_eq!(count_lines_of_file(&d.join("不存在")), None);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ------------------------------------------------------------ 结清待决件
+
+    /// 每个用例一个独立目录：结清会移动文件，共用目录会让用例之间互相影响。
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("abook-staging-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("staging")).expect("建临时目录");
+        std::fs::create_dir_all(d.join("commits")).expect("建临时目录");
+        d
+    }
+
+    fn args(root: &Path, tail: &[&str]) -> Args {
+        let mut v = vec!["staging".to_string(), "--root".to_string(), root.display().to_string()];
+        v.extend(tail.iter().map(|s| s.to_string()));
+        Args::parse(&v).expect("参数解析")
+    }
+
+    /// 结清 = 原文一字不动 + 结尾追加结论 + 移进 closed/。
+    ///
+    /// 这条测试钉的是「原文不能丢」：结清的语义是把当时的认知存档，不是在得出
+    /// 结论之后把问题本身抹掉。如果哪天有人把它实现成"写个结论然后把原件删了"，
+    /// 三个月后就没人知道当初在纠结什么。
+    #[test]
+    fn resolve_keeps_original_bytes_and_appends_decision() {
+        let root = scratch("keep");
+        let orig = "# 待决\n\n- 待决项：要不要收\n";
+        std::fs::write(root.join("staging/p.md"), orig).expect("写待决件");
+
+        let rc = cmd_staging(&args(&root, &["resolve", "p", "--decision", "保持现状"])).expect("结清");
+        assert_eq!(rc, 0);
+
+        assert!(!root.join("staging/p.md").exists(), "原位置不该还留着");
+        let got = std::fs::read_to_string(root.join("staging/closed/p.md")).expect("读结清件");
+        assert!(got.starts_with(orig.trim_end()), "原文被改动了: {got:?}");
+        assert!(got.contains("## 结清"), "没有结清段: {got:?}");
+        assert!(got.contains("- 决定：保持现状"), "结论没落进去: {got:?}");
+        // 结论段与原文之间要有空行，否则标题贴在上一个字下面，读起来像原文的一部分。
+        assert!(got.contains("\n\n## 结清\n\n"), "结清段与原文之间没有空行: {got:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 结清可以被再问一次，答案来自记录而不是重新决定。
+    ///
+    /// 幂等不是"再写一次"，是"已经结过了，把当时的结论念出来"。否则第二次调用
+    /// 会把 closed/ 里的文件再追加一段，两次结论叠在一起，读者不知道该信哪条。
+    #[test]
+    fn resolve_is_idempotent_and_reports_the_recorded_decision() {
+        let root = scratch("idem");
+        std::fs::write(root.join("staging/p.md"), "# 待决\n").expect("写待决件");
+        cmd_staging(&args(&root, &["resolve", "p", "--decision", "保持现状"])).expect("首次结清");
+        let once = std::fs::read_to_string(root.join("staging/closed/p.md")).expect("读");
+
+        let rc = cmd_staging(&args(&root, &["resolve", "p", "--decision", "改成别的"])).expect("二次结清");
+        assert_eq!(rc, 0, "已结清的件再结一次不该报错");
+        let twice = std::fs::read_to_string(root.join("staging/closed/p.md")).expect("读");
+        assert_eq!(once, twice, "第二次调用改写了已存档的文件");
+        assert!(!twice.contains("改成别的"), "第二次的结论覆盖了当时的决定");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 没有结论就不许结清。
+    ///
+    /// 允许"结清但不给结论"等于给了一条把待决项藏进子目录的快捷方式：数字归零，
+    /// 而问题还在。退码 2 是这条规矩的可观察形式。
+    #[test]
+    fn resolve_without_decision_is_refused() {
+        let root = scratch("nodec");
+        std::fs::write(root.join("staging/p.md"), "# 待决\n").expect("写待决件");
+        let e = cmd_staging(&args(&root, &["resolve", "p"])).expect_err("无结论必须被拒");
+        assert!(matches!(e, EE::Usage(_)), "该是用法错误，实际 {e:?}");
+        assert!(root.join("staging/p.md").exists(), "被拒时不该移动文件");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 只处理 staging/ 下的一层文件名，不接受路径。
+    ///
+    /// 这条不是洁癖：命令里带着 `..` 就能把库外任意文件追加一段再删掉，而它的
+    /// 用途只是移一件待决件。
+    #[test]
+    fn resolve_rejects_paths() {
+        let root = scratch("path");
+        for bad in ["../escape", "a/b", "..", "."] {
+            let e = cmd_staging(&args(&root, &["resolve", bad, "--decision", "x"]))
+                .expect_err("路径必须被拒");
+            assert!(matches!(e, EE::Usage(_)), "{bad} 该被拒，实际 {e:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 两边同时存在 = 上一次只做了一半，停下来，不要猜。
+    ///
+    /// 这时覆盖 closed/ 会丢掉已追加的结论，删原件会丢掉原文；两个方向都会静默
+    /// 损坏数据，所以必须是完整性错误（退码 5）而不是"我来帮你选一个"。
+    #[test]
+    fn resolve_refuses_when_both_copies_exist() {
+        let root = scratch("both");
+        std::fs::create_dir_all(root.join("staging/closed")).expect("建 closed");
+        std::fs::write(root.join("staging/p.md"), "# 原件\n").expect("写");
+        std::fs::write(root.join("staging/closed/p.md"), "# 已结清\n").expect("写");
+        let e = cmd_staging(&args(&root, &["resolve", "p", "--decision", "x"]))
+            .expect_err("两边都在必须被拒");
+        assert!(matches!(e, EE::Integrity(_)), "该是完整性错误，实际 {e:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("staging/p.md")).expect("读"),
+            "# 原件\n",
+            "被拒时不该动任何一份"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 找不到的件报退码 3，并把现有件列出来。
+    #[test]
+    fn resolve_missing_names_what_is_there() {
+        let root = scratch("missing");
+        std::fs::write(root.join("staging/other.md"), "# 另一件\n").expect("写");
+        let e = cmd_staging(&args(&root, &["resolve", "nope", "--decision", "x"]))
+            .expect_err("找不到必须报错");
+        match e {
+            EE::NotFound(m) => assert!(m.contains("other.md"), "没把现有件告诉调用方: {m}"),
+            other => panic!("该是未找到，实际 {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 预演一件都不改；真跑才改。
+    ///
+    /// 这里的判据不能用 `Args::dry_run()`——那条是"没有 --apply 就当预演"，套在
+    /// 结清上会让一条命令式的动作静默变成空操作。所以 `--dry-run` 必须逐个验。
+    #[test]
+    fn dry_run_changes_nothing() {
+        let root = scratch("dry");
+        let orig = "# 待决\n";
+        std::fs::write(root.join("staging/p.md"), orig).expect("写");
+        let rc = cmd_staging(&args(&root, &["resolve", "p", "--decision", "x", "--dry-run"]))
+            .expect("预演");
+        assert_eq!(rc, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("staging/p.md")).expect("读"),
+            orig,
+            "预演移动了原件"
+        );
+        assert!(!root.join("staging/closed/p.md").exists(), "预演写出了结清件");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 结论里的换行要被压平，否则只读到第一行的人会以为决策就是那半句。
+    #[test]
+    fn decision_newlines_are_flattened() {
+        let root = scratch("nl");
+        std::fs::write(root.join("staging/p.md"), "# 待决\n").expect("写");
+        cmd_staging(&args(&root, &["resolve", "p", "--decision", "第一句\n第二句"]))
+            .expect("结清");
+        let got = std::fs::read_to_string(root.join("staging/closed/p.md")).expect("读");
+        assert!(got.contains("- 决定：第一句 第二句"), "换行没被压平: {got:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -107,6 +107,8 @@ fn help_text() -> String {
   diff <记录A> <记录B>      字段级差异
   history [关键词]          变更记录，支持 --page
   staging [关键词]          待决暂存件；--show <名> 看全文
+  staging resolve <名> --decision 结论 [--ref 记录ID]
+                            结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
   export [--format jsonl|md] [--out 文件] [--lib L]   导出，支持分页
 

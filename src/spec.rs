@@ -40,7 +40,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("recent", "limit,page,per-page", "json", "最近变更", "--limit 2"),
     ("log", "limit,page,per-page", "json", "变更记录", "--limit 2"),
     ("history", "limit,page,per-page", "json", "某条记录的变更", "@any --limit 2"),
-    ("staging", "page,per-page,show", "json", "待决暂存件", "--limit 2"),
+    ("staging", "page,per-page,show,decision,ref,dry-run", "json,dry-run", "待决暂存件；resolve <名> --decision 结论 结清一件", "resolve <名> --decision 保持现状 --ref N-2026..."),
     ("review", "page,per-page,show", "json", "晋升记录", "--limit 2"),
     ("tree", "lib,page,per-page,depth", "json,flat,no-tree", "分支树（有 PARENT 时按层级缩进）", "--flat"),
     ("path", "", "json", "反查记录所属分支链；给分支名则向下展开子树", "@任一条记录ID 或 分支名"),
