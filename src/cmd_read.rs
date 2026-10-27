@@ -803,9 +803,28 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                     // 两个标记覆盖两代写法：末尾 `[PROMOTION]` 块与头部
                     // `PROMOTED_TO=` 字段。`找不到就说明没晋升过`是这个字段的
                     // 全部语义，所以这里只做"有没有"的判断，不去解析值。
+                    //
+                    // **必须锚定行首，不能全文找子串。**
+                    //
+                    // 原来写的是 `b.windows(12).any(|w| w == b"PROMOTED_TO=")`，
+                    // 那是全文子串搜索：只要**正文里提到**这个字段名就命中。
+                    // 实测踩到了——一条候选的正文写着
+                    // `grep "^PROMOTED_TO=" f  # 对：行首锚定`
+                    // （它恰好在记录"查字段必须锚定行首"这条教训），于是它自己
+                    // 被扫成已晋升，从索引的待办列表里消失，还把那句"另有 N 条
+                    // 已晋升"的数抬高了 1。
+                    //
+                    // 真实危害不是数字错一位，而是**一条真候选变得不可见**：
+                    // 索引是预载入口，看不见就等于不待处理，它会一直躺在库里
+                    // 没人读。教训写在正文里、被同一个 bug 吃掉，是这类缺陷最
+                    // 典型的形态。
                     if lib == Lib::Candidate {
-                        let hit = b.windows(12).any(|w| w == b"[PROMOTION]")
-                            || b.windows(12).any(|w| w == b"PROMOTED_TO=");
+                        let at_line_start = |pat: &[u8]| -> bool {
+                            b.split(|&c| c == b'\n').any(|line| line.starts_with(pat))
+                        };
+                        // 容忍 CRLF：行首可能带 `\r` 的只有行尾，不影响 starts_with。
+                        let hit = at_line_start(b"PROMOTED_TO=")
+                            || at_line_start(b"[PROMOTION]");
                         if hit {
                             promoted.insert(name.clone(), String::new());
                         }
