@@ -361,6 +361,39 @@ fn unique_canon_id(root: &Path, stamp: &str, cand: &Record) -> String {
     )
 }
 
+/// 查"某个候选 ID 已经晋升成了哪条正式记录"。
+///
+/// 依据是正式记录头部的 `PROMOTED_FROM`——那是唯一的溯源事实，不需要猜。
+/// 返回 `None` 有明确含义：**对方还没晋升，或者它根本不是一条候选**，
+/// 两种情况都该原样保留引用，不擅自改写。
+///
+/// 每次调用都扫一遍正式库。对单条晋升（一次一到几条）代价可以忽略；
+/// 若将来要批量晋升上千条，这里应改成先建一次映射表再复用。
+fn promoted_target_of(root: &Path, cand_id: &str) -> Option<String> {
+    let dir = root.join(Lib::Canonical.dir());
+    let rd = std::fs::read_dir(&dir).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        // 先廉价预筛：文件里没出现这个 ID 就不解析，省掉绝大多数 parse。
+        let raw = match std::fs::read_to_string(&p) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !raw.contains(cand_id) {
+            continue;
+        }
+        if let Ok(rec) = Record::parse(&p, Lib::Canonical) {
+            if rec.get("PROMOTED_FROM").trim() == cand_id {
+                return Some(rec.id());
+            }
+        }
+    }
+    None
+}
+
 /// 晋升一条候选：写正式记录、搬附件、给候选打晋升标记。
 ///
 /// 只管这三件事。地图、索引、计数、变更日志由调用方决定什么时候写——
@@ -415,16 +448,33 @@ fn promote_core(
     canon.set("STATUS", "ACTIVE");
     canon.set("PROMOTED_FROM", &cand.id());
     canon.set("PROMOTED_AT", &st.iso_z);
-    // 不把候选 ID 追加进 `RELATED_IDS`。
+    // `RELATED_IDS` 里的候选 ID 要重写成那个候选的**正式** ID。
     //
-    // 这里原本写着 "keep a link back to the candidate"，在**复制**语义下成立：
-    // 候选文件留在原地，这条反向链接指得着。改成**移动**语义后它必然悬空——
-    // 晋升成功就删掉了候选，正式记录却还留着一个指向已删 ID 的活关联，
-    // 于是 `abook refs` 会把刚做完的正确操作报成数据损坏。
+    // 移动语义下候选晋升后即被删除，所以任何指向候选的身份都会立刻变成死链。
+    // 而"候选 A 引用候选 B、两者一起晋升"是很自然的用法（同一主题的两条并列
+    // 记录），这时 A 的正式记录若原样保留 `B的候选ID`，就指向了一条已删除的
+    // 记录——刚做完的正确操作被自己的 `refs` 报成数据损坏。
     //
-    // 溯源由 `PROMOTED_FROM` 一处承担即可：它是历史事实（"我从哪来"），
-    // 天然允许指向已不存在的记录；`RELATED_IDS` 是活关联，必须指得着。
-    // 两者语义不同，不该互相兼任。候选原有的 `RELATED_IDS` 已在上面继承。
+    // 重写依据是精确可推导的：正式记录的 `PROMOTED_FROM` 记着"我从哪来"，
+    // 于是"候选 ID → 正式 ID"是个查表。**不删掉引用**——删了会丢掉 A 与 B
+    // 的关联，那是真信息；换成正式 ID 才既保留关联又指得着。
+    //
+    // 查不到映射（对方还没晋升、或本来就不是身份值）就原样保留：猜错比留着更坏。
+    let related = {
+        let mut out: Vec<String> = Vec::new();
+        for one in split_list(&cand.get("RELATED_IDS")) {
+            let one = one.trim().to_string();
+            if one.is_empty() {
+                continue;
+            }
+            match promoted_target_of(root, &one) {
+                Some(canon_id) => out.push(canon_id),
+                None => out.push(one),
+            }
+        }
+        out.join(",")
+    };
+    canon.set("RELATED_IDS", &related);
 
     let dir = root.join(Lib::Canonical.dir());
     ensure_dir(&dir)?;

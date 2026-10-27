@@ -538,9 +538,38 @@ pub fn cmd_refs(a: &Args) -> R<i32> {
             }
         }
         let dry = fix_dry;
+
+        // 「候选 ID → 它晋升成的正式 ID」。这是一条**精确映射**，不是推测：
+        // 正式记录头部的 `PROMOTED_FROM` 就是"我从哪来"的事实记录。
+        //
+        // 为什么必须单独建这张表：移动语义下候选晋升后即被删除，于是
+        // 「候选 A 引用候选 B、两者一起晋升」会让 A 的 `RELATED_IDS` 指着 B 的
+        // 候选 ID——一条已删除的记录。而 A、B 的正式 ID 时间戳与候选 ID 的
+        // 时间戳完全不同（晋升那一刻才生成），下面的时间戳推导接不上。
+        // 只有 `PROMOTED_FROM` 能把它接起来。
+        let mut promoted_map: BTreeMap<String, String> = BTreeMap::new();
+        for (rec, stem) in &all {
+            if rec.lib != Lib::Canonical {
+                continue;
+            }
+            let from = rec.get("PROMOTED_FROM").trim().to_string();
+            if !from.is_empty() {
+                promoted_map.insert(from, stem.clone());
+            }
+        }
+
         let mut planned: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
         let mut unresolved: Vec<(String, String, String, &str)> = Vec::new();
         for (rec, field, val) in &dangling {
+            // 先查"它是不是一条已晋升的候选"——这条映射是精确的，
+            // 优先级高于下面的时间戳推导（后者是猜，前者是查表）。
+            if let Some(canon) = promoted_map.get(val) {
+                planned
+                    .entry(rec.clone())
+                    .or_default()
+                    .push((field.clone(), val.clone(), canon.clone()));
+                continue;
+            }
             let parts: Vec<&str> = val.split('-').collect();
             if parts.len() != 3 {
                 unresolved.push((rec.clone(), field.clone(), val.clone(), "形态无法解析"));
