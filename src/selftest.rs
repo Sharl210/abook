@@ -1665,6 +1665,15 @@ if crate::util::Args::known("per-page") {
                     ));
                 }
             }
+            // 晋升是移动，不是复制：正式库多一条的同时，候选必须消失。
+            //
+            // 早先的语义是复制——候选留在原地并追加 `[PROMOTION]` 块，于是同一个
+            // 对象在库里存在两份，候选库只增不减，每次盘点都得重新判断它算不算已
+            // 处理。这条断言把"移动"钉死：只要候选还在，就说明回退了。
+            if cdir.join("N-20260101T000000-dddddddd.md").exists() {
+                ok = false;
+                detail.push_str("晋升后候选仍然存在（应为移动语义）;");
+            }
             let _ = std::fs::remove_dir_all(&tmp);
             if ok {
                 pass += 1;

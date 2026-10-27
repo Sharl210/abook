@@ -369,7 +369,9 @@ fn promote_core(
     root: &Path,
     cpath: &Path,
     cand: &Record,
-    branch: &str,
+    // 移动语义下候选被删除，不再往回写 BRANCH 标记，所以这里用不到 branch；
+    // 分支归属由调用方在做地图映射时决定（map_record / map_records_batch）。
+    _branch: &str,
     st: &Stamps,
 ) -> R<Promoted> {
     let id = unique_canon_id(root, &st.compact, cand);
@@ -432,6 +434,59 @@ fn promote_core(
     if back.id().is_empty() {
         return integrity("晋升写入复读校验失败");
     }
+    // ===== 晋升是搬走，不是复制一份留着 =====
+    //
+    // 早先的做法是在候选末尾追加 `[PROMOTION]` 块把它留在原地：正式库多一条、
+    // 候选库不减少，同一个对象在库里存在两份——一份在正式库当依据，一份在候选
+    // 库当待表态件。每次盘点都得重新判断它到底算不算已处理，候选库只增不减，
+    // 看上去永远有一堆待办。
+    //
+    // 现在正式侧已经拿到完整正文与附件，候选侧就该消失。溯源不靠留在候选里的
+    // 标记，靠正式记录头部的 `PROMOTED_FROM`，加上变更记录里的两侧路径。
+    //
+    // ===== 删除前置门：晋升必须已被证明成功 =====
+    //
+    // 删除不可逆，所以不能拿"上面几行没返回 Err"当成功证明——那只证明函数走到了
+    // 这里，不证明磁盘上有一条可读、内容完整的正式记录。一旦删了候选而正式侧其实
+    // 是空壳或写歪了，这条内容就永久消失。四条全过才允许删：
+    //   ① 正式文件确实存在于磁盘（不是内存里的 path 变量）
+    //   ② 它能被重新解析（不是半截文件）
+    //   ③ 它的 ID 与预期一致（没因命名冲突写到别处）
+    //   ④ 正文与候选原正文一致（搬的过程中没被截断或改写）
+    // 任一不过 → 保留候选、报 INTEGRITY 并说明正式侧现状，由人决定怎么修。
+    //
+    // 注意顺序：先撤索引与地图条目，再删文件。反过来的话会出现"文件已经没了，
+    // 但索引和地图还指着它"的悬空引用，而这种状态没有任何命令能自动修。
+    let promoted_on_disk = path.exists();
+    let reparse = if promoted_on_disk {
+        Record::parse(&path, Lib::Canonical).ok()
+    } else {
+        None
+    };
+    let verified = matches!(
+        &reparse,
+        Some(back2)
+            if promoted_on_disk
+                && back2.id() == id
+                && back2.body.trim_end() == cand.body.trim_end()
+    );
+    if !verified {
+        let why = match (&reparse, promoted_on_disk) {
+            (_, false) => "正式记录未出现在磁盘上".to_string(),
+            (None, _) => "正式记录无法被解析".to_string(),
+            (Some(back2), _) if back2.id() != id => format!(
+                "正式记录 ID 不符（期望 {id}，实际 {}）",
+                back2.id()
+            ),
+            _ => "正式记录正文与候选正文不一致".to_string(),
+        };
+        return integrity(format!(
+            "晋升未通过删除前校验：{why}。\
+             候选 {} **已保留未删除**，请先检查正式侧 {} 再决定重试或回滚。",
+            rel(root, cpath),
+            rel(root, &path)
+        ));
+    }
     // 附件随晋升一起走。
     //
     // 晋升是"搬"不是"抄"：正文原样搬过去并保持原时间戳，附件目录也必须跟着
@@ -486,16 +541,25 @@ fn promote_core(
             rel(root, &want)
         );
     }
-    // mark the candidate as promoted
-    let mut c2 = cand.clone();
-    let promo = format!(
-        "PROMOTED_TO={}\nPROMOTED_AT={}\nBRANCH={}\nNOTE=候选正文与头部字段未改写；已晋升候选默认不参与普通自动召回，显式历史查询仍可读取。",
-        id,
-        st.iso_z,
-        branch
-    );
-    c2.promotion = Some(promo);
-    write_atomic(cpath, &c2.render())?;
+    // 正式侧已被证明是完整可读的一等公民，才动候选。
+    crate::cmd_admin::index_remove(root, &rel(root, cpath))?;
+    unmap_record(root, Lib::Candidate, &rel(root, cpath))?;
+    // 附件目录在上面的 rename 中已经整目录搬到正式侧；这里清掉可能残留的旧命名空目录。
+    for d in crate::attach::all_dirs(cpath) {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    if cpath.exists() {
+        if let Err(e) = std::fs::remove_file(cpath) {
+            // 正式侧已成立、候选侧删不掉：这是"内容安全但库里有冗余"的状态，
+            // 不是数据损坏。如实报告并让正式侧继续有效，比回滚更安全。
+            crate::say_line!(
+                "警告: 正式记录已写入 {}，但候选 {} 删除失败（{e}）。\
+                 正式侧有效，请手工删除该候选以免重复。",
+                rel(root, &path),
+                rel(root, cpath)
+            );
+        }
+    }
     Ok(Promoted {
         cand_path: cpath.to_path_buf(),
         canon_path: path,
@@ -688,7 +752,7 @@ pub fn cmd_promote(a: &Args) -> R<i32> {
     )?;
     sync_global_counts(&root)?;
     let body = format!(
-        "晋升候选 → 正式\n\n候选: {}\n正式: {}\n标题: {}{}",
+        "晋升候选 → 正式（移动，候选已删除）\n\n候选（已删除）: {}\n正式: {}\n标题: {}{}",
         rel(&root, &one.cand_path),
         rel(&root, &one.canon_path),
         one.title,
@@ -844,10 +908,13 @@ pub fn cmd_promote_all(a: &Args) -> R<i32> {
     index_upsert_batch(&root, &rows)?;
     sync_global_counts(&root)?;
 
-    let mut body = format!("批量晋升候选 → 正式\n\n共 {} 条\n", done.len());
+    let mut body = format!(
+        "批量晋升候选 → 正式（移动，候选已删除）\n\n共 {} 条\n",
+        done.len()
+    );
     for p in &done {
         body.push_str(&format!(
-            "- {} → {}\n",
+            "- {}（已删除） → {}\n",
             rel(&root, &p.cand_path),
             rel(&root, &p.canon_path)
         ));
