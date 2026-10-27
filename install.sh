@@ -1,14 +1,19 @@
 #!/bin/sh
 # abook 引导安装脚本。
 #
-# 用途：在一台还没装 abook 的机器上，一条命令装好并能裸名调用。
-# 它会自己识别平台与架构，下载对应产物，放进 PATH。
+# 用途：在一台还没装 abook 的机器上，一条命令装好。
+# 它会自己识别平台与架构，下载对应产物，放进**记忆库根目录**。
 #
 #   curl -fsSL https://raw.githubusercontent.com/Sharl210/abook/main/install.sh | sh
 #
+# 为什么装在库根而不是 PATH 目录：程序要回答"我的库在哪"。把二进制和
+# Global.md / Index.md 放在同一层，这个问题就有了唯一答案，换 shell、换会话、
+# 换调用方式都一样。装进 PATH 目录则多出一个"哪个 abook 被调到"的变量，还会
+# 让安装动作伸手到用户 shell 配置里去。
+#
 # 可选环境变量：
 #   ABOOK_BASE_URL  自定义下载基址（默认用本仓库 latest release）
-#   ABOOK_BIN_DIR   安装目录（默认先去已有的可写 PATH 目录，否则 ~/.local/bin）
+#   ABOOK_BIN_DIR   安装目录（默认库根 ABOOK_ROOT，再默认 ~/AgentsBook）
 
 set -eu
 
@@ -176,7 +181,7 @@ while [ $# -gt 0 ]; do
       say "用法: install.sh [选项]"
       say "  --self-check          离线验证平台/架构/产物名映射，不联网、不改文件"
       say "  --token <凭据>        私有仓库下载凭据（也可用 ABOOK_TOKEN 环境变量）"
-      say "  --bin-dir <目录>      指定安装目录（默认取 PATH 里第一个可写目录）"
+      say "  --bin-dir <目录>      指定安装目录（默认库根：~/AgentsBook）"
       exit 0 ;;
     *) die "无法识别的参数: $1（用 --help 看用法）" ;;
   esac
@@ -253,22 +258,19 @@ say "平台 $os/$arch  →  $name"
 say "来源 $BASE/$name"
 
 # ---------------------------------------------------------------- 选安装目录
+#
+# 目标只有一个：记忆库根。以前这里会扫描 PATH、挑第一个可写的 bin 目录，
+# 于是同一台机器上装在哪取决于启动脚本留下的 PATH，装完还得劝用户改 shell
+# 配置。现在不再看 PATH —— 库根是一个确定的位置，装进去就完事。
 pick_dir() {
   # Explicit choice wins. `--bin-dir` is parsed above but had no effect until
   # it was threaded through here: accepting a flag and ignoring it is the same
   # defect class as documenting one that does not exist.
   if [ -n "$ARG_BIN" ]; then printf '%s' "$ARG_BIN"; return; fi
   if [ -n "${ABOOK_BIN_DIR:-}" ]; then printf '%s' "$ABOOK_BIN_DIR"; return; fi
-  # 优先复用已在 PATH 里且可写的目录，避免要求用户改 PATH
-  old_ifs=$IFS; IFS=:
-  for d in $PATH; do
-    case "$d" in
-      /data/data/*/files/usr/bin|*/usr/local/bin|*/bin)
-        if [ -w "$d" ] 2>/dev/null; then IFS=$old_ifs; printf '%s' "$d"; return; fi ;;
-    esac
-  done
-  IFS=$old_ifs
-  printf '%s' "${HOME:-/tmp}/.local/bin"
+  # ABOOK_ROOT 只为老脚本保留；不设就用默认库根。
+  if [ -n "${ABOOK_ROOT:-}" ]; then printf '%s' "$ABOOK_ROOT"; return; fi
+  printf '%s' "${HOME:-/tmp}/AgentsBook"
 }
 
 BIN_DIR=$(pick_dir)
@@ -418,12 +420,9 @@ if "$final" version >/dev/null 2>&1; then
   say "版本 $("$final" version 2>/dev/null | head -1)"
 fi
 
-case ":$PATH:" in
-  *":$BIN_DIR:"*)
-    say "PATH 已包含 $BIN_DIR，可直接运行: abook detect" ;;
-  *)
-    say ""
-    say "注意：$BIN_DIR 不在 PATH 里。请把下面一行加入 shell 配置："
-    say "  export PATH=\"$BIN_DIR:\$PATH\""
-    say "然后重开终端，运行: abook detect" ;;
-esac
+say ""
+say "库根: $BIN_DIR"
+say "调用: $final detect"
+say ""
+say "程序与库同目录，路径不依赖环境变量，也不需要改 PATH 或 shell 配置。"
+say "想少打字就自己加个别名（指向上面这个绝对路径），别把库根塞进 PATH。" 

@@ -159,8 +159,8 @@ fn help_text() -> String {
   （别名：list/ledger/names/reconcile）
 
 ═══ 安装与平台 ═══
-  detect                    平台识别 + PATH 自检
-  install [--url URL]       首次安装：下载本机架构的二进制并放入 PATH
+  detect                    平台识别 + 库根自检（程序是否与库同目录）
+  install [--url URL]       首次安装：下载本机架构的二进制，放进库根
   upgrade [--check]         自我更新：按当前架构取最新版并替换正在运行的这个文件
                             源按序回退（GitHub → 三个镜像 → jsDelivr），
                             下来先校验 sha256 再跑自检，不过就回滚
@@ -177,10 +177,19 @@ fn help_text() -> String {
   --json                    机器可读输出
   --dry-run                 预演，不写盘
   --approve                 授权写正式库
-  --root PATH               指定库根（等价 ABOOK_ROOT）
+  --root PATH               指定库根（覆盖自动定位）
 
-═══ 环境变量 ═══
-  ABOOK_ROOT        记忆库根目录（默认 ~/AgentsBook）
+═══ 库根怎么定（不依赖环境变量）═══
+  程序自己所在的目录就是库根：abook 和 Global.md / Index.md 放在一起，
+  谁都不用 export 什么，换 shell、换会话、换调用方式，答案都一样。
+  优先级从高到低：
+    1. --root 显式指定
+    2. 程序所在目录（该目录含 Global.md / Index.md / canonical / candidate）
+    3. ABOOK_ROOT（仅为老脚本兼容，可留空）
+    4. ~/AgentsBook
+
+═══ 环境变量（全部可留空，不设也能正常工作）═══
+  ABOOK_ROOT        仅兼容老脚本；与程序所在目录冲突时以程序目录为准
   ABOOK_UTC_OFFSET  UTC 偏移秒数（默认自动探测）
   ABOOK_BASE_URL    安装下载基址
 
@@ -305,104 +314,87 @@ fn cmd_detect(a: &Args) -> R<i32> {
         None => return usage(format!("不支持的平台: {os}/{arch}")),
     };
     let exe = if os == "windows" { "abook.exe" } else { "abook" };
-    // PATH self-check: look for a bare-named binary in every PATH entry.
-    let mut found: Vec<String> = Vec::new();
-    let sep = if os == "windows" { ';' } else { ':' };
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(sep) {
-            if dir.is_empty() {
-                continue;
-            }
-            let cand = std::path::Path::new(dir).join(exe);
-            if cand.is_file() {
-                found.push(cand.to_string_lossy().to_string());
-            }
-        }
-    }
-    // current_exe() is unreliable on Android (it can resolve to the dynamic
-    // linker), so trust the PATH scan first and fall back to argv[0].
-    let self_path = if let Some(first) = found.first() {
-        first.clone()
-    } else if let Some(a0) = std::env::args().next() {
-        a0
-    } else {
-        String::new()
-    };
-    // "Found on PATH" is not the same as "installed". A build directory or a
-    // throw-away workspace is on PATH only for the shell that set it up, so
-    // counting it as ready reports success that evaporates next session.
-    let classify = install_location_kind;
-    let stable: Vec<String> = found
-        .iter()
-        .filter(|f| classify(f) == "stable")
-        .cloned()
-        .collect();
-    let transient: Vec<String> = found
-        .iter()
-        .filter(|f| classify(f) == "transient")
-        .cloned()
-        .collect();
-    let on_path = !found.is_empty();
-    // ready means: a durable copy exists AND the bare name resolves to it.
-    let ready = !stable.is_empty();
+
+    // "Ready" is one question now: does this binary sit in the library folder?
+    //
+    // It used to be a `PATH` scan, which answered a different question — "can
+    // the shell find the bare word `abook`" — and answered it differently in
+    // every shell. A build directory could make it say 就绪 and the next session
+    // said 需要初始化, with the library untouched either way. Where the program
+    // is on disk decides where its data is, so that is what gets reported.
+    let me = crate::util::self_path();
+    let self_str = me
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| std::env::args().next().unwrap_or_default());
+    let root = resolve_root(a);
+    let initialized = root.join("Global.md").is_file() || root.join("Index.md").is_file();
+    let in_root = me
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d == root.as_path())
+        .unwrap_or(false);
+
     if a.has("json") {
         println!(
-            "{{\"os\":{},\"arch\":{},\"target\":{},\"exe\":{},\"on_path\":{},\
-\"ready\":{},\"found\":[{ }],\"stable\":[{ }],\"transient\":[{ }],\"self\":{},\"root\":{}}}",
+            "{{\"os\":{},\"arch\":{},\"target\":{},\"exe\":{},\"self\":{},\"root\":{},\
+\"initialized\":{},\"in_root\":{},\"ready\":{}}}",
             jstr(os),
             jstr(arch),
             jstr(target),
             jstr(exe),
-            on_path,
-            ready,
-            found.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
-            stable.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
-            transient.iter().map(|f| jstr(f)).collect::<Vec<_>>().join(","),
-            jstr(&self_path),
-            jstr(&resolve_root(a).to_string_lossy())
+            jstr(&self_str),
+            jstr(&root.to_string_lossy()),
+            initialized,
+            in_root,
+            in_root && initialized
         );
-        return Ok(if ready { 0 } else { 4 });
+        return Ok(if in_root && initialized { 0 } else { 4 });
     }
+
     println!("平台        {os}/{arch}");
-    println!("需要产物    abook-{target}{}", if exe.ends_with(".exe") { ".exe" } else { "" });
-    println!("已装路径    {}", if self_path.is_empty() { "-" } else { &self_path });
-    println!("记忆根      {}", resolve_root(a).display());
-    if ready {
-        println!("PATH 自检   通过（裸名 {exe} 可直接调用，且位置长期有效）");
-        for f in &stable {
-            println!("            稳定 {f}");
-        }
-        for f in &transient {
-            println!("            临时 {f}（不在 PATH 的长期配置里，换会话可能消失）");
-        }
-        println!("结论        就绪");
+    println!("需要产物    abook-{target}");
+    println!("已装路径    {self_str}");
+    println!("库根        {}", root.display());
+    println!("库状态      {}", if initialized { "已初始化" } else { "未初始化（没有 Global.md/Index.md）" });
+    if in_root && initialized {
+        println!("结论        就绪（程序与库在同一目录，路径不依赖环境变量）");
+        println!("调用        {}", root.join(exe).display());
         Ok(0)
-    } else if !transient.is_empty() {
-        println!("PATH 自检   只有临时副本，没有一个长期有效的位置");
-        for f in &transient {
-            println!("            临时 {f}");
-        }
-        println!("结论        需要正式安装（当前只在本次会话的 PATH 里）");
-        println!("下一步      abook install");
+    } else if in_root {
+        println!("结论        程序已在库根，但库还没建起来");
+        println!("下一步      abook init");
         Ok(4)
     } else {
-        println!("PATH 自检   未通过：PATH 里找不到名为 {exe} 的可执行文件");
-        println!("结论        需要初始化");
-        println!("下一步      abook install");
+        println!("结论        程序不在库根，把它放进 {}", root.display());
+        println!("下一步      abook install（装到库根，不碰 PATH 目录）");
         Ok(4)
     }
 }
 
-/// Classify where a copy of the tool lives. A build directory or an ephemeral
-/// workspace satisfies "on PATH" today and is gone tomorrow, so treating it as
-/// installed would report readiness that does not survive the session.
+/// Classify where a copy of the tool lives, for reporting only.
+///
+/// A build directory or an ephemeral workspace satisfies "is this a durable
+/// install" never, so the distinction is still worth printing. It no longer
+/// decides readiness: readiness is "am I in the library folder", which does not
+/// depend on any shell's `PATH`.
 pub fn install_location_kind(p: &str) -> &'static str {
     let transient = ["/target/release", "/target/debug", "/.dsh/workspaces/", "/.cargo/"];
     if transient.iter().any(|m| p.contains(m)) {
         return "transient";
     }
-    if p.contains("/.local/bin/") || p.contains("/usr/bin/") || p.contains("/bin/") {
+    if p.contains("/usr/bin/") || p.contains("/bin/") || p.contains("/.local/bin/") {
         return "stable";
+    }
+    // The library folder is wherever the user keeps it, so a copy beside
+    // `Global.md` is durable without matching any fixed directory name.
+    if let Some(dir) = std::path::Path::new(p).parent() {
+        if dir.join("Global.md").is_file()
+            || dir.join("Index.md").is_file()
+            || dir.join("canonical").is_dir()
+        {
+            return "stable";
+        }
     }
     "other"
 }
@@ -533,8 +525,18 @@ fn cmd_install(a: &Args) -> R<i32> {
     }
 
     println!("平台 {os}/{arch} → {target}");
-    let dest = home_dir().join(".local").join("bin").join(exe);
-    let dir = dest.parent().map(|p| p.to_path_buf()).unwrap_or_else(home_dir);
+    // The binary goes into the library root, not into a `PATH` directory.
+    //
+    // A `PATH` entry is an environment fact: it differs between a login shell, a
+    // service, an `ssh host cmd` and whatever the user last exported. Installing
+    // there made "which abook is running" and "where does it think the library
+    // is" two separate questions with two independent answers. Keeping the
+    // binary beside the data collapses them into one: the folder that holds
+    // `Global.md` also holds the executable, so the executable can find the
+    // library by looking at itself.
+    let root = resolve_root(a);
+    let dest = root.join(exe);
+    let dir = root.clone();
     ensure_dir(&dir)?;
     let part = dir.join(format!("{exe}.part"));
 
@@ -697,14 +699,14 @@ fn cmd_install(a: &Args) -> R<i32> {
         }
     }
 
-    let on_path = crate::util::path_dirs()
-        .iter()
-        .any(|d| std::path::Path::new(d).join(exe).exists());
-    if !on_path {
-        println!();
-        println!("把下面这行加入 shell 配置后重开终端：");
-        println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
-    }
+    // No `PATH` advice. The binary lives beside the library, and prints the one
+    // absolute path someone needs to call it; telling people to edit their shell
+    // profile was how the install used to reach outside its own folder, and it
+    // made the tool's behaviour depend on which shell happened to be inherited.
+    println!();
+    println!("库根: {}", root.display());
+    println!("直接用绝对路径调用，或把它加进别名的绝对路径即可：");
+    println!("  {}", dest.display());
     Ok(0)
 }
 

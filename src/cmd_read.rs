@@ -16,7 +16,7 @@ pub fn cmd_state(a: &Args) -> R<i32> {
     if !root.exists() {
         return notfound(
             Fail::new(format!("记忆根不存在: {}", root.display()))
-                .hint("新建一个空库用 `abook init --root <路径>`；如果库在别处，把正确的根传进来（或设 ABOOK_ROOT）")
+                .hint("新建一个空库用 `abook init --root <路径>`；如果库在别处，把正确的根传进来（或把 abook 放到那个目录里）")
                 .render(),
         );
     }

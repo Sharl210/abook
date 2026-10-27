@@ -90,7 +90,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("help", "", "json", "帮助", ""),
     ("version", "", "json", "版本", ""),
     ("detect", "", "json", "安装位置探测", ""),
-    ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到 PATH", "--dry-run"),
+    ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到库根", "--dry-run"),
     ("upgrade", "url,dir,check", "check,force,dry-run,json", "自更新到最新版", "--check"),
     ("selftest", "only", "all,json,verbose", "内置用例；--only N 只跑第 N 条", "selftest --only 1"),
 

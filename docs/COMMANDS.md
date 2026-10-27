@@ -1,6 +1,8 @@
 # abook 命令参考
 
-单二进制、零依赖。全部命令都接受 `--root <路径>`（等价环境变量 `ABOOK_ROOT`）。
+单二进制、零依赖。全部命令都接受 `--root <路径>`；不传时库根就是程序自己所处的
+目录（其中含 `Global.md`/`Index.md` 时），再退到 `~/AgentsBook`。`ABOOK_ROOT` 仅作
+老脚本兼容。
 
 `abook help` 里列了每个命令实际接受哪些参数——写错参数名会被直接拒绝，不会静默忽略。
 
@@ -566,8 +568,8 @@ CI 与本地都用它当唯一验收闸门：改完代码先跑 `selftest`，再
 |---|---|
 | `init` | 建库结构（含地图、名册、保险箱），已存在则跳过 |
 | `selftest [--verbose]` | 内置自检，覆盖解析、校验、正则、模糊、搜索分级、JSON 输出等 |
-| `detect [--json]` | 平台识别 + PATH 自检（区分稳定安装与临时目录） |
-| `install [--url URL]` | 首次安装：下载本机架构的二进制并放入 PATH |
+| `detect [--json]` | 平台识别 + 库根自检（程序是否与库同目录、库是否已初始化） |
+| `install [--url URL]` | 首次安装：下载本机架构的二进制，放进库根 |
 | `upgrade [--check] [--force] [--url URL]` | 已装则换新版：先取 manifest 再决定是否下载，替换 `current_exe()` 并过 sha256、自报版本、`selftest` 三道；`--check` 只查不装 |
 | `version` | 版本 |
 | `help` | 帮助 |

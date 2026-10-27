@@ -470,6 +470,84 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
         }
     }
 
+    // ---- root resolution must not depend on environment variables
+    //
+    // Putting the binary beside the library is only worth doing if "where is the
+    // library" is answerable from the binary alone. These cases pin the order
+    // and the recognition rule; a regression here silently points writes at a
+    // different library, which is the worst failure mode this tool has.
+    {
+        let argv = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+
+        let base = std::env::temp_dir().join(format!("abookroot{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let libdir = base.join("lib");
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&libdir).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(libdir.join("Global.md"), "# t\n## x\nKEYS=[k]\n").unwrap();
+
+        let mut good = 0usize;
+        let mut cases = 0usize;
+
+        // (a) no flags, no library beside the test binary: the answer must be
+        // the stable default, not the cwd and not an empty path.
+        cases += 1;
+        let a = crate::util::Args::parse(&argv(&["state"])).unwrap_or_default();
+        let got = crate::util::resolve_root(&a);
+        let want_default = match std::env::var("ABOOK_ROOT") {
+            Ok(ref e) if !e.is_empty() => std::path::PathBuf::from(e),
+            _ => crate::util::home_dir().join("AgentsBook"),
+        };
+        if got == want_default {
+            good += 1;
+        }
+
+        // (b) explicit --root wins outright, even when a library sits elsewhere.
+        // This is the escape hatch for "my library is not beside the binary".
+        cases += 1;
+        let lib_s = libdir.to_string_lossy().to_string();
+        let a = crate::util::Args::parse(&argv(&["state", "--root", &lib_s])).unwrap_or_default();
+        if crate::util::resolve_root(&a) == libdir {
+            good += 1;
+        }
+
+        // (c) recognition: a folder holding the library's index counts, a bare
+        // folder does not. This is what lets a copy running from a build tree
+        // find the real library instead of adopting a half-built neighbour.
+        cases += 3;
+        if crate::util::looks_like_book_root(&libdir) {
+            good += 1;
+        }
+        if !crate::util::looks_like_book_root(&plain) {
+            good += 1;
+        }
+        std::fs::create_dir_all(libdir.join("canonical")).unwrap();
+        if crate::util::looks_like_book_root(&libdir) {
+            good += 1;
+        }
+
+        // (d) a `--root` with no value is a usage error, not a silent default.
+        cases += 1;
+        if crate::util::Args::parse(&argv(&["state", "--root"])).is_err() {
+            good += 1;
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+        if good == cases {
+            pass += 1;
+            if verbose {
+                msgs.push(
+                    "PASS  库根定位：--root 优先、默认目录稳定、含库索引的目录被识别为库根"
+                        .to_string(),
+                );
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!("FAIL  库根定位：{cases} 例中只有 {good} 例正确"));
+        }
+    }
+
     // ---- "installed" must not be satisfied by a throw-away location
     {
         let cases = [

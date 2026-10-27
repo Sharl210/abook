@@ -328,6 +328,16 @@ impl Args {
                     let v = inline.unwrap_or_else(|| "true".to_string());
                     a.store_both(&k, &raw_k, v);
                 } else if let Some(v) = inline {
+                    // `--root=` with nothing after it is not "use the default".
+                    // An empty root has no meaning, and quietly falling back is
+                    // how a write lands in a different library than the caller
+                    // named. Other value flags keep accepting an empty string:
+                    // `--title ""` legitimately clears a title.
+                    if k == "root" && v.is_empty() {
+                        return usage(
+                            "参数 --root 需要一个目录，例如 `abook state --root ~/AgentsBook`",
+                        );
+                    }
                     a.store_both(&k, &raw_k, v);
                 } else {
                     // value follows, unless next token is another flag
@@ -336,6 +346,11 @@ impl Args {
                         a.store_both(&k, &raw_k, v);
                         i += 1;
                     } else {
+                        if k == "root" {
+                            return usage(
+                                "参数 --root 需要一个目录，例如 `abook state --root ~/AgentsBook`",
+                            );
+                        }
                         a.store_both(&k, &raw_k, String::new());
                     }
                 }
@@ -1059,11 +1074,45 @@ pub fn home_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
-/// Memory book root: --root > $ABOOK_ROOT > $HOME/AgentsBook
+/// True when `dir` looks like a book root rather than an install directory.
+///
+/// The two live in the same folder now, so "where am I" answers "where is the
+/// library" — but only once the library actually exists. Before `init` the
+/// folder holds nothing but the binary, and treating that as the root would be
+/// right by accident; the `Global.md`/`Index.md`/`canonical` probe makes the
+/// answer true on purpose, and lets a copy run from somewhere else (a build
+/// tree, a USB stick) still find the real library instead of creating a second
+/// empty one beside itself.
+pub fn looks_like_book_root(dir: &Path) -> bool {
+    dir.join("Global.md").is_file()
+        || dir.join("Index.md").is_file()
+        || dir.join("canonical").is_dir()
+        || dir.join("candidate").is_dir()
+}
+
+/// Memory book root: --root > the directory holding this binary > ~/AgentsBook
+///
+/// The binary and the library live in the same folder. That is the whole point:
+/// "which library am I talking to" must not depend on where a `PATH` entry
+/// happens to point or on an environment variable that may or may not be
+/// exported in the shell that started us. A program that carries its data next
+/// to itself answers the question the same way every time, from any shell.
+///
+/// `$ABOOK_ROOT` is still read last for old scripts, but nothing needs it: it is
+/// a compatibility door, not the road. When it disagrees with the binary's own
+/// folder, the binary's folder wins — otherwise an inherited variable could
+/// silently redirect writes into a different library.
 pub fn resolve_root(a: &Args) -> PathBuf {
     if let Some(r) = a.get("root") {
         if !r.is_empty() {
             return expand_tilde(r);
+        }
+    }
+    if let Some(p) = self_path() {
+        if let Some(dir) = p.parent() {
+            if looks_like_book_root(dir) {
+                return dir.to_path_buf();
+            }
         }
     }
     let e = env_or("ABOOK_ROOT", "");

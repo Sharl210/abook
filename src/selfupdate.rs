@@ -15,8 +15,8 @@
 //!    1.6MB 之前就回答"已经是最新了"和"下来的字节是不是完整"。没有它就只能
 //!    下完再说,而"下完再说"意味着每次检查都付一次带宽。
 //!
-//! 3. **替换的是当前正在运行的那个文件**,不是硬编码的 `~/.local/bin/abook`。
-//!    二进制可能被装在别处(PATH 上的任何一个目录、或是包管理器管的路径),猜
+//! 3. **替换的是当前正在运行的那个文件**,不是硬编码的某条目录。
+//!    二进制可能被装在别处(库根、或是包管理器管的路径),猜
 //!    安装位置就会在升级时写出一份影子副本,让用户机器上出现两个版本、哪个生
 //!    效取决于 PATH 顺序。
 //!
@@ -511,7 +511,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
     // `/proc/self/cmdline` 拿真实路径,并在兜底里显式拒绝链接器名字。
     let cur = crate::util::self_path().ok_or_else(|| {
         EE::Io(
-            "拿不到当前程序路径（可能运行在动态链接器下）。用 --dir 显式指定安装目录，例如 `abook upgrade --dir ~/.local/bin`"
+            "拿不到当前程序路径（可能运行在动态链接器下）。用 --dir 显式指定安装目录，例如 `abook upgrade --dir ~/AgentsBook`"
                 .to_string(),
         )
     })?;
@@ -551,7 +551,7 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
 
     if !curl() {
         return blocked(
-            "本机没有 curl,无法下载。请手动取一份对应架构的产物放进 PATH。".to_string(),
+            "本机没有 curl,无法下载。请手动取一份对应架构的产物放进库根。".to_string(),
         );
     }
 
@@ -987,16 +987,14 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
         read_version_of(&install_to).unwrap_or_else(|| "?".to_string())
     );
 
-    // 换的是"正在跑的那个文件",所以只要原路径在 PATH 上,升级后立刻生效,不需要
-    // 再教用户改 PATH。这里只在真的不在 PATH 上时才提。
-    let on_path = path_dirs()
-        .iter()
-        .any(|d| Path::new(d).join(exe).exists());
-    if !on_path {
-        println!();
-        println!("这个路径不在 PATH 上,把那行加入 shell 配置后重开终端:");
-        println!("  export PATH=\"{}:$PATH\"", dir.display());
-    }
+    // 换的是"正在跑的那个文件",所以升级后立刻生效,不需要再教用户改任何东西。
+    //
+    // 这里原本还要检查"在不在 PATH 上",不在就打印一行 export。那条建议现在已经
+    // 是错的出路:程序与库同目录,路径由它自己决定,把它加进 PATH 只是让两个
+    // 不同的 abook 有机会同时存在。只报库根与可执行文件的绝对路径。
+    println!();
+    println!("库根    {}", crate::util::resolve_root(a).display());
+    println!("可执行  {}", install_to.display());
     Ok(0)
 }
 

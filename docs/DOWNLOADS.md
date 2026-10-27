@@ -87,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/Sharl210/abook/main/install.sh | sh
 curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Sharl210/abook/main/install.sh | sh
 ```
 
-`install.sh` 会自动按 `uname` 选目标、走上面 9 个源依次尝试、校验产物格式、放进 `PATH`。
+`install.sh` 会自动按 `uname` 选目标、走上面 9 个源依次尝试、校验产物格式、放进**库根目录**。
 
 ## 已经装过之后的更新
 
@@ -104,5 +104,6 @@ abook upgrade --url <基地址>   # 指定镜像或本地目录（内网盘、�
 不会写出影子副本。装之前过三道：`sha256` 比对 manifest、新文件自报版本与
 manifest 一致、新文件自己的 `selftest` 通过；任一不过就回滚到原文件。
 
-与 `install.sh` 的分工：**首次安装**用 `install.sh`（它管 `PATH` 配置），
-**此后更新**用 `abook upgrade`（它不需要动 `PATH`，因为路径没变）。
+与 `install.sh` 的分工：**首次安装**用 `install.sh`（它决定库根落在哪），
+**此后更新**用 `abook upgrade`（就地替换正在跑的那个文件，路径不变）。两者都不再
+要求配置 `PATH`。

@@ -23,15 +23,20 @@
 curl -sSfL https://raw.githubusercontent.com/Sharl210/abook/downloads/install.sh | sh
 ```
 
-或者从 release 下载对应架构的二进制放进 `PATH`。目标三元组、镜像地址和国内网络
-的处理见 `docs/DOWNLOADS.md`。
+或者从 release 下载对应架构的二进制，**放进你的记忆库根目录**（默认
+`~/AgentsBook`，和 `Global.md` 放一起）。程序的库根就是它自己所处的目录，不靠
+环境变量、也不用改 `PATH`。目标三元组、镜像地址和国内网络的处理见
+`docs/DOWNLOADS.md`。
 
 装好后自检：
 
 ```sh
-abook selftest      # 内置用例，全部在临时目录跑，不碰真实库
-abook state         # 库的当前状态
+~/AgentsBook/abook selftest   # 内置用例，全部在临时目录跑，不碰真实库
+~/AgentsBook/abook state      # 库的当前状态
 ```
+
+用绝对路径调用就行。想少打字就自己做个别名，但不要再把库根目录塞进 `PATH`——
+那样会出现两个同名 abook 抢着回答“库在哪”。
 
 ## 库长什么样
 
