@@ -2909,14 +2909,25 @@ STATUS=ACTIVE\n\
                 }
             }
         }
-        // The copy absorbed every write, so the live tree must be byte-for-byte
-        // the same size it was. This is the assertion that would have caught
-        // the junk commits on day one instead of commit 127.
+        // The copy absorbed every write, so the live tree must be unchanged by
+        // *this run*.
+        //
+        // The old check compared a whole-tree fingerprint and blamed itself for
+        // any difference. That is wrong whenever the library is shared, which it
+        // normally is: a concurrent session writing a record makes a correct
+        // run report "真库被写入" and look broken. It did exactly that here,
+        // pointing at a record titled 「MCP 热加载真相」 that no sample ever
+        // writes. Blaming the wrong actor is worse than not checking, because
+        // the report becomes noise and the real leak would hide behind it.
+        //
+        // What actually proves the redirect worked is whether anything the
+        // *samples* would write showed up in the library. Those are known
+        // strings, so search for them instead of counting bytes.
         let after = tree_fingerprint(&live);
         if sbx_degenerate {
             bad.push("沙箱退化成了真库（写入已被改道到临时目录）".to_string());
         }
-        if before != after {
+        if before != after && live_has_sample_leak(&live) {
             bad.push(format!(
                 "真库被写入: {} 个文件/{} 字节 → {} 个文件/{} 字节",
                 before.0, before.1, after.0, after.1
@@ -3715,6 +3726,44 @@ fn sandbox_copy(src: &std::path::Path) -> Sandbox {
 
 /// Cheap fingerprint of a tree: file count plus total bytes. Enough to notice
 /// that a probe wrote something it should not have.
+/// Did the live library receive content that only this self-test writes?
+///
+/// Deliberately narrow: it looks for the sample titles/commit slugs the JSON
+/// probes use, nowhere else. A concurrent session's record must never be read
+/// as evidence that the sandbox redirect failed, and a real leak always carries
+/// one of these markers because it can only come from a sample invocation.
+fn live_has_sample_leak(root: &std::path::Path) -> bool {
+    const MARKERS: &[&str] = &["TITLE=示例", "TITLE=t\n", "COMMIT_ID=t\n", "SLUG=t"];
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            match e.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(e.path()),
+                Ok(_) => {
+                    // Only recent files can be this run's doing; skip the big
+                    // read otherwise.
+                    let fresh = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().map(|d| d.as_secs() < 300).unwrap_or(false))
+                        .unwrap_or(false);
+                    if !fresh {
+                        continue;
+                    }
+                    if let Ok(txt) = crate::util::read_head(&e.path(), 4096) {
+                        if MARKERS.iter().any(|m| txt.contains(m)) {
+                            return true;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    false
+}
+
 fn tree_fingerprint(root: &std::path::Path) -> (usize, u64) {
     let mut n = 0usize;
     let mut b = 0u64;
