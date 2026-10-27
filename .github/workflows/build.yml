@@ -1109,6 +1109,56 @@ jobs:
             find . -type f | sort
             exit 1
           fi
+
+          # 产物齐全只说明"不是残缺"，不说明"是新的"。多个 tag 连续推送时，
+          # 每个 tag 各触发一次完整构建（15 个架构，十几分钟到半小时），完成
+          # 顺序与推送顺序没有任何保证——先推的 tag 后跑完，就会把新版本的
+          # 产物按 force 覆盖掉，manifest 的 version 也跟着被改回旧值。使用侧
+          # `upgrade --check` 比对的就是这个字段，它会回答"已是最新"，而那个
+          # "最新"是旧的。这不是推演：v1.7.9 在 13:20 完成，v1.7.8 在 13:29
+          # 完成，后者把前者盖了，实测踩到。
+          #
+          # 所以覆盖前先比版本号。判据只看 manifest 顶层 version——它是这个分支
+          # 唯一表达"这批产物属于哪一版"的地方，比读提交信息可靠。
+          CURL_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          CUR=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' manifest.json 2>/dev/null | head -1)
+          OLD=""
+          # 在临时目录里浅取一份旧 manifest。不能就地把 fetch 塞进 dl/：
+          # 下面要 `git checkout --orphan`，工作区里多出来的引用和对象会让
+          # 这个本来干净的新仓库多出不该有的历史。
+          TMPD=$(mktemp -d)
+          if ( cd "$TMPD" && git init -q . && \
+               git fetch --depth 1 "$CURL_URL" downloads >/dev/null 2>&1 ); then
+            OLD=$( cd "$TMPD" && git show FETCH_HEAD:manifest.json 2>/dev/null \
+                   | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1 ) || OLD=""
+          fi
+          rm -rf "$TMPD"
+          # 远端还没有 downloads 分支，或它没有 version 字段（早期构建，
+          # 或 workflow_dispatch 手动触发写空串），都放行：此时没有可比较的
+          # 旧版本，拦下来只会让首次发布和单架构重测通道永远动不了。
+          if [ -n "$OLD" ] && [ -n "$CUR" ]; then
+            # 逐段数字比较。不用 `sort -V`：部分 runner 的 busybox sort 没有 -V，
+            # 而这里只比纯数字段，自己写比赌外部工具的能力稳。
+            older=$(awk -v a="$CUR" -v b="$OLD" 'BEGIN{
+              na=split(a,x,"."); nb=split(b,y,".")
+              n=(na>nb?na:nb)
+              for(i=1;i<=n;i++){
+                va=(i<=na?x[i]+0:0); vb=(i<=nb?y[i]+0:0)
+                if(va<vb){print "yes"; exit}
+                if(va>vb){print "no"; exit}
+              }
+              print "no"
+            }')
+            if [ "$older" = "yes" ]; then
+              echo "::error::本次 $CUR 低于 downloads 现有 $OLD，拒绝用旧版覆盖新版"
+              echo "这条构建只是跑得晚，并不代表它更新。要让 $CUR 生效，请重新触发它的构建。"
+              exit 1
+            fi
+            echo "版本检查通过：$CUR >= $OLD"
+          else
+            echo "无可比较的旧版本（cur='$CUR' old='$OLD'），放行"
+          fi
+
           git init -q .
           git checkout -q --orphan downloads
           git add -A
