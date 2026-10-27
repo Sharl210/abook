@@ -15,7 +15,7 @@
 | `path` | 反查（`path <记录或分支>`）：给记录 → 列出它所属的分支链（由近及远到顶层）；给分支名 → 向下展开子树。带各级聚合值与时间 |
 | `attach` | 附件（文件域）：`list` / `add` / `get` / `rm` / `path` / `sync` / `refs` / `check`；详见下文「附件」 |
 | `budget [记录]` | 预载与单条读取的字节预算，对照规则上限 |
-| `audit [--all]` | 全库格式审计：纠偏了多少处、有无 ERROR |
+| `audit [--all]` | 全库格式审计：纠偏了多少处、有无 ERROR；每条规则都附一句含义 |
 | `lint` | 头部完整性与命名规范 |
 | `doctor [--fix]` | 健康检查 |
 | `refs [--fix]` | 引用完整性：检查 `PROMOTED_FROM`/`RELATED_IDS`/`SUPERSEDES` 等是否指得着；`--fix` 只修能唯一推导的，详见「引用完整性」 |
@@ -61,6 +61,24 @@ L1 只做字面匹配；L2 加正则与编辑距离；L3 起进入 BM25 语义�
 `--field F1,F2` 限定字段，`--max N` 限量，`--context N` 带上下文行，
 `--lib canonical|candidate|both` 选库，`--include-deleted` / `--hide-promoted` 调过滤。
 
+### 候选记录的四种状态
+
+`list --lib candidate` 的状态不是只读头部那个 `STATUS` 字段，而是从内容推出来的。
+原因是晋升与合并都不会改写候选的头部（候选是溯源对象，要保持原样），只留标记：
+
+| 状态 | 判据 | 默认是否列出 |
+|---|---|---|
+| `ACTIVE` | 没有下面任何标记 | 是 |
+| `PROMOTED` | 有 `PROMOTED_TO=` 或末尾 `[PROMOTION]` 块 | 否，`--include-promoted` 才看 |
+| `SUPERSEDED` | 有 `MERGED_INTO=`（已被 `merge` 并进另一条） | 否，同上 |
+| `DELETED` | 头部 `STATUS=DELETED` | 否，`--include-deleted` 才看 |
+
+已晋升的候选**不是待办**，是溯源副本：正式库里那一条的 `PROMOTED_FROM` 指着它。
+默认把它们混进列表，会把一个已经清干净的库读成"还有几百条没处理"。
+
+`index` 的「未晋升候选」段走的也是这套判据，所以它报的数字和
+`list --lib candidate` 的默认条数永远一致；两者不一致就是缺陷，不是口径差异。
+
 ## 看：单条记录
 
 | 命令 | 作用 |
@@ -104,10 +122,34 @@ L1 只做字面匹配；L2 加正则与编辑距离；L3 起进入 BM25 语义�
 | `merge <A> <B> ...` | 合并成新记录；源记录标 `SUPERSEDED`，仍可检索 |
 | `split <记录> --at <文本>` | 在指定位置拆成两条 |
 | `promote <候选>` | 候选 → 正式（需 `--approve`） |
+| `promote --all` | 一次晋升全部未归档候选（需 `--approve`，见下） |
 | `demote <正式>` | 正式 → 候选（需 `--approve`） |
 | `commit --slug S --body-file F` | 写一条 `canonical/commits` 变更记录 |
 
 写命令都支持 `--dry-run`，只打印将写入的内容摘要，不落盘。
+
+### `promote --all`：批量晋升
+
+单条 `promote` 每跑一次都要重写地图、索引、全局计数与变更日志，四个文件加起来
+两百多 KB，几十条积压就是几十次全量重写，而且每条都是独立事务——中途失败会留下
+半批状态。`--all` 把它变成一次事务：记录各自原子落盘，地图与索引各写一次，
+变更日志只写一条汇总。
+
+```sh
+abook promote --all --dry-run          # 先看会做什么，列出真实目标文件名
+abook promote --all --approve          # 真跑
+abook promote --all --kind LESSON --q 缓存 --approve   # 只处理匹配的一批
+```
+
+分批过滤用 `--kind` / `--maturity` / `--q`（匹配标题、KEYS、正文）/ `--branch`。
+
+“已归档”与“跳过”是两回事，输出里分开报：
+
+- **已归档**：早就晋升过（头部 `PROMOTED_TO=` 或末尾 `[PROMOTION]` 块），
+  或已被 `merge` 合并进另一条（`MERGED_INTO=`）。它们没有失败，不该算进这一批的账。
+- **跳过**：已软删，处理不了，需要人看为什么。
+
+有失败时退出码为 5，调用方据此判断这批清没清干净。
 
 写命令也都支持 `--json`。成功时给一个对象，`changed` 列出本轮真正写过的文件；
 失败时同样给对象，`error.tag` 是 `USAGE` / `BLOCKED` / `NOT_FOUND` / `INTEGRITY` /
@@ -368,6 +410,16 @@ LEVEL=2                  # 仅参考；真实深度由 PARENT 链计算
 | `sync` | 同步 Global 计数与地图收录时刻 |
 
 `refresh` 是幂等的：路径集合没变时不会推动 `REVISION`，也不会重排已有顺序。
+
+输出报的是**刷新后地图里一共有多少条路径**，以及本次新增了几条：
+
+```
+canonical/Atlas.md: 本次新增 0 条，地图现有 445 条路径
+```
+
+只报"本次新增"会误导：地图已经完整时它恒为 `0 条路径`，看起来像什么都没做，
+实际可能是刚把几十条缺失路径补齐。判断地图对不对，看的是"现有"那个数字，
+它必须等于 `state` 里的「地图 N 条」。
 
 ## 保险箱
 

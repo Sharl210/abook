@@ -26,7 +26,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("split", "at,dry-run,approve", "dry-run,json", "一条拆成多条", "@any --at 1"),
     ("delete", "if-version,approve,dry-run,hard", "hard,approve,dry-run,json", "标 DELETED，--hard 才物理删", "@any"),
     ("restore", "if-version,approve,dry-run", "approve,dry-run,json", "恢复被删记录", "@any"),
-    ("promote", "branch,approve,dry-run,force", "approve,force,dry-run,json", "候选升正式", "@any"),
+    ("promote", "branch,approve,dry-run,force,all,kind,maturity,q", "approve,force,dry-run,json,all", "候选升正式（--all 批量）", "@any"),
     ("demote", "approve,dry-run", "approve,dry-run,json", "正式降候选", "@any"),
     ("show", "field,fields,page,per-page,deviations,kb,size", "deviations,json,all,full,whole", "全字段 + 正文（默认按 30KB 预算分页）", "@any"),
     ("cat", "page,per-page,kb,size", "json,all,full,whole", "只打印正文（默认按 30KB 预算分页）", "@any"),
@@ -127,7 +127,9 @@ pub const POSITIONALS: &[(&str, &str)] = &[
     ("split", "<记录>"),
     ("delete", "<记录>"),
     ("restore", "<记录>"),
-    ("promote", "<候选>"),
+    // 位置参数是可选的：`promote --all` 不需要指定单条候选。写成 `<候选>`
+    // 会让 `describe promote` 报一个必填参数，而 `--all` 恰恰不该要它。
+    ("promote", "[候选]"),
     ("demote", "<正式>"),
     ("show", "<记录>"),
     ("get", "<记录>"),

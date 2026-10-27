@@ -74,7 +74,14 @@ pub fn cmd_stats(a: &Args) -> R<i32> {
         for r in &recs {
             *kinds.entry(r.kind()).or_insert(0) += 1;
             *mats.entry(r.get("MATURITY")).or_insert(0) += 1;
-            if r.promotion.is_some() {
+            // 用记录自己的判据，不要在这里再写一遍"怎么算已晋升"。
+            //
+            // 原来这里只看末尾 `[PROMOTION]` 块，于是早期流程把 `PROMOTED_TO`
+            // 直接写在头部的那批老记录一条都数不到：实测真实库 301 条候选里
+            // `list --status PROMOTED` 报 299 条、这里报 292 条，同一份数据两个
+            // 数字差 7 条，而它俩本该永远相等——差的那几条正是最早一批晋升的，
+            // 那时还没有末尾块这套写法。
+            if r.is_promoted() {
                 promoted += 1;
             }
         }
@@ -751,6 +758,14 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 记录是空的"，而真相是"这一维度量不出来"。
     let mut rec_index: std::collections::HashMap<String, (Option<u64>, Option<usize>, i64)> =
         std::collections::HashMap::new();
+    // 已晋升的候选：文件名（bare）→ 目标正式 ID。
+    //
+    // 为什么在这里顺手判：索引要为每条记录算出字节数与行数，本来就 `fs::read`
+    // 过整个文件了，判断"是否已晋升"只需要在已读到的字节里找两个标记，零额外
+    // I/O。而它决定下面那个「未晋升候选」段到底列什么——不判它，那一段就是把
+    // 全部候选（含已晋升的溯源副本）当成待办列出来，读者看到几百条会以为
+    // 积压严重，实际待办可能是 0。
+    let mut promoted: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for lib in [Lib::Canonical, Lib::Candidate] {
         // lib.dir() 已经是 "canonical/records"，再拼一次 records 会让整个索引
         // 建在空目录上——所有元信息退化成 "-"，而且没有报错。
@@ -783,10 +798,20 @@ pub fn cmd_index(a: &Args) -> R<i32> {
             // 陈述，读者会判断成"这条是空的"而不是"读不了"。给 `None`，文本侧打
             // `-`、JSON 侧写 null。
             let (bytes, lines) = match std::fs::read(&p) {
-                Ok(b) => (
-                    Some(b.len() as u64),
-                    Some(count_lines_bytes(&b)),
-                ),
+                Ok(b) => {
+                    // 同一批字节里顺手取晋升标记，不额外开文件。
+                    // 两个标记覆盖两代写法：末尾 `[PROMOTION]` 块与头部
+                    // `PROMOTED_TO=` 字段。`找不到就说明没晋升过`是这个字段的
+                    // 全部语义，所以这里只做"有没有"的判断，不去解析值。
+                    if lib == Lib::Candidate {
+                        let hit = b.windows(12).any(|w| w == b"[PROMOTION]")
+                            || b.windows(12).any(|w| w == b"PROMOTED_TO=");
+                        if hit {
+                            promoted.insert(name.clone(), String::new());
+                        }
+                    }
+                    (Some(b.len() as u64), Some(count_lines_bytes(&b)))
+                }
                 Err(_) => (None, None),
             };
             let full = format!("{}/{}", lib.dir(), name);
@@ -875,8 +900,15 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 let bare = path.rsplit('/').next().unwrap_or(path).to_string();
                 let known = rec_index.contains_key(path) || rec_index.contains_key(&bare);
                 let kind = index_kind(path, known);
+                // 机器侧同样要能区分"候选待办"与"候选已晋升的溯源副本"。
+                // 只给 candidate/canonical 两级，JSON 调用方必须自己再开一次
+                // 文件才知道这条要不要处理——而这条记录刚被读过一遍。
                 let status = if path.starts_with("candidate/") {
-                    "candidate"
+                    if promoted.contains_key(&bare) {
+                        "promoted"
+                    } else {
+                        "candidate"
+                    }
                 } else if kind == "record" {
                     "canonical"
                 } else {
@@ -942,7 +974,19 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 这两类在 Index.md 里住在同一张表,但它们的"体积"含义不同:分支是成员求和,
     // 记录是一条文件。混在一起打印会让读者以为 72 和 8.3KB 是同一量纲。
     // 记录与分支走同一个分类判据，理由见 JSON 分支里 `index_kind` 的注释。
-    let (mut br_rows, mut rec_rows): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    //
+    // 记录级路由再分两堆：正式的那些是**结论**，候选里还没晋升的那些是**线索**。
+    // 原来只有一堆，段标题写「未晋升候选」却把正式记录也印在里面，同时把已晋升
+    // 的候选副本（只是溯源对象）也列成待办——标题和内容两头都不对。分开之后
+    // 各段只装自己那一类，数字也才有意义。
+    let (mut br_rows, mut canon_rows, mut cand_rows): (Vec<String>, Vec<String>, Vec<String>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    // 解析不到单条文件的候选路由（地图文件、`A..B` 区间指针），单独收。
+    // 它们既不是待办也不是结论，混进任何一段都会让那一段的数字失真。
+    let mut pointer_rows: Vec<String> = Vec::new();
+    // 命中的已晋升候选数：不打印内容，只报个数，并说明去哪看。
+    // 完全不提也不行——读者会以为索引漏了这些记录。
+    let mut promoted_hidden = 0usize;
     for (path, summary, when) in &routes {
         if !q.is_empty() && !ci_contains(path, &q) && !ci_contains(summary, &q) && !ci_contains(when, &q) {
             continue;
@@ -955,14 +999,41 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 Some((b, l, t)) => (*b, *l, *t),
                 None => (None, None, 0),
             };
-            let lib = if path.starts_with("candidate/") { "候选" } else { "正式" };
-            rec_rows.push(format!(
+            let is_cand = path.starts_with("candidate/");
+            // 「未晋升候选」这个数字必须精确到"真有几条要处理"，否则它比不报还坏：
+            // 实测库里 299 条候选，其中 296 条是已晋升的溯源副本、2 条是地图与区间
+            // 指针、1 条才是真待办。全算进去会读成 299 条积压。
+            //
+            // 判据只能落在**这条路由能不能解析成一条真记录**上：解析不到的是指针
+            // （`candidate/Atlas.md`、`AB2-N-073.md..AB2-N-079.md` 这类），它对
+            // 应若干条记录或一个文件，本身没有晋升状态可言。
+            if is_cand {
+                if !known {
+                    pointer_rows.push(format!(
+                        "{}  [指针] {}｜{}",
+                        crate::util::row_meta(ts, by, ln),
+                        path,
+                        summary
+                    ));
+                    continue;
+                }
+                if promoted.contains_key(&bare) {
+                    promoted_hidden += 1;
+                    continue;
+                }
+            }
+            let row = format!(
                 "{}  [{}] {}｜{}",
                 crate::util::row_meta(ts, by, ln),
-                lib,
+                if is_cand { "候选" } else { "正式" },
                 path,
                 summary
-            ));
+            );
+            if is_cand {
+                cand_rows.push(row);
+            } else {
+                canon_rows.push(row);
+            }
         } else {
             let agg = branch_agg.get(path);
             let (n, by, ln, ts) = match agg {
@@ -990,8 +1061,16 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 抬头数字与实际行数不符是读者最先会去数的地方，数一次对不上就再也不敢信
     // 这张表。
     let n_branch = br_rows.len();
-    let n_rec = rec_rows.len();
+    let n_rec = canon_rows.len() + cand_rows.len() + pointer_rows.len();
     println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", n_branch + n_rec, n_branch, n_rec);
+    // 已晋升的候选不在上面三个数字里，但必须交代一句：不然读者会以为索引漏了
+    // 这些记录。它们仍然可读（`abook show <路径>`），只是默认视图里属于历史。
+    if promoted_hidden > 0 {
+        println!(
+            "           另有 {} 条候选已晋升，只作溯源保留，不列为待办（`list --include-promoted` 可看）",
+            promoted_hidden
+        );
+    }
     if !br_rows.is_empty() {
         println!();
         println!("【知识分支】时间 / 体积 / 行数 / 条目数 —— 聚合值，据此判断该不该进去翻");
@@ -1016,32 +1095,69 @@ pub fn cmd_index(a: &Args) -> R<i32> {
         println!("{footer}");
     }
 
+    // 正式记录段：这些是已闭合、经用户批准的结论。
+    //
+    // 候选段先分名额，正式段吃剩下的——顺序不能反。候选是**待办**，正式记录
+    // 是**已有资产**；`--limit` 小的时候把额度全给"已经有 205 条的东西"，
+    // 唯一需要动手的那条反而印不出来，索引就失去了它最主要的作用。
+    let cand_quota = cand_rows.len().min(lim.saturating_sub(cut_b));
+    if !canon_rows.is_empty() {
+        println!();
+        println!("【正式记录】已闭合结论，可直接当依据用");
+        let remain_c = lim.saturating_sub(cut_b).saturating_sub(cand_quota);
+        let cut_ca = canon_rows.len().min(remain_c);
+        let (shown_ca, footer_ca) = crate::paging::page_rows(a, canon_rows[..cut_ca].to_vec());
+        for r in &shown_ca {
+            println!("{r}");
+        }
+        if cut_ca < canon_rows.len() {
+            println!("  …（另有 {} 条，用 --limit 扩大）", canon_rows.len() - cut_ca);
+        }
+        if !footer_ca.is_empty() {
+            println!("{footer_ca}");
+        }
+    }
+
     // 未晋升候选单独成段,并明确标注它的证据地位。
     //
     // 它们与正式记录并列在 Index.md 里,但两者的可用性完全不同:正式库是已闭合
     // 并经用户批准的结论,候选是"可能还有矛盾、还没验证完"的材料。混在一张表里
     // 打印,读者会把候选当成同等可靠的依据——而它只应当用来指方向、不应当当结论。
     // 但也不能不列:不列就等于让模型完全看不见手上还有什么线索。
-    if !rec_rows.is_empty() {
+    //
+    // 这一段只装**真没晋升**的那些。已晋升的候选副本只是溯源对象，攒在这里会让
+    // 人把"库里有几百条候选"读成"有几百条积压"——实测 299 条候选里 0 条待办，
+    // 而旧版这一段会照数报 299 条。
+    if !cand_rows.is_empty() {
         println!();
         println!(
             "【未晋升候选】{} 条 —— 仅作参考：可能仍有矛盾或未验证，不可当结论，",
-            rec_rows.len()
+            cand_rows.len()
         );
         println!("确认要用须先读正文核对，或等它升为正式库");
         // 名额是**总共**多少条，不是每段各多少条。各段各自截断会让
         // `--limit 5` 打出 10 行（5 分支 + 5 候选），与"总共 5 条"的直觉不符。
-        let remain = lim.saturating_sub(cut_b);
-        let cut_r = rec_rows.len().min(remain);
-        let (shown_c, footer_c) = crate::paging::page_rows(a, rec_rows[..cut_r].to_vec());
+        // 候选在上面的正式段之前就已经分到名额（`cand_quota`），这里直接用。
+        let cut_r = cand_rows.len().min(cand_quota);
+        let (shown_c, footer_c) = crate::paging::page_rows(a, cand_rows[..cut_r].to_vec());
         for r in &shown_c {
             println!("{r}");
         }
-        if cut_r < rec_rows.len() {
-            println!("  …（另有 {} 条，用 --limit 扩大）", rec_rows.len() - cut_r);
+        if cut_r < cand_rows.len() {
+            println!("  …（另有 {} 条，用 --limit 扩大）", cand_rows.len() - cut_r);
         }
         if !footer_c.is_empty() {
             println!("{footer_c}");
+        }
+    }
+
+    // 解析不到单条记录的候选路由（地图文件、`A..B` 区间指针）。单列而不并入
+    // 任何一段：它们既不是待办，也不是结论，混进去会让那一段的数字失真。
+    if !pointer_rows.is_empty() {
+        println!();
+        println!("【候选指针】{} 条 —— 地图或区间引用，本身不是单条记录", pointer_rows.len());
+        for r in &pointer_rows {
+            println!("{r}");
         }
     }
 

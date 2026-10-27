@@ -132,6 +132,10 @@ fn help_text() -> String {
   merge <记录A> <记录B> ... [--title T] [--remove-sources]   合并成新记录（源记录标记 SUPERSEDED，仍可检索）
   split <记录> --at <文本>  在指定位置拆成两条
   promote <候选> [--branch B]    候选 → 正式（需 --approve）
+  promote --all [--kind K] [--maturity M] [--q 词] [--branch B]
+          把候选库里所有尚未晋升的记录一次晋升完（需 --approve）。
+          已晋升的溯源副本不计入，已软删的跳过并列出。
+          地图、索引、计数、变更日志各写一次，不是每条各写一次。
   demote <正式>             正式 → 候选（需 --approve）
 
 ═══ 修：格式问题 ═══
@@ -1147,7 +1151,21 @@ fn cmd_refresh(a: &Args) -> R<i32> {
                 a.dry_run()
             ));
         } else {
-            crate::say_line!("{}: {} 条路径", lib.atlas(), n.mapped);
+            // 报"现在地图里一共几条"，不是"这次新增几条"。
+            //
+            // `mapped` 是本次新映射的条数，地图已经完整时它恒为 0，于是
+            // `refresh --apply` 在健康的库上永远打印 `0 条路径`——看起来像什么都
+            // 没做，实际可能是刚把几十条路径补齐。总条数才是判据：它是"刷新后
+            // 地图覆盖了多少"，和 `state` 里那个数字对得上。
+            let total = crate::atlas::Atlas::load(&root.join(lib.atlas()))
+                .map(|at| at.total_count())
+                .unwrap_or(0);
+            crate::say_line!(
+                "{}: 本次新增 {} 条，地图现有 {} 条路径",
+                lib.atlas(),
+                n.mapped,
+                total
+            );
             report_dropped(&n.dropped);
         }
     }

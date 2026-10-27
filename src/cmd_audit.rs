@@ -123,7 +123,17 @@ pub fn cmd_audit(a: &Args) -> R<i32> {
         let mut v: Vec<_> = rule_counts.iter().collect();
         v.sort_by(|a, b| (b.1 .0 + b.1 .1 + b.1 .2).cmp(&(a.1 .0 + a.1 .1 + a.1 .2)));
         for (rule, (e, w, f)) in v {
-            crate::say_line!("  {rule:<24} {e:>4} / {w:>4} / {f:>4}");
+            // 偏差类的码自带 ` dev` 后缀（来自解析期 Deviation，不是 Issue），
+            // 查说明时先剥掉，否则查不到。
+            let base = rule.trim_end_matches(" dev");
+            match crate::schema::rule_doc(base) {
+                Some(doc) => crate::say_line!("  {rule:<10} {e:>4} / {w:>4} / {f:>4}  {doc}"),
+                // 查不到就明说查不到。一个看起来已经解释过的码比没解释更糟：
+                // 读者会以为自己懂了，于是不去看样例。
+                None => crate::say_line!(
+                    "  {rule:<10} {e:>4} / {w:>4} / {f:>4}  （此码未收录说明，用 --all 看样例）"
+                ),
+            }
         }
     }
     if !field_issue.is_empty() {

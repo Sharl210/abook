@@ -455,6 +455,45 @@ pub struct State {
 /// 出现同名文本不算。读不全或读不出时按"非删除"计入——宁可多算一条，
 /// 也不要把一条活记录当成删掉的（那会让 `state` 显示的数字比磁盘少，
 /// 反而误导读库的人）。
+/// 头部里是否写着 `STATUS=DELETED`。
+///
+/// 单独抽出来是因为它有两个容易踩的坑，两处都会把"已删"读成"还在"：
+///
+/// 1. **4KB 窗口按字节截断**。头部里有大量中文（每字 3 字节），一条字段多的
+///    记录，`STATUS` 行的字节位置可能已经越过 4096。实测候选库里正好有 5 条
+///    这样的记录：全部软删之后 `state` 报"目录 5 条 vs 地图 0 条"，一致性失败，
+///    而 `list --status DELETED` 同时报 301 条——两个命令对同一份数据给出不同
+///    答案。所以窗口里找不到时必须回退读全文，不能当作"没有这行"。
+/// 2. **字段可能被压进一行**。`ID=x;PROJECT=y;STATUS=DELETED` 是合法写法，
+///    只比对整行会漏。
+fn head_says_deleted(p: &Path, head: &str) -> bool {
+    let hit = |text: &str| {
+        text.lines().any(|l| {
+            l.trim()
+                .split(';')
+                .any(|part| part.trim() == "STATUS=DELETED" || part.trim() == "STATUS=del")
+        })
+    };
+    if hit(head) {
+        return true;
+    }
+    // 窗口里没有：可能是被截断了。读全文再判一次。
+    // 只在"4KB 里根本没有 STATUS 行"时才会走到这里，所以绝大多数记录不付
+    // 这份 I/O —— 而没有这一步，那几条长头部的记录会被永久算成"还在"。
+    let has_status_line = head.lines().any(|l| {
+        l.trim().split(';').any(|part| part.starts_with("STATUS="))
+    });
+    if has_status_line {
+        return false;
+    }
+    match crate::util::read_str(p) {
+        Ok(full) => hit(&full),
+        // 读不出来：不猜。当作"还在"（保守），但这种情况已经在上面的 Err 分支
+        // 里被计为一条记录，不在这里重复放大。
+        Err(_) => false,
+    }
+}
+
 fn count_live_fast(root: &Path, lib: Lib) -> usize {
     let dir = root.join(lib.dir());
     let rd = match std::fs::read_dir(&dir) {
@@ -475,11 +514,7 @@ fn count_live_fast(root: &Path, lib: Lib) -> usize {
                 continue;
             }
         };
-        let deleted = head.lines().any(|l| {
-            let t = l.trim();
-            t == "STATUS=DELETED" || t == "STATUS=del"
-        });
-        if !deleted {
+        if !head_says_deleted(&p, &head) {
             n += 1;
         }
     }
@@ -551,5 +586,57 @@ pub fn guess_branch(rec: &Record) -> String {
         "EVIDENCE" => "审计证据".into(),
         "DECISION" => "记忆维护与演进".into(),
         _ => DEFAULT_BRANCH.into(),
+    }
+}
+
+#[cfg(test)]
+mod live_count_tests {
+    use super::*;
+
+    /// 头部窗口里找不到 `STATUS=DELETED` 时，必须区分"确实没有"与"被截断了"。
+    ///
+    /// 真实故障：五条候选的头部字节数超过 4096（中文字段名与长正文摘要），
+    /// 全部软删之后 `state` 报"候选库目录 5 条 vs 地图 0 条"，一致性失败；
+    /// 同一时刻 `list --status DELETED` 报 301 条。两个命令对同一份数据给出
+    /// 不同答案，根因就是这个 4KB 窗口按字节截断。
+    #[test]
+    fn truncated_head_must_fall_back_to_full_read() {
+        let dir = std::env::temp_dir().join(format!("abook-livecount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 短头部：窗口内就能判定。
+        let short = dir.join("short.md");
+        std::fs::write(&short, "ID=A\nSTATUS=DELETED\n").unwrap();
+        let head = crate::util::read_head(&short, 4096).unwrap();
+        assert!(head_says_deleted(&short, &head));
+
+        // 长头部：STATUS 落在 4096 之外。旧实现会答"没删"。
+        let long = dir.join("long.md");
+        let filler = "备注=".to_string() + &"甲".repeat(2000);
+        std::fs::write(&long, format!("ID=B\n{filler}\nSTATUS=DELETED\n")).unwrap();
+        let head = crate::util::read_head(&long, 4096).unwrap();
+        assert!(
+            !head.contains("STATUS=DELETED"),
+            "前提：窗口必须真的截掉了那一行"
+        );
+        assert!(
+            head_says_deleted(&long, &head),
+            "窗口截断时必须回退读全文，否则已删记录被算成还在"
+        );
+
+        // 打包在一行里的字段也要认：`ID=x;STATUS=DELETED` 是合法写法。
+        let packed = dir.join("packed.md");
+        std::fs::write(&packed, "ID=C;PROJECT=p;STATUS=DELETED\n").unwrap();
+        let head = crate::util::read_head(&packed, 4096).unwrap();
+        assert!(head_says_deleted(&packed, &head));
+
+        // 没删的不能被误判成删了。
+        let live = dir.join("live.md");
+        std::fs::write(&live, "ID=D\nSTATUS=ACTIVE\n").unwrap();
+        let head = crate::util::read_head(&live, 4096).unwrap();
+        assert!(!head_says_deleted(&live, &head));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

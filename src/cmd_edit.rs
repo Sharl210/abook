@@ -707,6 +707,21 @@ pub fn cmd_merge(a: &Args) -> R<i32> {
                 crate::cmd_write_sync::forget(&root, *l, &r)?;
             }
             crate::say_line!("源记录已标记 SUPERSEDED");
+        } else {
+            // 不带 `--remove-sources` 时也必须留下"并到哪去了"。
+            //
+            // 原来这里什么都不做，源记录仍是 ACTIVE、仍没有晋升标记，于是下一次
+            // `promote --all` 会把它们当新记录再推一遍，正式库里就多出两条内容
+            // 与新合并记录重叠的条目——同一个坑我在真实库里踩过一次：合并了两组，
+            // 四个源记录都还在候选库，靠手工补标记才拦住。
+            //
+            // 只记去向、不改 STATUS：源记录要留给溯源，删不删由人决定。
+            for (p, l, _) in &recs {
+                let mut rr = Record::parse(p, *l)?;
+                rr.set("MERGED_INTO", &id);
+                write_atomic(p, &rr.render())?;
+            }
+            crate::say_line!("源记录已标记 MERGED_INTO={id}（内容保留，不再单独晋升）");
         }
     }
     Ok(0)

@@ -26,6 +26,11 @@ pub const CANON_KEYS: &[&str] = &[
     "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
     "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
     "SOURCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "SEQUENCE", "UPDATED",
+    // 合并去向。`merge` 把 A、B 合成 C 之后，A 与 B 在语义上已经"并进 C"，
+    // 不该再被单独晋升。原来这件事只在加了 `--remove-sources` 时才记，不加就
+    // 什么都不留——于是下一次批量晋升会把 A、B 当新记录再推一遍，正式库里就
+    // 出现三条内容重叠的记录。记下"并到哪去了"，这个坑从源头上不存在。
+    "MERGED_INTO",
 ];
 
 pub const KNOWN_KEYS: &[&str] = &[
@@ -33,6 +38,9 @@ pub const KNOWN_KEYS: &[&str] = &[
     "SUMMARY", "READ_WHEN", "NOT_FOR", "KEYS", "SIZE", "SECTIONS", "CONCEPTS", "ENTITIES",
     "PREVIOUS_ID", "SUPERSEDES", "RELATED_IDS", "EVIDENCE", "UNCERTAINTY", "NEXT_VALIDATION",
     "SOURCE", "SEQUENCE", "STATUS", "PROMOTED_FROM", "PROMOTED_AT", "PROMOTED_TO", "UPDATED",
+    // 合并去向，见 `CANON_KEYS` 末条。放在已知字段里，解析器才会把它当成
+    // 一个真字段而不是上一条的续行。
+    "MERGED_INTO",
     // Found by reading the real library back (the self-test now does this every
     // run). All twelve appear as genuine `KEY=` at a field boundary, never as
     // continuation prose, so they belong here rather than being absorbed into
@@ -263,8 +271,45 @@ impl Record {
     pub fn kind(&self) -> String {
         self.get("KIND")
     }
+    /// 已被合并进另一条记录。
+    ///
+    /// 与"已晋升"不同：晋升是**搬到正式库**，合并是**内容并进了另一条**。
+    /// 两者都意味着"这条不该再被动"，但去向不同，所以分开判。合并后仍留在
+    /// 候选库的那些（`merge` 默认不删源）如果不看这个字段，下一次批量晋升就
+    /// 会把它们当新记录再推一遍。
+    pub fn is_absorbed(&self) -> bool {
+        !self.get("MERGED_INTO").trim().is_empty()
+    }
+    /// 已归档到正式库的候选（读的是内容，不是 `STATUS`）。
+    ///
+    /// `promote` 只在候选文件末尾补一块 `[PROMOTION]`，从不改写头部 `STATUS`
+    /// ——这是有意的，晋升是"搬走"不是"改写"，候选作为溯源对象要保持原样。
+    /// 但副作用是 `STATUS` 永远停在 `ACTIVE`，于是 `list --status PROMOTED`
+    /// 恒为 0：状态过滤对"已晋升"这一档永远查不到东西，调用方只能自己 grep
+    /// 文件内容。晋升状态本来就是可以从内容推出来的，这里就是那个推导。
+    ///
+    /// 两处都要看，因为它们来自不同时期：新流程写末尾 `[PROMOTION]` 块，
+    /// 早期流程把 `PROMOTED_TO` 直接写在头部字段。
+    pub fn is_promoted(&self) -> bool {
+        self.lib == Lib::Candidate
+            && (self.promotion.is_some() || !self.get("PROMOTED_TO").trim().is_empty())
+    }
     pub fn status(&self) -> String {
         let s = self.get("STATUS");
+        // DELETED 优先：一条已软删的候选即使带着晋升标记，它在当前视图里的
+        // 身份也是"删了"，不是"晋升了"。
+        if s.eq_ignore_ascii_case("DELETED") {
+            return "DELETED".into();
+        }
+        // 已合并进另一条：内容还在，只是换了个地方住。单独一档，不混进
+        // PROMOTED——它们的去向是另一条候选，不是正式库。
+        if self.is_absorbed() {
+            return "SUPERSEDED".into();
+        }
+        // 晋升状态从内容推出，优先于块里那个恒为 ACTIVE 的 `STATUS`。
+        if self.is_promoted() {
+            return "PROMOTED".into();
+        }
         if s.is_empty() {
             "ACTIVE".into()
         } else {
@@ -864,6 +909,19 @@ impl ListFilter {
         } else if rec.status() == "DELETED" && !a.has("include-deleted") {
             return false;
         }
+        // `--include-promoted` 一直是空转开关：默认视图压根没做晋升过滤，
+        // 加不加这个参数都是同一批行。已晋升的候选是**溯源副本**，不是待办，
+        // 把它们混进默认列表，读的人会以为候选库还很堵——实测 299 条里 0 条
+        // 待办，却因为默认全列而看起来像 299 条待办。
+        //
+        // 显式 `--status` 时不进这条判断：调用方已经说清要哪一档，不该再被
+        // 默认策略二次削减。
+        if self.status.is_empty()
+            && (rec.is_promoted() || rec.is_absorbed())
+            && !a.has("include-promoted")
+        {
+            return false;
+        }
         if !self.project.is_empty() && !rec.get("PROJECT").eq_ignore_ascii_case(&self.project) {
             return false;
         }
@@ -905,4 +963,107 @@ pub fn all_record_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         .into_iter()
         .map(|d| root.join(d))
         .collect()
+}
+
+#[cfg(test)]
+mod view_state_tests {
+    use super::*;
+
+    fn rec(lib: Lib, fields: &[(&str, &str)], promo: Option<&str>) -> Record {
+        Record {
+            path: PathBuf::from("x/y.md"),
+            lib,
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: String::new(),
+            promotion: promo.map(|s| s.to_string()),
+            attach: None,
+            raw: String::new(),
+            devs: Vec::new(),
+            header_inferred: false,
+            base: None,
+            mtime: 0,
+        }
+    }
+
+    fn args(flags: &[&str]) -> crate::util::Args {
+        let mut a = crate::util::Args::default();
+        for f in flags {
+            a.kv.insert(f.to_string(), vec!["1".to_string()]);
+        }
+        a
+    }
+
+    /// 晋升状态必须从内容推出来。
+    ///
+    /// `promote` 只往候选末尾补 `[PROMOTION]` 块、不改头部 `STATUS`，所以只看
+    /// `STATUS` 的话，一条已晋升的候选永远是 `ACTIVE`。实测后果：`--status
+    /// PROMOTED` 在 299 条全部晋升的候选库里返回 0，状态过滤这一档等于不存在。
+    #[test]
+    fn promoted_is_read_from_content_not_status() {
+        // 末尾块形态（新流程）
+        let a = rec(Lib::Candidate, &[("STATUS", "ACTIVE")], Some("PROMOTED_TO=C-1"));
+        assert!(a.is_promoted());
+        assert_eq!(a.status(), "PROMOTED");
+        // 头部字段形态（早期流程）
+        let b = rec(Lib::Candidate, &[("PROMOTED_TO", "C-1")], None);
+        assert!(b.is_promoted());
+        assert_eq!(b.status(), "PROMOTED");
+        // 没晋升
+        let c = rec(Lib::Candidate, &[("STATUS", "ACTIVE")], None);
+        assert!(!c.is_promoted());
+        assert_eq!(c.status(), "ACTIVE");
+        // 正式库的记录永远不算"候选已晋升"，即使字段恰好存在。
+        let d = rec(Lib::Canonical, &[("PROMOTED_FROM", "N-1")], None);
+        assert!(!d.is_promoted());
+        assert_eq!(d.status(), "ACTIVE");
+    }
+
+    /// DELETED 优先于 PROMOTED：删了的候选在视图里是"删了"，不是"晋升了"。
+    #[test]
+    fn deleted_wins_over_promoted() {
+        let r = rec(
+            Lib::Candidate,
+            &[("STATUS", "DELETED")],
+            Some("PROMOTED_TO=C-1"),
+        );
+        assert_eq!(r.status(), "DELETED");
+    }
+
+    /// 合并源单列一档：它的去向是另一条候选，不是正式库。
+    #[test]
+    fn absorbed_is_its_own_state() {
+        let r = rec(Lib::Candidate, &[("MERGED_INTO", "N-9")], None);
+        assert!(r.is_absorbed());
+        assert!(!r.is_promoted());
+        assert_eq!(r.status(), "SUPERSEDED");
+    }
+
+    /// `--include-promoted` 必须真的改变结果。
+    ///
+    /// 这个开关此前是空转的：默认视图根本没做晋升过滤，加不加都是同一批行。
+    /// 现在默认隐藏已归档的候选，开关才名副其实。
+    #[test]
+    fn include_promoted_flag_actually_changes_the_list() {
+        let f = ListFilter::default();
+        let promoted = rec(Lib::Candidate, &[], Some("PROMOTED_TO=C-1"));
+        let absorbed = rec(Lib::Candidate, &[("MERGED_INTO", "N-9")], None);
+        let fresh = rec(Lib::Candidate, &[("STATUS", "ACTIVE")], None);
+
+        let dflt = args(&[]);
+        assert!(!f.accept(&promoted, &dflt), "已晋升的默认应隐藏");
+        assert!(!f.accept(&absorbed, &dflt), "已合并的默认应隐藏");
+        assert!(f.accept(&fresh, &dflt), "真待办必须出现在默认视图");
+
+        let shown = args(&["include-promoted"]);
+        assert!(f.accept(&promoted, &shown), "开关打开后已晋升的要能看见");
+        assert!(f.accept(&absorbed, &shown));
+
+        // 显式 `--status` 时调用方已经说清要哪一档，不该再被默认策略削减。
+        let mut picked = ListFilter::default();
+        picked.status = "PROMOTED".into();
+        assert!(picked.accept(&promoted, &dflt));
+    }
 }
