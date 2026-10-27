@@ -322,9 +322,27 @@ fn note_dir(
         } else {
             d.join(name)
         };
-        if !p.is_file() {
-            return usage(&format!("{dir} 里没有 `{name}`；先运行 `abook {dir}` 看有哪些"));
-        }
+        // `staging resolve` 把结清件移进 `closed/` 之后，只敲文件名就再也读不出来
+        // 了——文件明明还在库里，工具却说没有。归档不是删除，归档件必须仍可读，
+        // 否则"当初是怎么定的"这句话就没有落地的地方。先在原地找，再在 closed/
+        // 里找；两边都没有才报未找到。只有 `staging` 有归档子目录，别的目录（如
+        // `review`）不该在提示里凭空提到一个它没有的地方。
+        let archive = d.join("closed");
+        let p = if p.is_file() {
+            p
+        } else {
+            let alt = archive.join(name);
+            if alt.is_file() {
+                alt
+            } else {
+                // 未找到用 NotFound（退码 3）而不是 usage：`--show 打错名字` 不是
+                // 命令用错了，是查的东西不在，调用方要能按退码分辨这两种情况。
+                let also = if archive.is_dir() { "（含 closed/）" } else { "" };
+                return Err(EE::NotFound(format!(
+                    "{dir} 里没有 `{name}`{also}；先运行 `abook {dir}` 看有哪些"
+                )));
+            }
+        };
         let txt = read_str(&p)?;
         if a.has("json") {
             println!(
@@ -1890,6 +1908,62 @@ mod tests {
             .expect("结清");
         let got = std::fs::read_to_string(root.join("staging/closed/p.md")).expect("读");
         assert!(got.contains("- 决定：第一句 第二句"), "换行没被压平: {got:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 归档件必须仍能被 `--show` 读到，只敲文件名就行。
+    ///
+    /// 结清把文件移进 `closed/` 之后，只给文件名会读不出来——文件在库里，工具却说
+    /// 没有。归档不是删除：待决数回答"还有几件在等人"，`closed/` 回答"当初是怎么
+    /// 定的"。如果读不回来，后一半就没有落地的地方，结清就等于删除。
+    #[test]
+    fn archived_note_is_still_readable_by_bare_name() {
+        let root = scratch("show-archived");
+        std::fs::write(root.join("staging/p.md"), "# 待决\n- 项：要不要\n").expect("写");
+        cmd_staging(&args(&root, &["resolve", "p", "--decision", "保持现状"])).expect("结清");
+
+        // 只给文件名：应当落到 closed/ 里那一份。
+        let rc = cmd_staging(&args(&root, &["--show", "p.md"])).expect("读归档件");
+        assert_eq!(rc, 0, "只给文件名读不到归档件");
+        // 显式带 closed/ 前缀也要能读，两条路径不能互相排斥。
+        let rc = cmd_staging(&args(&root, &["--show", "closed/p.md"])).expect("读归档件");
+        assert_eq!(rc, 0, "带 closed/ 前缀反而读不到");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 找不到的件是 NotFound（退码 3），不是用法错误。
+    ///
+    /// 改成退码 3 之前这里是 `usage`（退码 2）：打错名字和命令敲错被报成同一件
+    /// 事，调用方只能靠读自然语言分辨。`--show` 是查询，查不到就是查不到。
+    #[test]
+    fn show_missing_note_is_not_found() {
+        let root = scratch("show-missing");
+        std::fs::create_dir_all(root.join("staging/closed")).expect("建 closed");
+        let e = cmd_staging(&args(&root, &["--show", "nope.md"])).expect_err("必须报错");
+        match e {
+            EE::NotFound(m) => assert!(m.contains("nope.md"), "没说是哪个名字: {m}"),
+            other => panic!("该是 NotFound，实际 {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 没有归档子目录的目录，提示里不许提 `closed/`。
+    ///
+    /// `review/` 下并没有 `closed/`。原文案是给 `staging` 写的，`note_dir` 被两者
+    /// 共用，于是 `review --show 错名` 会建议读者去一个不存在的地方找——那种提示
+    /// 比没说更坏，读者会以为自己漏看了什么。
+    #[test]
+    fn missing_hint_does_not_name_a_directory_that_is_absent() {
+        let root = scratch("hint");
+        // staging 有 closed/：提示可以提它。
+        std::fs::create_dir_all(root.join("staging/closed")).expect("建 closed");
+        let e = cmd_staging(&args(&root, &["--show", "nope.md"])).expect_err("必须报错");
+        assert!(format!("{e:?}").contains("closed/"), "staging 该提到 closed/: {e:?}");
+
+        // review 没有：提示就该闭嘴。
+        std::fs::create_dir_all(root.join("review")).expect("建 review");
+        let e = cmd_review(&args(&root, &["--show", "nope.md"])).expect_err("必须报错");
+        assert!(!format!("{e:?}").contains("closed/"), "review 下没有 closed/ 却提了它: {e:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
