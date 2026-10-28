@@ -1123,9 +1123,29 @@ fn has_abs_path(t: &str) -> bool {
         }
         n
     };
+    // 标准设备不算"依赖本机文件"。
+    //
+    // `cat x 2>/dev/null` 里的 `/dev/null` 形态上确实是绝对路径，但它:
+    //   - 每个 POSIX 系统都有，换台机器也在，不破坏可移植性；
+    //   - 是 shell 重定向语法的一部分，不是 Skill 要读的什么东西。
+    // 不放过它，凡是用过 `2>/dev/null` 压输出的 Skill 都会永远挂一条问题，
+    // 而这条问题**没法修**——删掉重定向会让文档变差。一条永远修不掉的报警
+    // 会训练人忽略整份报告，连带把真问题一起忽略。
+    let std_dev = |i: usize| -> bool {
+        for d in ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty"] {
+            let dc: Vec<char> = d.chars().collect();
+            if i + dc.len() <= b.len() && b[i..i + dc.len()] == dc[..] {
+                let after = if i + dc.len() < b.len() { b[i + dc.len()] } else { ' ' };
+                if after.is_whitespace() || matches!(after, ';' | '|' | '&' | ')') {
+                    return true;
+                }
+            }
+        }
+        false
+    };
     for i in 0..b.len() {
         if b[i] == '/' {
-            if in_url(i) {
+            if in_url(i) || std_dev(i) {
                 continue;
             }
             // 行首的 `/` 也算绝对路径：多行文本里路径常独占一行，
