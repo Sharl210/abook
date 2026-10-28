@@ -643,6 +643,85 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
             }
             Ok(0)
         }
+        "split" => {
+            let name = match a.pos.get(1) {
+                Some(n) => sanitize(n),
+                None => return usage("需要 Skill 名，例如 `abook skill split my-skill --dry-run`"),
+            };
+            let dir = skill_dir(a, &name);
+            let p = dir.join("SKILL.md");
+            if !p.is_file() {
+                return usage(format!("{} 不存在", p.display()));
+            }
+            let txt = read_str(&p)?;
+            let budget: usize = opt(a, "max-entry").parse().unwrap_or(120);
+            let keep: usize = opt(a, "keep").parse().unwrap_or(8);
+            let plan = match plan_split(&txt, keep, budget) {
+                Ok(x) => x,
+                Err(e) => return usage(e),
+            };
+            if plan.sections.is_empty() {
+                crate::say_line!("{name} 找不到可拆的 `##` 章节，什么也没做");
+                return Ok(0);
+            }
+            if a.has("dry-run") {
+                crate::say_line!("[dry-run] {name}: 主入口 {} 行 → 预计 {} 行（预算 {budget}）", plan.total, plan.entry_len);
+                for s in &plan.sections {
+                    crate::say_line!("  移出 {} 行 → references/{}", s.lines, s.slug);
+                }
+                return Ok(0);
+            }
+            if plan.entry_len > budget {
+                crate::say_line!("注意：拆完主入口仍 {} 行，超过预算 {budget}。可以先调小 --keep，或手工再合章节。", plan.entry_len);
+            }
+            // 备份原文件。拆坏了要能原样退回来。
+            let bak = dir.join(format!(".SKILL.md.bak-{}", crate::util::stamps().compact));
+            write_atomic(&bak, &txt)?;
+            ensure_dir(&dir.join("references"))?;
+            for s in &plan.sections {
+                let dst = dir.join("references").join(format!("{}.md", s.slug));
+                if dst.is_file() {
+                    // 不覆盖已有文件：那份可能是之前手工写好的，机器不该悄悄顶掉。
+                    return blocked(format!(
+                        "{} 已存在，不覆盖。先确认那份是不是要留着，再跑 split",
+                        dst.display()
+                    ));
+                }
+                write_atomic(&dst, &s.body)?;
+            }
+            write_atomic(&p, &plan.entry)?;
+            // 拆完立刻自查：内容有没有丢、lint 过不过。
+            let after = read_str(&p)?;
+            let mut all = after.clone();
+            for s in &plan.sections {
+                all.push_str(&read_str(&dir.join("references").join(format!("{}.md", s.slug)))?);
+            }
+            let mut lost = Vec::new();
+            for line in txt.lines() {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if !all.contains(t) {
+                    lost.push(t.to_string());
+                }
+            }
+            crate::say_line!("{name} 已拆：主入口 {} 行 → {} 行，移出 {} 节", plan.total, after.lines().count(), plan.sections.len());
+            for s in &plan.sections {
+                crate::say_line!("  references/{}.md  {}", s.slug, s.lines);
+            }
+            crate::say_line!("备份 {}", bak.display());
+            if lost.is_empty() {
+                crate::say_line!("内容核对：无丢失");
+            } else {
+                crate::say_line!("内容核对：{} 行没找到，需要人工确认以下内容", lost.len());
+                for l in lost.iter().take(8) {
+                    crate::say_line!("  {}", crate::util::truncate_chars(l, 80));
+                }
+            }
+            crate::say_line!("下一步：`abook skill lint {name}`");
+            Ok(0)
+        }
         "lint" => {
             let name = match a.pos.get(1) {
                 Some(n) => sanitize(n),
@@ -1059,9 +1138,23 @@ fn mentions_skill_ref(line: &str, name: &str) -> bool {
             return true;
         }
     }
+    // 名字紧邻 "skill"/"技能" 才算指代。
+    //
+    // 原来是"这一行只要同时出现 skill 和这个名字"就算引用。问题在于很多
+    // Skill 名本身就是**普通英文词**：有一个叫 `design` 的 Skill，而
+    // "This skill turns a design brief into a task list" 这句话里两个词都
+    // 出现了，于是被判成"引用了另一个 Skill"。这句说的是 design brief
+    // （设计简报，一份文件），跟那个 Skill 毫无关系。
+    //
+    // 判据收紧成"名字和 skill 紧紧挨着"，也就是真的在说"那个叫 X 的 skill"。
     let lower = line.to_lowercase();
-    let talks_skill = lower.contains("skill") || line.contains("技能");
-    if talks_skill && mentions_name(line, name) {
+    let n = name.to_lowercase();
+    for sep in [" ", "-", "_"] {
+        if lower.contains(&format!("{n}{sep}skill")) || lower.contains(&format!("skill{sep}{n}")) {
+            return true;
+        }
+    }
+    if line.contains(&format!("{name}技能")) || line.contains(&format!("技能{name}")) {
         return true;
     }
     false
@@ -1625,6 +1718,324 @@ fn seg_has_pattern(b: &[char], slash_at: usize) -> bool {
         j += 1;
     }
     false
+}
+
+/// 一次章节拆分的计划。
+struct SplitSection {
+    /// references/ 下的文件名（不含扩展名）。
+    slug: String,
+    /// 这一节的原文（含标题）。
+    body: String,
+    /// 这一节有多少行。
+    lines: usize,
+    /// 通俗标题，写进导航表用。
+    title: String,
+}
+
+struct SplitPlan {
+    /// 拆分后的主入口全文。
+    entry: String,
+    /// 要移出去的每一节。
+    sections: Vec<SplitSection>,
+    /// 拆分前总行数。
+    total: usize,
+    /// 拆分后主入口预计行数。
+    entry_len: usize,
+    /// 用的是几级标题（2 = `##`，3 = `###`）。
+    level: usize,
+}
+
+/// 把章节号转成文件名安全的 slug。
+///
+/// 中文标题不能直接当文件名（跨文件系统不可靠），所以优先用章节号 `01`、`02`，
+/// 没有章节号就用 `section-N`。稳定、可预测、不会因为改了标题就重命名。
+fn split_slug(no: &str, idx: usize, level: usize) -> String {
+    let digits: String = no
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    let d = digits.trim_matches('-');
+    if d.is_empty() {
+        if level == 3 {
+            format!("sub-{:02}", idx + 1)
+        } else {
+            format!("section-{:02}", idx + 1)
+        }
+    } else if level == 3 {
+        format!("sub-{:0>2}", d)
+    } else {
+        format!("{:0>2}", d)
+    }
+}
+
+/// 标题里的"名字"部分，去掉序号与装饰。
+fn split_title(head: &str) -> String {
+    let t = head.trim_start_matches('#').trim();
+    let t = t.trim_start_matches(|c: char| {
+        c.is_ascii_digit() || c == '.' || c == '、' || c == ')' || c == '）'
+    });
+    let t = t.trim_start_matches(|c: char| c == '.' || c == '、' || c == ':' || c == '：');
+    let s = t.trim();
+    if s.is_empty() {
+        "（无标题）".to_string()
+    } else {
+        crate::util::truncate_chars(s, 40)
+    }
+}
+
+/// 收集指定级别的标题行号（跳过代码围栏里的假标题）。
+fn heading_lines(lines: &[&str], level: usize) -> Vec<usize> {
+    let mark = format!("{} ", "#".repeat(level));
+    let deeper = format!("{}#", mark);
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        if t.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // `## x` 命中 level=2；`### x` 不能算进 level=2。
+        if t.starts_with(&mark) && !t.starts_with(&deeper) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// 在指定级别上找切点：返回 (切点标题序号, 该节起点行)。
+fn pick_cut(lines: &[&str], heads: &[usize], budget_eff: usize, keep_min: usize) -> (usize, usize) {
+    let total = lines.len();
+    let mut cut_idx = heads.len();
+    // 从"留最多"往"留最少"退，第一个落进预算的就是答案。
+    //
+    // 下界是 keep_min，但它**只能让主入口更短、不能更宽**：预算才是硬要求，
+    // keep_min 只是"别削得只剩一句看 references"的软下限。两个冲突时预算赢。
+    // 原来把 keep_min 当硬下界，于是在 `rev-idapython`（41 个 `###`）上，
+    // 留 8 节仍有几百行，检查永远不通过——把一个软偏好写成了不可越过的墙。
+    let lower = {
+        // 先看能不能满足 keep_min；满足不了就从 1 节开始找。
+        let at_keep = heads.get(keep_min.max(1)).copied().unwrap_or(total);
+        if lines[..at_keep].join("\n").lines().count() <= budget_eff {
+            keep_min.max(1)
+        } else {
+            1
+        }
+    };
+    for k in (lower..=heads.len()).rev() {
+        let at = heads.get(k).copied().unwrap_or(total);
+        if lines[..at].join("\n").lines().count() <= budget_eff {
+            cut_idx = k;
+            break;
+        }
+    }
+    (cut_idx, heads.get(cut_idx).copied().unwrap_or(total))
+}
+
+/// 规划一次拆分：保留开头若干节，直到主入口回落到预算内，其余每节落到 references/。
+///
+/// 两个维度都要能动，缺一个就会在真实文件上卡住：
+///
+/// - **按行数决定切到哪**：预算是个行数，判断也该用行数。按节数会在长节文件上
+///   失效（`rev-idapython` 只留 8 节仍剩 588 行，它前几节每节都上百行）。
+/// - **`##` 不够就退到 `###`**：很多 Skill 只有一个 `## Common API`，里面 41 个
+///   `###`。只在 `##` 上找切点，这类文件永远"没什么可拆的"，而它们正是最该拆的。
+///
+/// 先用 `##`，回落到预算内就用它；否则用 `###`。两者都不行就报错让用户手工分。
+fn plan_split(txt: &str, keep_min: usize, budget: usize) -> Result<SplitPlan, String> {
+    let lines: Vec<&str> = txt.split('\n').collect();
+    let total = lines.len();
+    if total <= budget {
+        return Err(format!("{total} 行，已经在预算 {budget} 以内，不用拆"));
+    }
+    let mut last_err = String::from("找不到可拆的标题");
+    // 一条标题都没有的扁平文档：按段落块顺序切。
+    //
+    // 提示词库、对照表这类文件常常整篇没有 `##`——它本来就是"一次读完"的东西。
+    // 遇到这种，按标题找切点永远失败，但它确实超预算，也确实能拆：按空行分段，
+    // 顺序拼进若干份 references，导航表注明"按顺序读"。顺序是它的语义，拆了
+    // 顺序不乱，内容一行不少。
+    let flat_ok = heading_lines(&lines, 2).len() < 2 && heading_lines(&lines, 3).len() < 2;
+    if flat_ok {
+        if let Some(plan) = plan_split_flat(txt, budget) {
+            return Ok(plan);
+        }
+    }
+    for level in [2usize, 3usize] {
+        let heads = heading_lines(&lines, level);
+        if heads.len() < 2 {
+            last_err = format!(
+                "`{}` 级标题只有 {} 个，拆不动",
+                "#".repeat(level),
+                heads.len()
+            );
+            continue;
+        }
+        // 导航表要占几行：表头 + 每节一行 + 空行。
+        let nav_overhead = 6 + heads.len();
+        let budget_eff = budget.saturating_sub(nav_overhead);
+        let (cut_idx, split_at) = pick_cut(&lines, &heads, budget_eff, keep_min);
+        if cut_idx >= heads.len() {
+            last_err = format!(
+                "`{}` 级标题留 {} 节仍超预算",
+                "#".repeat(level),
+                keep_min.max(1)
+            );
+            continue;
+        }
+        let head_part = lines[..split_at].join("\n");
+        let mut sections = Vec::new();
+        for (k, &h) in heads.iter().enumerate().skip(cut_idx) {
+            let end = heads.get(k + 1).copied().unwrap_or(total);
+            let body = lines[h..end].join("\n");
+            let raw_head = lines[h].trim();
+            let no: String = raw_head
+                .trim_start_matches('#')
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            sections.push(SplitSection {
+                slug: split_slug(&no, k - cut_idx, level),
+                title: split_title(raw_head),
+                lines: body.lines().count(),
+                body: body.trim_end().to_string() + "\n",
+            });
+        }
+        if sections.is_empty() {
+            last_err = "切点落在末尾，没有可移出的章节".to_string();
+            continue;
+        }
+        let mut nav = String::new();
+        nav.push_str("## 参考\n\n");
+        nav.push_str("细节按需读，不要一次全加载。主入口只留骨架与最短路径，展开内容在下列文件里。\n\n");
+        nav.push_str("| 文件 | 管什么 |\n|---|---|\n");
+        for s in &sections {
+            nav.push_str(&format!("| `references/{}.md` | {} |\n", s.slug, s.title));
+        }
+        let entry = format!("{}\n\n{}\n", head_part.trim_end(), nav);
+        let entry_len = entry.lines().count();
+        if entry_len > budget {
+            last_err = format!("`{}` 级标题拆完仍 {entry_len} 行", "#".repeat(level));
+            continue;
+        }
+        return Ok(SplitPlan {
+            entry,
+            sections,
+            total,
+            entry_len,
+            level,
+        });
+    }
+    Err(last_err)
+}
+
+/// 无标题文档的顺序切分。
+///
+/// 按空行分段，逐段累加，装满一份就开下一份。顺序保持原样，导航表注明按序读。
+fn plan_split_flat(txt: &str, budget: usize) -> Option<SplitPlan> {
+    let lines: Vec<&str> = txt.split('\n').collect();
+    let total = lines.len();
+    if total <= budget {
+        return None;
+    }
+    // 标题前的头部（frontmatter、开场说明）留在主入口。
+    //
+    // 一份 `---` frontmatter 加几句开场，通常是它唯一的"门面"，拆走会让主入口
+    // 变成空壳。留到第一个空行块结束为止，上限取预算的 1/3。
+    let head_limit = (budget / 3).max(10);
+    let mut head_end = 0;
+    for (i, l) in lines.iter().enumerate() {
+        if i >= head_limit {
+            break;
+        }
+        if l.trim().is_empty() && i > 3 {
+            head_end = i + 1;
+            break;
+        }
+    }
+    let head_part = lines[..head_end].join("\n");
+    let body: Vec<&str> = lines[head_end..].to_vec();
+    if body.iter().all(|l| l.trim().is_empty()) {
+        return None;
+    }
+    // 按空行分段
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for l in &body {
+        if l.trim().is_empty() {
+            if !cur.is_empty() {
+                blocks.push(cur);
+                cur = Vec::new();
+            }
+        } else {
+            cur.push(l);
+        }
+    }
+    if !cur.is_empty() {
+        blocks.push(cur);
+    }
+    if blocks.len() < 2 {
+        return None;
+    }
+    // 每份目标大小：让份数不至于太多，又不超预算。
+    let target = ((total as f64) / 4.0).max(40.0) as usize;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut acc: Vec<String> = Vec::new();
+    let mut acc_lines = 0;
+    for b in &blocks {
+        let bl = b.len();
+        if acc_lines > 0 && acc_lines + bl > target {
+            chunks.push(acc.join("\n\n"));
+            acc.clear();
+            acc_lines = 0;
+        }
+        acc.push(b.join("\n"));
+        acc_lines += bl + 1;
+    }
+    if !acc.is_empty() {
+        chunks.push(acc.join("\n\n"));
+    }
+    if chunks.len() < 2 {
+        return None;
+    }
+    let mut sections = Vec::new();
+    for (i, c) in chunks.iter().enumerate() {
+        let body = format!(
+            "# 第 {} 部分（全文第 {} 段续）\n\n> 本文件是顺序阅读的一部分，需与前后各份连起来看。\n\n{}\n",
+            i + 1,
+            i + 1,
+            c
+        );
+        sections.push(SplitSection {
+            slug: format!("part-{:02}", i + 1),
+            title: format!("第 {} 部分（按顺序读）", i + 1),
+            lines: body.lines().count(),
+            body,
+        });
+    }
+    let mut nav = String::new();
+    nav.push_str("## 参考\n\n");
+    nav.push_str("本文件无分节标题，全文按顺序切成若干份。**必须按编号顺序读**，顺序即语义。\n\n");
+    nav.push_str("| 文件 | 管什么 |\n|---|---|\n");
+    for s in &sections {
+        nav.push_str(&format!("| `references/{}.md` | {} |\n", s.slug, s.title));
+    }
+    let entry = format!("{}\n\n{}\n", head_part.trim_end(), nav);
+    let entry_len = entry.lines().count();
+    if entry_len > budget {
+        return None;
+    }
+    Some(SplitPlan {
+        entry,
+        sections,
+        total,
+        entry_len,
+        level: 0,
+    })
 }
 
 fn has_toc(text: &str) -> bool {
