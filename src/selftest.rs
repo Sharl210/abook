@@ -1987,6 +1987,73 @@ if crate::util::Args::known("per-page") {
         }
     }
 
+    // ---- 流程被拆出主入口要能抓住
+    //
+    // 这是"按需发现"唯一绝对不能碰的边界：主入口可以短，但总流程、全局约束、
+    // 输出与完成条件必须留在里面。挪进 references/ 换来好看的行数，代价是约束
+    // 失效——模型加载 Skill 只读主入口，那份文件不会有人打开。
+    //
+    // 两个方向都要验：拆坏了要报，流程在入口里要放行。只验一边的话，一个
+    // "永远报警"的实现也能绿。
+    if let Some(exe) = self_path() {
+        let root = std::env::temp_dir().join(format!("abook-ms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |name: &str, entry: &str, ref_body: &str| {
+            let d = root.join(name);
+            let _ = std::fs::create_dir_all(d.join("references"));
+            let _ = std::fs::write(d.join("SKILL.md"), entry);
+            let _ = std::fs::write(d.join("references/r.md"), ref_body);
+        };
+        // (a) 流程被搬进引用文件，主入口只剩简介与导航 → 必须报
+        mk(
+            "moved",
+            "# moved\n\n简介。\n\n## 参考\n\n| `references/r.md` | 细节 |\n",
+            "## Process\n\n1. 甲\n2. 乙\n\n## Output Format\n\n给列表。\n",
+        );
+        // (b) 流程留在主入口，只把查表细节移出 → 必须放行
+        mk(
+            "kept",
+            "# kept\n\n## Process\n\n1. 甲\n2. 乙\n\n## Output\n\n给列表。\n\n## 参考\n\n| `references/r.md` | 参数表 |\n",
+            "## Parameter Table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        );
+        let run = |name: &str| -> (bool, String) {
+            match std::process::Command::new(&exe)
+                .arg("skill")
+                .arg("lint")
+                .arg(name)
+                .arg("--root")
+                .arg(&root)
+                .output()
+            {
+                Ok(o) => (
+                    o.status.success(),
+                    format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                ),
+                Err(e) => (false, format!("无法执行: {e}")),
+            }
+        };
+        let (moved_ok, moved_out) = run("moved");
+        let (kept_ok, kept_out) = run("kept");
+        let caught = !moved_ok && moved_out.contains("流程却在引用文件里");
+        let passes = kept_ok && kept_out.contains("通过");
+        let _ = std::fs::remove_dir_all(&root);
+        if caught && passes {
+            pass += 1;
+            msgs.push(
+                "PASS  流程被拆出主入口能抓住（两个方向都验：拆坏报警、留在入口放行）".into(),
+            );
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  流程常驻检查：拆坏抓到={caught} 合规放行={passes}"
+            ));
+        }
+    }
+
     // ---- CI config matches the code
     // ---- `commands` output is exactly the dispatch table
     // Docs, CI and any AI caller are pointed at `abook commands` as the
