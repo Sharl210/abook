@@ -1912,6 +1912,81 @@ if crate::util::Args::known("per-page") {
         }
     }
 
+    // ---- skill lint 真的在查入口体积与导航
+    //
+    // 这条检测以前不存在：lint 判"自包含"时只查外部路径和跨 Skill 引用，
+    // 而 SKILL.md 被显式跳过（它是入口，不套"超 100 行须给目录"），于是入口
+    // 写到 1032 行照样 ok:true。可入口恰恰是**每次**调用都要整篇进上下文的
+    // 那个文件，它的体积才是真正的成本。
+    //
+    // 用真二进制跑，不用内部函数：内部判定通过而命令输出没跟上，本工具已经
+    // 踩过一次（见上面 commands 分派那条），那种绿是假的。
+    if let Some(exe) = self_path() {
+        let root = std::env::temp_dir().join(format!("abook-sk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |name: &str, entry: &str, refs: &[(&str, &str)]| {
+            let d = root.join(name);
+            let _ = std::fs::create_dir_all(d.join("references"));
+            let _ = std::fs::write(d.join("SKILL.md"), entry);
+            for (f, body) in refs {
+                let _ = std::fs::write(d.join("references").join(f), body);
+            }
+        };
+        // (a) 入口超预算 + 引用文件没登记 + 导航指向不存在的文件
+        let long = format!("# big\n## 何时用\n{}", "填充 filler\n".repeat(130));
+        mk(
+            "big",
+            &format!("{long}\n| `references/gone.md` | x | y |\n"),
+            &[("orphan.md", "# o\n")],
+        );
+        // (b) 合规：入口短、引用登记过、无悬空
+        mk(
+            "ok",
+            "# ok\n## 何时用\n测试\n\n## 参考\n\n| `references/deep.md` | 细节 | 需要时 |\n",
+            &[("deep.md", "# 细节\n\n正文\n")],
+        );
+
+        let run = |name: &str| -> (bool, String) {
+            match std::process::Command::new(&exe)
+                .arg("skill")
+                .arg("lint")
+                .arg(name)
+                .arg("--root")
+                .arg(&root)
+                .output()
+            {
+                Ok(o) => (
+                    o.status.success(),
+                    format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                ),
+                Err(e) => (false, format!("无法执行: {e}")),
+            }
+        };
+        let (big_ok, big_out) = run("big");
+        let (ok_ok, ok_out) = run("ok");
+        let caught_budget = !big_ok && big_out.contains("超过预算");
+        let caught_orphan = !big_ok && big_out.contains("没有在主入口登记");
+        let caught_dangling = !big_ok && big_out.contains("文件不存在");
+        let clean_passes = ok_ok && ok_out.contains("通过");
+        let _ = std::fs::remove_dir_all(&root);
+        if caught_budget && caught_orphan && caught_dangling && clean_passes {
+            pass += 1;
+            msgs.push(
+                "PASS  skill lint：主入口超预算、未登记引用文件、悬空导航都抓得住，合规的放行"
+                    .into(),
+            );
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  skill lint：超预算={caught_budget} 未登记={caught_orphan} 悬空={caught_dangling} 合规放行={clean_passes}"
+            ));
+        }
+    }
+
     // ---- CI config matches the code
     // ---- `commands` output is exactly the dispatch table
     // Docs, CI and any AI caller are pointed at `abook commands` as the

@@ -514,17 +514,29 @@ canonical/Atlas.md: 本次新增 0 条，地图现有 445 条路径
 |---|---|
 | `skill` / `skill guide` | 打印五节约定全文（`--json` 给机器读） |
 | `skill path` | Skill 根目录 |
-| `skill list` | 已有哪些 Skill、各自几条候选 |
+| `skill list` | 已有哪些 Skill：入口行数、引用文件数、候选数，超预算会标出来 |
 | `skill show <名>` | 该 Skill 的 SKILL.md 与候选概况 |
-| `skill new <名>` | 建骨架（SKILL.md + candidates/） |
+| `skill new <名>` | 建骨架（SKILL.md + candidates/ + references/，入口自带预算提示与导航表） |
 | `skill candidate <名> --title T --body-file F` | 写一条反哺候选 |
 | `skill candidates <名>` | 列该 Skill 的候选 |
 | `skill read <名> [序号]` | 读候选全文 |
 | `skill decide <名> <序号> accept\|reject [--reason R]` | 记录决定，写 decisions.log |
-| `skill lint <名>` | 查自包含性：有没有外部路径、跨 Skill 引用、未内置资料 |
+| `skill lint <名>` | 实证检查：自包含 + 主入口预算 + 导航可达（`--max-entry N` 覆盖 120 行预算） |
 
-候选落在 `~/AgentSkills/<名>/candidates/`，与记忆库同级但分开——两边是两回事，
-不共用目录、不互相引用。
+`lint` 查四类，任一项不过就退出码 5：外部路径与跨 Skill 引用；主入口超预算；
+引用文件没在主入口登记（运行时发现不了它，等于不存在）；主入口登记了却不存在的
+悬空路径。`candidates/` 不参与扫描——待决候选还没被采纳，里面的路径和日志是证据，
+不是运行时依赖。`docs/`、`assets/` 这类如果在本 Skill 里没有同名目录，按"用户项目
+的路径"处理，不算悬空。
+
+为什么主入口要有预算：它是每次调用都整篇进上下文的那个文件，体积是**每次**的成本；
+引用文件的体积只是**用到时**的成本。两者不该同等对待。
+
+候选落在 `<技能根>/<名>/candidates/`，与记忆库同级但分开——两边是两回事，
+不共用目录、不互相引用。技能根不是写死的：工具在常见位置里挑"装得最多"的那个
+（`~/.dsh/skills`、`~/.agents/skills`、`~/.config/agents/skills`、`~/AgentSkills`），
+因为"第一个存在的"往往是一两份实验残留，而 `list` 报"共 1 个"看起来完全正常，
+没人会怀疑路径挑错了。
 
 **`skill decide accept` 只记决定，不动 SKILL.md。** 这里没有机械晋升：把候选合并进
 SKILL.md 由模型读完全部候选后自己改写完成。`lint` 只查形式，判断「哪几条该并、怎么并」

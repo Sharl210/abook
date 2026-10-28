@@ -55,18 +55,40 @@ Skill 必须独立自包含，单独拿出来就能工作。
 
 "精简头部"只指 AI 默认加载的入口部分，不是删知识。
 
-- 头部保留：名称、触发、职责、最短步骤、输出与完成条件、必要导航。
-- 知识总量、覆盖、验证、独立自包含与用户锁定要求一律不得删减。
-- 头部中不宜默认预加载的内容，可拆分到该 Skill 自身的章节、文件或子目录。
-  用引用文件夹时，它视为 Skill 内置知识库，文件数量不设限且鼓励细分：
-  每单元只负责一个小方向，清晰命名、分层索引、用相对路径。
-- 导航须写明各部分主题、何时读取、必要顺序或依赖。
-- 单个参考文件超 100 行时，头部须自带目录；不足 100 行不强制。
-- 运行时按当前任务渐进读取，只按需读相关部分，禁一次加载全部或无关内容。
-- 组织上少食多餐：细分多份但保持条理，禁合并到造成混乱或过量加载。
+这条原则不是交付前的一次性检查，而是 Skill 的常驻约束：创建时定结构，维护时守结构，
+反哺时先想落点，修改与迁移时重校结构。任何一次编辑都要满足本节，写完跑 `abook skill lint`。
 
-交付前核验：导航可达、主题职责不重叠、无悬空引用、无重复内容、无无关默认加载，
-整体仍可独立运行。
+### 主入口有预算
+
+`SKILL.md` 是每次被调用时上下文要付的钱，所以它必须小。
+
+- 预算 ≤ 120 行（`lint --max-entry N` 可覆盖，那是给用户锁定的例外，不是默认）。
+- 主入口只留：名称、触发、职责、最短步骤、输出与完成条件、导航。
+- 超预算就先拆再写，禁"这版先堆着，以后再说"。
+- 知识总量、覆盖、验证、独立自包含与用户锁定要求一律不得因拆分而删减。
+
+### 拆分落点：引用文件，不是主入口
+
+- 反哺与维护产生的细节、案例、参数表、排错、变体流程，默认写进 `references/` 专文，
+  主入口只加一行导航。只有触发条件、职责边界、最短步骤、输出或完成条件本身变了，
+  才动主入口。
+- 每份引用文件只管一个小方向，命名说清是什么，用相对路径引用。文件数量不设限，
+  鼓励细分；反对的是合并成一篇大文件，不是拆得多。
+
+### 导航即索引
+
+- 每份引用文件都必须在主入口登记过——没登记的文件运行时根本不会被发现，等于不存在。
+- 登记过的必须真实存在，禁悬空路径。
+- 导航写清：管什么、什么情况下读、有无顺序依赖。
+- 单份引用文件超 100 行时，它自己的开头要给目录；主入口不因此变长。
+
+### 运行时按需读
+
+只读当前任务需要的那几份，禁一次加载全部或无关内容。少食多餐：拆细但有条理，
+反对合并成混乱，也反对拆到找不着。
+
+交付前核验：主入口在预算内、导航可达、职责不重叠、无悬空引用、无未登记文件、
+无重复内容、无无关默认加载，整体仍可独立运行。
 
 ## 四、交付门
 
@@ -88,7 +110,7 @@ Skill 必须独立自包含，单独拿出来就能工作。
 
   abook skill                     打印本约定
   abook skill path                打印 Skill 根目录
-  abook skill list                列出全部 Skill，含正式文件与待决候选数
+  abook skill list                列出全部 Skill：入口行数、引用文件数、候选数
   abook skill show <名>           打印某 Skill 的 SKILL.md
   abook skill new <名>            建骨架（SKILL.md + candidates/ + decisions.log）
   abook skill candidate <名> --title T --body-file F
@@ -97,12 +119,18 @@ Skill 必须独立自包含，单独拿出来就能工作。
   abook skill read <名> <候选>    读候选全文
   abook skill decide <名> <候选> accept|reject|hold --approve
                                   记录决定；accept 之后由模型改写 SKILL.md
-  abook skill lint <名>           自包含性检查：外部路径、跨 Skill 引用、占位词
+  abook skill lint <名>           实证检查：自包含 + 主入口预算 + 导航可达
+                                  --max-entry N 覆盖 120 行预算（用户锁定例外）
 
 决定与落盘是两件事：`decide accept` 只记账，SKILL.md 的合并改写由模型完成，
 工具不代做融合——机器无法判断两段建议该不该并成一段。
 
-根目录默认 ~/AgentSkills，用 --root 或 ABOOK_SKILLS 覆盖。
+技能根自动选定：在 ~/.dsh/skills、~/.agents/skills、~/.config/agents/skills、
+~/AgentSkills 里挑"装得最多"的那个（有 SKILL.md 的子目录计数）。为什么不是
+"第一个存在的"：`~/.agents/skills` 往往只有一两份实验残留，真实库在
+`~/.dsh/skills`；先到先得会让 `list` 报"共 1 个"——这个数字看起来完全正常，
+没人会怀疑路径挑错，于是整套工具对着空目录干活。也可用 --root 或
+ABOOK_SKILLS 显式指定。
 "#;
 
 fn skills_root(a: &Args) -> PathBuf {
@@ -122,16 +150,35 @@ fn skills_root(a: &Args) -> PathBuf {
     // 0 个是个**合法答案**，所以没有人会去怀疑路径错了——它看起来就是"你没有
     // 装 skill"。这比报错更糟：报错会让人去查，报 0 只会让人以为事实如此。
     //
-    // 三个候选按优先级排，取第一个存在的；都不存在时仍返回旧默认值（首次用
-    // `skill new` 时由它自己建目录）。
+    // 候选目录里**装得最多的那个**才算根，不是排在前面那个。
+    //
+    // 原来取"第一个存在的"，而 `~/.agents/skills` 往往只有一两份（多半是某次
+    // 实验留下的），真实库在 `~/.dsh/skills` 里躺着几十份。先到先得的结果是
+    // `abook skill list` 报"共 1 个"——这个数字**看起来完全正常**，没人会怀疑
+    // 路径挑错了，于是整套 Skill 工具对着空目录干活。0 会让人去查，1 不会。
+    //
+    // 计数并列时按优先级前者胜；全都没有时返回旧默认值（首次 `new` 自己建）。
     let home = home_dir();
+    let mut best: Option<(std::path::PathBuf, usize)> = None;
     for cand in [
+        home.join(".dsh").join("skills"),
         home.join(".agents").join("skills"),
         home.join(".config").join("agents").join("skills"),
+        home.join("AgentSkills"),
     ] {
-        if cand.is_dir() {
-            return cand;
+        if !cand.is_dir() {
+            continue;
         }
+        let n = count_skill_dirs(&cand);
+        if n == 0 {
+            continue;
+        }
+        if best.as_ref().map(|(_, bn)| n > *bn).unwrap_or(true) {
+            best = Some((cand, n));
+        }
+    }
+    if let Some((p, _)) = best {
+        return p;
     }
     home.join("AgentSkills")
 }
@@ -165,6 +212,37 @@ fn sanitize(n: &str) -> String {
 
 fn skill_dir(a: &Args, name: &str) -> PathBuf {
     skills_root(a).join(name)
+}
+
+/// 数一份 Skill 的引用文件（不含 SKILL.md、候选与决定记录）。
+fn count_ref_files(dir: &Path) -> usize {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_text_files(dir, &mut files, 0);
+    files
+        .iter()
+        .filter(|q| {
+            let rel = q
+                .strip_prefix(dir)
+                .unwrap_or(q)
+                .to_string_lossy()
+                .replace('\\', "/");
+            rel != "SKILL.md" && rel != "decisions.log" && !rel.starts_with("candidates/")
+        })
+        .count()
+}
+
+/// 数一个目录下有几份 Skill（有 SKILL.md 的子目录）。
+fn count_skill_dirs(root: &Path) -> usize {
+    match fs::read_dir(root) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| {
+                let p = e.path();
+                p.is_dir() && p.join("SKILL.md").is_file()
+            })
+            .count(),
+        Err(_) => 0,
+    }
 }
 
 fn count_md(dir: &Path) -> usize {
@@ -213,8 +291,8 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 crate::say_line!("{} 还不存在，用 `abook skill new <名>` 建第一份", root.display());
                 return Ok(0);
             }
-            // (名称, 有无 SKILL.md, 候选数, 字节, 行数, 最近改动)
-            let mut rows: Vec<(String, usize, usize, u64, usize, i64)> = Vec::new();
+            // (名称, 有无 SKILL.md, 候选数, 字节, 行数, 最近改动, 引用文件数)
+            let mut rows: Vec<(String, usize, usize, u64, usize, i64, usize)> = Vec::new();
             if let Ok(rd) = fs::read_dir(&root) {
                 for e in rd.flatten() {
                     let p = e.path();
@@ -243,19 +321,24 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    rows.push((name, have, count_md(&p.join("candidates")), by, ln, ts));
+                    // 引用文件数一起报：只报入口行数看不出"有没有拆"，
+                    // 两个数字并排才是一张体检表（入口 40 行 + 引用 12 份 是
+                    // 健康形态，入口 900 行 + 引用 0 份 一眼就知道没拆）。
+                    let refs = count_ref_files(&p);
+                    rows.push((name, have, count_md(&p.join("candidates")), by, ln, ts, refs));
                 }
             }
             rows.sort();
             if a.has("json") {
                 let arr = rows
                     .iter()
-                    .map(|(n, h, c, by, ln, ts)| {
+                    .map(|(n, h, c, by, ln, ts, rf)| {
                         format!(
-                            "{{\"name\":{},\"has_skill_md\":{},\"candidates\":{},\"bytes\":{by},\"lines\":{ln},\"updated\":{ts},\"when\":{}}}",
+                            "{{\"name\":{},\"has_skill_md\":{},\"candidates\":{},\"bytes\":{by},\"lines\":{ln},\"refs\":{rf},\"over_budget\":{},\"updated\":{ts},\"when\":{}}}",
                             jstr(n),
                             h == &1,
                             c,
+                            *ln > ENTRY_MAX_LINES,
                             jstr(&crate::util::short_when(*ts))
                         )
                     })
@@ -265,10 +348,11 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 return Ok(0);
             }
             crate::say_line!("{}  共 {} 个", root.display(), rows.len());
-            for (n, h, c, by, ln, ts) in &rows {
+            for (n, h, c, by, ln, ts, rf) in &rows {
                 let mark = if *h == 1 { "有SKILL.md" } else { "缺SKILL.md" };
+                let big = if *ln > ENTRY_MAX_LINES { "  主入口超预算" } else { "" };
                 crate::say_line!(
-                    "  {}  {n:<26} {mark}  候选 {c}",
+                    "  {}  {n:<26} {mark}  候选 {c}  引用 {rf}{big}",
                     crate::util::row_meta(*ts, Some(*by), Some(*ln))
                 );
             }
@@ -304,17 +388,26 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
             }
             ensure_dir(&dir)?;
             ensure_dir(&dir.join("candidates"))?;
+            // references/ 一开始就建出来。
+            //
+            // 建目录这一步看着琐碎，实际决定习惯：目录不存在时，人（和模型）
+            // 的默认动作就是把内容追加到 SKILL.md；目录摆在那里，"该拆"这件事
+            // 就从"要额外做一步"变成"已经准备好了"。
+            ensure_dir(&dir.join("references"))?;
             let st = stamps();
             let title = opt(a, "title");
             let title = if title.is_empty() { name.clone() } else { title };
             let skeleton = format!(
                 "# {title}\n\n\
-                 > 骨架由 `abook skill new` 生成。按 `abook skill` 的约定补全后再用。\n\n\
+                 > 骨架由 `abook skill new` 生成。按 `abook skill` 的约定补全后再用。\n\
+                 > 主入口预算 120 行；超了先拆到 references/ 再写，别把细节堆在这里。\n\n\
                  ## 何时用\n\n（触发条件：什么样的请求该用这份 Skill）\n\n\
                  ## 职责\n\n（这份 Skill 负责什么，不负责什么）\n\n\
                  ## 最短步骤\n\n1. \n2. \n\n\
                  ## 输出与完成条件\n\n（交付什么形态，怎样算做完）\n\n\
-                 ## 参考\n\n（本 Skill 自身的引用文件；超 100 行时在此列出目录）\n"
+                 ## 参考\n\n\
+                 细节、案例、参数表、排错、变体流程写进 references/ 下的专文，一份只管一个小方向。\n\
+                 在这里逐行登记：文件名、管什么、什么情况下读。没登记的运行时发现不了，等于不存在。\n"
             );
             let p = dir.join("SKILL.md");
             write_atomic(&p, &skeleton)?;
@@ -572,6 +665,24 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
     // 这条检查，然后真问题也一并漏掉。
     let mut problems: Vec<String> = Vec::new();
     let mut advisory: Vec<String> = Vec::new();
+
+    // ---- 主入口预算 ----
+    //
+    // 这一段以前根本没查。SKILL.md 被显式跳过（它是入口，不套"超 100 行须给
+    // 目录"那条），于是入口写到 1032 行照样 `ok:true`。而入口恰恰是每次调用
+    // 都要整篇进上下文的那个文件——它的体积是**每次**的成本，引用文件的体积
+    // 只是**用到时**的成本，两者不该同等对待。
+    //
+    // 预算不是审美偏好：120 行足够写清触发、职责、最短步骤、输出与完成条件、
+    // 导航。超出的部分按定义就是"当前任务用不到的细节"，它们属于引用文件。
+    let budget = a.num("max-entry").unwrap_or(ENTRY_MAX_LINES as u64) as usize;
+    let entry_lines = txt.lines().count();
+    if entry_lines > budget {
+        problems.push(format!(
+            "主入口 {entry_lines} 行，超过预算 {budget} 行：先拆到 references/ 再写，别继续往 SKILL.md 里加{}",
+            section_hint(&txt)
+        ));
+    }
             for (n, line) in txt.lines().enumerate() {
                 let ln = n + 1;
                 let t = line.trim();
@@ -675,6 +786,14 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 if q.file_name().map(|s| s == "SKILL.md").unwrap_or(false) {
                     continue;
                 }
+                // 待决候选不是 Skill 的一部分——它还没被采纳。
+                //
+                // 候选里天然会贴路径、贴日志、贴报错原文，那是**证据**，不是
+                // 运行时依赖。把它一起扫，结果是一份完全自包含的 Skill 只因为
+                // 攒了几条候选就判不通过。未采纳的东西不该有否决权。
+                if disp.starts_with("candidates/") || disp.starts_with("candidates\\") {
+                    continue;
+                }
                 // 逐行套用与 SKILL.md 相同的判据
                 for (n, line) in sub.lines().enumerate() {
                     let t = line.trim();
@@ -747,11 +866,45 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                     ));
                 }
             }
+            // ---- 导航可达 ----
+            //
+            // "按需发现"的前提是入口能指到文件，两种失效方式各查一头：
+            //   ① 文件在磁盘上，入口没登记 → 运行时没人知道它存在，等于不存在；
+            //   ② 入口登记了，文件不在 → 照着读会扑空。
+            //
+            // 只认我自己这套目录约定（references/ scripts/ templates/ assets/
+            // examples/ docs/），不去猜别的写法。猜错会把正确做法判成错误，那
+            // 比漏检更糟——人会开始绕开这条检查，然后真问题也一起漏掉。
+            for q in &files {
+                let rel = q
+                    .strip_prefix(&dir)
+                    .unwrap_or(q)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if rel == "SKILL.md" || rel == "decisions.log" || rel.starts_with("candidates/") {
+                    continue;
+                }
+                if !is_ref_dir(&rel) {
+                    continue;
+                }
+                let base = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                if !txt.contains(&rel) && !txt.contains(&base) {
+                    problems.push(format!(
+                        "{rel} 没有在主入口登记：运行时发现不了它，等于不存在。请在导航里加一行（管什么 / 何时读）"
+                    ));
+                }
+            }
+            for cand in dangling_refs(&txt, &dir) {
+                problems.push(format!(
+                    "主入口登记了 `{cand}` 但文件不存在：导航指不到东西"
+                ));
+            }
+
             if a.has("json") {
                 let arr = problems.iter().map(|p| jstr(p)).collect::<Vec<_>>().join(",");
                 let adv = advisory.iter().map(|p| jstr(p)).collect::<Vec<_>>().join(",");
                 crate::say_line!(
-                    "{{\"skill\":{},\"problems\":[{}],\"advisory\":[{}],\"ok\":{}}}",
+                    "{{\"skill\":{},\"problems\":[{}],\"advisory\":[{}],\"max_entry\":{budget},\"entry_lines\":{entry_lines},\"ok\":{}}}",
                     jstr(&name),
                     arr,
                     adv,
@@ -1219,6 +1372,119 @@ mod lint_probe_tests {
 ///
 /// 只看前 40 行：目录是给"要不要往下读、从哪开始读"用的，塞在文件中间就
 /// 失去意义了。
+/// 主入口行数预算。
+///
+/// 120 行是"能写清触发、职责、最短步骤、输出与完成条件、导航"的宽松上限，
+/// 不是美学数字：入口每次被调用都整篇进上下文，所以它的体积是**每次**成本。
+/// 需要更多篇幅的内容，按定义就不是入口该装的东西。
+const ENTRY_MAX_LINES: usize = 120;
+
+/// Skill 内部允许存放引用文件的目录。只认这几个，其余一律不管。
+///
+/// 范围收紧是故意的：判据越宽，越容易把"文档里正常提到的路径"判成"未登记的
+/// 引用文件"，而把正确答案判成错误答案会让人绕开整条检查。
+const REF_DIRS: [&str; 6] = [
+    "references/",
+    "scripts/",
+    "templates/",
+    "assets/",
+    "examples/",
+    "docs/",
+];
+
+fn is_ref_dir(rel: &str) -> bool {
+    REF_DIRS.iter().any(|d| rel.starts_with(d))
+}
+
+/// 主入口里最占行数的那几节，用于告诉人"该先拆哪一段"。
+///
+/// 只报行数没有可操作性——看到"超了 87 行"之后，下一步还是不知道动哪里。
+fn section_hint(text: &str) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(h) = t.strip_prefix("## ").or_else(|| t.strip_prefix("# ")) {
+            counts.push((h.trim().to_string(), 0));
+        } else if let Some(last) = counts.last_mut() {
+            last.1 += 1;
+        }
+    }
+    if counts.is_empty() {
+        return String::new();
+    }
+    counts.sort_by(|x, y| y.1.cmp(&x.1));
+    let top: Vec<String> = counts
+        .iter()
+        .take(3)
+        .filter(|(_, n)| *n > 0)
+        .map(|(h, n)| format!("`{h}` {n}行"))
+        .collect();
+    if top.is_empty() {
+        String::new()
+    } else {
+        format!("（最占行数：{}）", top.join("、"))
+    }
+}
+
+/// 反引号包住的片段。导航是写给机器看的，约定用反引号标路径。
+fn backticked(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut on = false;
+    for c in text.chars() {
+        if c == '`' {
+            if on && !cur.is_empty() {
+                out.push(cur.clone());
+            }
+            cur.clear();
+            on = !on;
+        } else if on {
+            cur.push(c);
+        }
+    }
+    out
+}
+
+/// 主入口登记了、磁盘上却没有的引用路径。
+fn dangling_refs(txt: &str, dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in backticked(txt) {
+        let t = tok.trim();
+        if !is_ref_dir(t) || t.ends_with('/') {
+            continue;
+        }
+        if t.contains("://") || t.starts_with('~') || t.starts_with('$') || t.starts_with('%') {
+            continue;
+        }
+        // `references/{subcommand}.md`、`references/*.md` 这类是**写法示范**，
+        // 不是登记了一个具体文件。把模式当路径判悬空，等于逼人别写模式——
+        // 而模式恰恰是导航里最该有的东西。
+        if t.contains(['{', '}', '<', '>', '*', '?', '[']) {
+            continue;
+        }
+        // 这份路径到底指 Skill 自己的文件，还是用户项目里的文件？
+        //
+        // `references/foo.md` 出现在 Skill 里几乎一定是前者；而
+        // `docs/brand-guidelines.md`、`assets/design-tokens.json` 这类在
+        // Skill 正文里绝大多数是**叫用户去改他自己项目里的文件**——照"登记了
+        // 文件不存在"判悬空，等于禁止 Skill 提到用户项目。
+        //
+        // 判据落在目录归属上：这段路径的首层目录**在本 Skill 里真实存在**，
+        // 才当作 Skill 自己的文件来查。目录都不存在，它说的就是别人的目录。
+        let seg = t.split('/').next().unwrap_or("");
+        if seg.is_empty() || !dir.join(seg).is_dir() {
+            continue;
+        }
+        if dir.join(t).exists() {
+            continue;
+        }
+        if !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
 fn has_toc(text: &str) -> bool {
     let mut hits = 0;
     for line in text.lines().take(40) {
