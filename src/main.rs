@@ -10,6 +10,7 @@ mod merge;
 mod parse;
 mod rx;
 mod search;
+mod idx;
 mod semantic;
 mod paging;
 mod schema;
@@ -766,6 +767,59 @@ fn main() {
         }
         _ => None,
     };
+    // 写命令跑完后维护索引，仍在库级锁内。
+    //
+    // 挂在这里而不是逐个改 write/promote/set/delete：那些命令各有自己的出口，
+    // 漏一个就留下一个"记录写了、索引没跟上"的缺口。统一在一处做，
+    // 新加写命令时也不会忘。
+    //
+    // 为什么必须在锁内：索引与记录是两份需要一致的东西。锁外更新会出现
+    // A 写完记录还没写索引、B 按旧索引召回读到中间态的情况。
+    //
+    // 为什么失败不阻断：记录是资产，索引是派生物。索引坏了标 dirty 下次重建，
+    // 不能因此让记账失败。
+    let index_root = root.clone();
+    if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+        if let Ok(a) = parsed.as_ref() {
+            eprintln!("[IDX] cmd={} dry_run={} is_write={}", a.cmd, a.dry_run(), crate::util::is_write_command(&a.cmd));
+        }
+    }
+    // 判断"这次是不是真的写了东西"，决定要不要维护索引。
+    //
+    // 两个条件都要看，各自对应一个自检抓到的真 bug：
+    //
+    //   1) 不能直接用 dry_run()。它把"没有 --apply"当成预演，而 `write`
+    //      这类命令本来就不需要 --apply——写一条记录是它的本职，不是危险操作。
+    //      实测 `abook write` 报 dry_run=true，于是索引永远不生成。
+    //
+    //   2) 不能只看 --dry-run。`refresh`/`recount`/`normalize`/`repair` 这些
+    //      命令默认预演、要 --apply 才真写，漏判就会在预演时生成索引，
+    //      破坏"预演不碰磁盘"的承诺。自检的"写类命令写入边界"正是抓这个。
+    //
+    // 所以：显式 --dry-run 一律不算写；其余命令里，"修复/重算"性质的按 --apply
+    // 判定，其余写命令按本职算写。
+    const NEEDS_APPLY: &[&str] = &[
+        "refresh", "sync", "recount", "normalize", "repair", "fix", "refs", "doctor",
+        "leftover", "branch",
+    ];
+    let need_index = match parsed.as_ref() {
+        Ok(a) => {
+            if a.has("dry-run") || a.has("dryrun") {
+                false
+            } else if !crate::util::is_write_command(&a.cmd) {
+                false
+            } else {
+                let c = crate::spec::canonical(&a.cmd);
+                if NEEDS_APPLY.contains(&c.as_str()) {
+                    a.has("apply") || a.has("write") || a.has("yes")
+                } else {
+                    true
+                }
+            }
+        }
+        Err(_) => false,
+    };
+
     let code = match parsed {
         Ok(ref a) if a.has("json") && needs_capture(&spec::canonical(&a.cmd)) => {
             crate::util::begin_capture();
@@ -824,6 +878,20 @@ fn main() {
     // must not leave a report queued: it lands *after* the summary and replaces
     // it, so the count silently became "写入 1 个文件" instead of "自检 112 通过".
     // Drain the report unconditionally for `selftest` and print nothing.
+    // 索引维护：只在写命令且成功时做。失败/预览都不碰。
+    if need_index && code == 0 && !index_root.as_os_str().is_empty() {
+        let libs = [crate::rec::Lib::Canonical, crate::rec::Lib::Candidate];
+        let idx = crate::idx::Index::build(&index_root, &libs);
+        if let Err(e) = idx.save(&index_root) {
+            // 索引写失败不影响本次写入的结论：标脏，下次重建。
+            // 但**要让人看得见**——静默吞掉会让索引没生成变成无解的谜。
+            if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+                eprintln!("[IDX] save 失败: {e:?}");
+            }
+            crate::idx::Index::mark_dirty(&index_root);
+        }
+    }
+
     let is_selftest = std::env::args().nth(1).as_deref() == Some("selftest");
     // The document is emitted for a non-zero exit too. `check`, `repair`,
     // `leftover` and `preflight` all exit 5 to mean "ran fine, found real

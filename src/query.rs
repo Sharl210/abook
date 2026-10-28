@@ -283,6 +283,27 @@ pub fn recall(
         status: "RECALL_MISS",
         ..Default::default()
     };
+
+    // ---- 索引快路径 ----
+    //
+    // 索引存在且与磁盘对得上时，整条召回都在索引上完成：不读记录正文、
+    // 不解析 Markdown、不建内存索引。这是把 O(n) 换成查表的关键一步。
+    //
+    // 只有命中并截断后的那几条才回磁盘读正文——因为调用方可能要看摘要，
+    // 而正文按定义只有几条。这就是"常数级"的来源：磁盘读的次数取决于
+    // limit，不取决于库里有几条记录。
+    //
+    // 索引不可用（首次、被删、版本不符、对不上）时走下面的老路径，
+    // 行为与之前完全一致。`rm -rf .index/` 之后一切照常，是设计承诺。
+    // 浅加载：只读 meta + postings，不读 docs 分片。
+    // docs 按需读——只取命中的那几条所在的分片，磁盘读次数取决于 limit
+    // 而不是库里有多少条。这是常数级的来源。
+    if let Some(disk) = crate::idx::Index::load_shallow(root, q) {
+        if disk.total_docs > 0 {
+            return recall_via_index(root, q, &qs, &disk, limit, with_body);
+        }
+    }
+
     let mut all: Vec<(Lib, Record)> = Vec::new();
     for lib in libs {
         for rec in load_lib(root, *lib) {
@@ -335,14 +356,30 @@ pub fn recall(
     lex.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     rank_lists.push(lex.iter().map(|(p, _)| p.clone()).collect());
 
-    // 路径 B：BM25（现成的 semantic::Index，中文 2-gram 分词）
-    let idx = crate::semantic::Index::build(root, libs);
-    let bm = idx.query_depth(q, 1, pool.len().max(1));
-    rank_lists.push(
-        bm.iter()
-            .filter_map(|(i, _, _)| idx.docs.get(*i).map(|d| d.path.clone()))
-            .collect(),
-    );
+    // 路径 B：BM25（走落盘索引；没有索引时回退到现建）
+    //
+    // 这一步以前每次都 `semantic::Index::build`，857 条要 90ms、两万条更久。
+    // 现在先试 `.index/`：命中就直接查表（不碰磁盘、不解析记录），
+    // 索引缺失或与磁盘对不上时才回退重建。
+    //
+    // 回退路径必须保留：`rm -rf .index/` 之后一切照常，是索引设计里
+    // "永远可弃"那条承诺的实现。
+    let bm_paths: Vec<String> = match crate::idx::Index::load(root) {
+        Some(disk) => {
+            let hits = disk.search(q, pool.len().max(1));
+            hits.iter()
+                .filter_map(|(i, _, _)| disk.path_of(*i).map(|s| s.to_string()))
+                .collect()
+        }
+        None => {
+            let mem = crate::semantic::Index::build(root, libs);
+            let bm = mem.query_depth(q, 1, pool.len().max(1));
+            bm.iter()
+                .filter_map(|(i, _, _)| mem.docs.get(*i).map(|d| d.path.clone()))
+                .collect()
+        }
+    };
+    rank_lists.push(bm_paths);
 
     // 路径 C：n-gram 片段（从"兜底"改成"常驻加分"）
     let mut ng: Vec<(String, i32)> = Vec::new();
@@ -755,4 +792,195 @@ mod live_count_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// 纯索引召回：只在索引上打分排序，最后才读命中的那几条正文。
+///
+/// 这是 O(1) 的来源。老路径要先把全库记录读进内存（`load_lib`），
+/// 两万条时 1.4 秒；这条路只碰 `.index/` 两个文件，与库里有几条记录无关。
+fn recall_via_index(
+    root: &Path,
+    q: &str,
+    qs: &[String],
+    disk: &crate::idx::Index,
+    limit: usize,
+    with_body: bool,
+) -> RecallResult {
+    let mut res = RecallResult {
+        query: q.to_string(),
+        status: "RECALL_MISS",
+        scanned: disk.total_docs,
+        ..Default::default()
+    };
+
+    // BM25 只在 postings 上算，不碰 docs。这一步是常数级的关键：
+    // postings 体积取决于词表，与记录数关系弱。
+    let bm = disk.search_shallow(q, limit.saturating_mul(20).max(200));
+
+    // 把命中的 id 按分片归组，每个分片只读一次。
+    // 不逐条读：那样 N 条命中就是 N 次 open+read，比分片读贵得多。
+    let mut need: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for (id, _, _) in &bm {
+        let sh = disk.shard_of_id(*id);
+        need.entry(sh).or_default().push(*id);
+    }
+
+    let mut docs_by_id: std::collections::HashMap<usize, crate::idx::Doc> =
+        std::collections::HashMap::new();
+    for sh in need.keys() {
+        for (id, d) in disk.shard(root, *sh) {
+            docs_by_id.insert(id, d);
+        }
+    }
+
+    // RRF：BM25 排名 + 词面（在已加载的命中集合上做）+ n-gram
+    let mut rank_lists: Vec<Vec<String>> = Vec::new();
+
+    // BM25 排名
+    rank_lists.push(
+        bm.iter()
+            .filter_map(|(i, _, _)| docs_by_id.get(i).map(|d| d.path.clone()))
+            .collect(),
+    );
+
+    // 词面（只在候选集合上做，不扫全库）
+    let mut lex: Vec<(String, i32)> = Vec::new();
+    for (_, d) in docs_by_id.iter() {
+        let mut sc = 0i32;
+        for t in qs {
+            if ci_contains(&d.title, t) {
+                sc += 60;
+            }
+            if d.keys.iter().any(|k| ci_contains(k, t)) {
+                sc += 100;
+            }
+        }
+        if sc > 0 {
+            lex.push((d.path.clone(), sc));
+        }
+    }
+    lex.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    rank_lists.push(lex.iter().map(|(p, _)| p.clone()).collect());
+
+    // n-gram（标题 + postings 词存在性）
+    let mut ng: Vec<(String, i32)> = Vec::new();
+    for (_, d) in docs_by_id.iter() {
+        let mut sc = 0i32;
+        for t in qs {
+            for g in ngrams(t) {
+                if ci_contains(&d.title, &g) {
+                    sc += 15;
+                } else if disk.has_term_in(&g, &d.path) {
+                    sc += 8;
+                }
+            }
+        }
+        if sc > 0 {
+            ng.push((d.path.clone(), sc));
+        }
+    }
+    ng.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    rank_lists.push(ng.iter().map(|(p, _)| p.clone()).collect());
+
+    let k_rrf = 20.0f64;
+    const W: [f64; 3] = [0.5, 2.2, 0.5];
+    let mut rrf: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (li, list) in rank_lists.iter().enumerate() {
+        for (rank, path) in list.iter().enumerate() {
+            *rrf.entry(path.clone()).or_insert(0.0) += W[li] / (k_rrf + (rank + 1) as f64);
+        }
+    }
+
+    let by_path: std::collections::HashMap<&str, &crate::idx::Doc> =
+        docs_by_id.values().map(|d| (d.path.as_str(), d)).collect();
+
+    let mut order: Vec<(String, f64)> = rrf.into_iter().collect();
+    for (path, sc) in order.iter_mut() {
+        if let Some(d) = by_path.get(path.as_str()) {
+            let a = d.authority.trim().to_uppercase();
+            let k = d.kind.trim().to_uppercase();
+            let tier = if a == "USER_EXPLICIT" || a == "USER_FEEDBACK" {
+                1
+            } else if matches!(k.as_str(), "RESULT" | "EVIDENCE" | "FAILURE" | "ATTEMPT")
+                || a == "TOOL_EVIDENCE"
+            {
+                3
+            } else {
+                2
+            };
+            let base = match tier {
+                1 => 1.12,
+                3 => 0.95,
+                _ => 1.00,
+            };
+            let mf = match d.maturity.trim().to_uppercase().as_str() {
+                "VERIFIED" => 1.15,
+                "TESTED" => 1.05,
+                "OBSERVED" => 1.00,
+                "PARTIAL" => 0.90,
+                "HYPOTHESIS" => 0.85,
+                "DISPROVED" => 0.10,
+                _ => 1.00,
+            };
+            let f = if tier == 1 && *sc < 0.020 { 0.90 } else { base };
+            *sc *= f * mf;
+        }
+    }
+    order.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    order.truncate(limit);
+
+    for (path, sc) in &order {
+        let full = root.join(path);
+        let lib = if path.starts_with("candidate/") {
+            Lib::Candidate
+        } else {
+            Lib::Canonical
+        };
+        let rec = match Record::parse(&full, lib) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rec.status() == "DELETED" {
+            continue;
+        }
+        let att = crate::attach::scan(&rec.path);
+        let rej = precision(&rec, qs);
+        let mut r2 = rec.clone();
+        if !with_body {
+            r2.body = String::new();
+        }
+        let h = Hit {
+            lib,
+            path: path.clone(),
+            title: rec.title(),
+            tier: Tier::Lexical,
+            score: (*sc * 1000.0) as i32,
+            reason: "rrf/index".to_string(),
+            rejected: rej.clone(),
+            record: Some(r2),
+            updated: rec.updated(),
+            bytes: rec.raw.len(),
+            lines: rec.raw.lines().count(),
+            attach_count: att.count(),
+            attach_bytes: att.bytes,
+        };
+        if rej.is_some() {
+            res.rejected.push(h);
+        } else {
+            res.hits.push(h);
+        }
+    }
+
+    res.status = if !res.hits.is_empty() {
+        "RECALL_OK"
+    } else if !res.rejected.is_empty() {
+        "RECALL_UNRESOLVED"
+    } else {
+        "RECALL_MISS"
+    };
+    res
 }
