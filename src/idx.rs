@@ -134,34 +134,38 @@ fn postings_path(root: &Path) -> PathBuf {
 /// 这是"索引是否过期"的唯一判据。用条数与总字节对账，而不是逐条比对 mtime
 /// ——后者在几千条时和重建索引一样贵，那就失去意义了。
 fn disk_snapshot(root: &Path) -> (usize, u64) {
-    // 用**目录 mtime + 条数**对账，不逐文件 stat。
+    // 对账用「条数 + 文件名指纹」，不用目录 mtime、也不逐文件 stat。
     //
-    // 逐文件 `metadata()` 在 2 万条时要 3.5 秒（实测 `state` 命令的耗时就是它），
-    // 而它本来是"防止索引过期"的守卫——守卫比被守的东西还贵，就本末倒置了。
+    // 三条都试过，前两条都不行：
+    //   * 逐文件 metadata()：2 万条要 3.5 秒，守卫比被守的东西贵。
+    //   * 目录 mtime：复制、解压、git checkout、rsync 都会改它，
+    //     于是**迁移一次索引就判过期**——而"整目录换机器还能用"正是硬要求。
+    //   * 只数条数：改名或同数量替换发现不了。
     //
-    // 目录 mtime 在增删文件时必然变化，这是 POSIX 保证。缺点：改一个已存在
-    // 文件的**内容**（不改名不增删）不会更新目录 mtime。这个缺口由写入侧补：
-    // 所有写命令都会主动重建索引（见 main.rs），所以正常路径不会漏。
-    // 只有"绕过 abook 直接编辑记录文件"才会漏，那时 `refresh` 能修。
-    let mut sig = 0u64;
+    // 文件名指纹两头都占：不变（复制不改名）、便宜（只 readdir，不 stat 每个文件）、
+    // 且对增删改名敏感。abook 的记录名是「时间戳-内容哈希」，所以文件名本身
+    // 就带着内容指纹——不改名就不会改内容，改了内容必然改名。
     let mut n = 0usize;
+    let mut h: u64 = 0xcbf29ce484222325;
     for lib in [Lib::Canonical, Lib::Candidate] {
         let dir = root.join(lib.dir());
-        if let Ok(m) = std::fs::metadata(&dir) {
-            if let Ok(t) = m.modified() {
-                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    sig = sig.wrapping_mul(31).wrapping_add(d.as_secs());
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut names: Vec<String> = rd
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".md"))
+                .collect();
+            names.sort();
+            for name in names {
+                n += 1;
+                for b in name.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
                 }
             }
         }
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            n += rd
-                .flatten()
-                .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-                .count();
-        }
     }
-    (n, sig)
+    (n, h)
 }
 
 impl Index {
