@@ -243,7 +243,9 @@ pub fn cmd_related(a: &Args) -> R<i32> {
         Some(v) => v.clone(),
         None => return usage("related 需要记录 ID"),
     };
-    let limit = a.num("limit").unwrap_or(12) as usize;
+    // 读 per-page 而不是 limit：工具把 --limit 折叠成 --per-page，
+    // 而 related 返回的是"最多几条邻居"，本来就是分页语义。
+    let limit = a.num("per-page").unwrap_or(12) as usize;
     let (title, ns) = neighbors(&root, &id, limit)?;
 
     if a.has("json") {
