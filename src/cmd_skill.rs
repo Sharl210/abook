@@ -794,15 +794,34 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 if disp.starts_with("candidates/") || disp.starts_with("candidates\\") {
                     continue;
                 }
+                // 这个文件自己赋值过的变量名。
+                let local_vars = assigned_vars(&sub);
                 // 逐行套用与 SKILL.md 相同的判据
                 for (n, line) in sub.lines().enumerate() {
                     let t = line.trim();
                     if has_abs_path(t) {
-                        problems.push(format!(
-                            "{disp} 行{}: 绝对路径（Skill 须自带依赖）: {}",
-                            n + 1,
-                            cut(t, 50)
-                        ));
+                        // 文档说"是什么"，脚本才是"要读什么"。
+                        //
+                        // SKILL.md 侧早就把绝对路径放在"需自行判断"档：写在文档里
+                        // 解释系统布局（"`/sdcard/...` 通常不能写"）是正常的，只有
+                        // 脚本真的去读某个本机路径才破坏可移植性。引用文件同样是文档，
+                        // 却按硬问题报——同一类内容两套标准，结果是一份纯粹在讲
+                        // Android 分区存储事实的表格永远挂四处红点。
+                        //
+                        // 分档落在文件类型上：`.md` 进 advisory，脚本与模板进 problems。
+                        if disp.ends_with(".md") {
+                            advisory.push(format!(
+                                "{disp} 行{}: 出现了绝对路径（若为运行时要读的文件则不合规；仅作说明可忽略）: {}",
+                                n + 1,
+                                cut(t, 50)
+                            ));
+                        } else {
+                            problems.push(format!(
+                                "{disp} 行{}: 绝对路径（Skill 须自带依赖）: {}",
+                                n + 1,
+                                cut(t, 50)
+                            ));
+                        }
                     }
                     if has_relative_escape(t) {
                         problems.push(format!(
@@ -811,7 +830,13 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                             cut(t, 50)
                         ));
                     }
-                    if has_env_path(t) {
+                    // 本文件自己赋过值的变量，不算"依赖本机环境"。
+                    //
+                    // `TMP="$(mktemp -d)"` 之后再用 `$TMP/...` 是脚本内部临时目录，
+                    // 每台机器都能跑——mktemp 就是为此存在的。原来的判据看到 `$TMP/`
+                    // 就报，因为 TMP 在 HOST_ENV_VARS 里。这会惩罚**所有**写临时目录
+                    // 的验证脚本，而它们恰恰是最自包含的那一类。
+                    if has_env_path_excluding(t, &local_vars) {
                         problems.push(format!(
                             "{disp} 行{}: 路径依赖本机环境变量（Skill 须自带依赖）: {}",
                             n + 1,
@@ -858,8 +883,14 @@ pub fn cmd_skill(a: &Args) -> R<i32> {
                 // 原来只数行数就判不通过，从不看目录在不在：加完目录照样报。
                 // 一个永远无法通过的检查，等价于把这条规则废掉——人会去
                 // 绕过它，而真正没写目录的文件也被一起放过。
+                // 只对**文档**要求目录。
+                //
+                // 代码文件（.py/.kt/.gradle/.sh）的自然导航是函数与类定义，
+                // 在文件头上再挂一张目录是套错对象——143 行的 validate_skill.py
+                // 里函数名就是它的目录，再让人手写一遍只是重复。硬套到代码上，
+                // 结果是每个带脚本的 Skill 都永久挂一条修不掉的报警。
                 let nlines = sub.lines().count();
-                if nlines > 100 && !has_toc(&sub) {
+                if disp.ends_with(".md") && nlines > 100 && !has_toc(&sub) {
                     problems.push(format!(
                         "{} 共 {nlines} 行但头部没有目录（超 100 行须在头部给目录）",
                         disp
@@ -1146,6 +1177,15 @@ fn has_abs_path(t: &str) -> bool {
     for i in 0..b.len() {
         if b[i] == '/' {
             if in_url(i) || std_dev(i) {
+                continue;
+            }
+            // 模式不是具体路径。
+            //
+            // Gradle 的 `excludes += ['/META-INF/{AL2.0,LGPL2.1}']`、Makefile 的
+            // `$(BUILD)/*.o` 写的是"要排除/匹配什么形状"，不是本机上的某个文件。
+            // 判成绝对路径等于禁止在构建配置里写排除规则，而那些规则跟换不换
+            // 机器毫无关系，剔掉它们反而会打出更胖的包。
+            if seg_has_pattern(&b, i) {
                 continue;
             }
             // 行首的 `/` 也算绝对路径：多行文本里路径常独占一行，
@@ -1503,6 +1543,88 @@ fn dangling_refs(txt: &str, dir: &std::path::Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// 这个文件里被赋值过的变量名（shell / makefile 的 `VAR=...` 与 `VAR = ...`）。
+///
+/// 用来区分"本脚本自己造的临时目录"和"依赖运行它的那台机器"。前者换机器没事，
+/// 后者才会让 Skill 失效。
+fn assigned_vars(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.starts_with("//") {
+            continue;
+        }
+        let bytes: Vec<char> = t.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            // 词首的大写标识符
+            let word_start = i == 0
+                || !(bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_');
+            if word_start && bytes[i].is_ascii_uppercase() {
+                let start = i;
+                let mut j = i;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_uppercase() || bytes[j].is_ascii_digit() || bytes[j] == '_')
+                {
+                    j += 1;
+                }
+                let name: String = bytes[start..j].iter().collect();
+                // 后面（允许隔空格）紧跟 `=` 但不是 `==`
+                let mut k = j;
+                while k < bytes.len() && bytes[k] == ' ' {
+                    k += 1;
+                }
+                if k < bytes.len() && bytes[k] == '=' && bytes.get(k + 1) != Some(&'=') {
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 与 `has_env_path` 相同，但放行本文件自己赋过值的变量。
+fn has_env_path_excluding(t: &str, local: &[String]) -> bool {
+    if local.is_empty() {
+        return has_env_path(t);
+    }
+    // 把这些变量名从文本里"抹掉"后再判，比逐处解析 `$VAR` 简单且不改变判据。
+    let mut masked = t.to_string();
+    for v in local {
+        masked = masked.replace(&format!("${{{v}}}"), "");
+        masked = masked.replace(&format!("${v}"), "");
+        masked = masked.replace(&format!("%{v}%"), "");
+    }
+    has_env_path(&masked)
+}
+
+/// 这段路径里是不是带着模式符（`{...}`、`*`、`?`、`[...]`、`$(...)`）。
+///
+/// 构建配置里的排除规则就是这样写的：它描述形状，不指向本机某个文件。
+fn seg_has_pattern(b: &[char], slash_at: usize) -> bool {
+    let mut j = slash_at;
+    while j < b.len() {
+        let c = b[j];
+        if c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | '`' | ',') {
+            break;
+        }
+        if matches!(c, '{' | '}' | '*' | '?' | '[') {
+            return true;
+        }
+        // `$(VAR)` 是 make 变量
+        if c == '$' && b.get(j + 1) == Some(&'(') {
+            return true;
+        }
+        j += 1;
+    }
+    false
 }
 
 fn has_toc(text: &str) -> bool {
