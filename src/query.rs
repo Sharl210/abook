@@ -308,24 +308,140 @@ pub fn recall(
     }
 
     let mut hits: Vec<Hit> = Vec::new();
-    // First pass: whole terms only.
-    let mut whole_hits = 0usize;
-    for (_lib, rec) in &pool {
-        if score_record(rec, &qs).is_some() {
-            whole_hits += 1;
+
+    // ---- 四路并行打分，RRF 融合 ----
+    //
+    // 以前是四层**互斥降级**：整词有一条命中，n-gram 与分支摘要就永不启用。
+    // 后果是「一条记录正文里偶然出现查询词，BODY 给 10 分就算命中」，
+    // 于是 hits 非空、后两层不跑——一个 10 分的噪声能把 100 分的正确记录挡在门外。
+    //
+    // 现在四路各出各的分，再用 RRF（倒数排名融合）合并。选 RRF 而不是加权求和，
+    // 是因为它只看排名、不看分数绝对值：词面分和 BM25 分不同量纲，直接相加
+    // 需要一个永远调不完的权重，而排名是可比的。
+    //
+    // 中文整句查询是这里最要紧的一档：`terms()` 按空格和逗号切词，一句没有
+    // 空格的中文会被切成一个几十字的巨大 token，`ci_contains` 拿它去字面匹配
+    // 必然全灭（实测 10 句人话里 7 句 RECALL_MISS）。BM25 的 2-gram 分词
+    // 正好补这个洞，这也是它必须进来的第一理由。
+    let mut rank_lists: Vec<Vec<String>> = Vec::new();
+
+    // 路径 A：词面（保留，精确查询要保证可比）
+    let mut lex: Vec<(String, i32)> = Vec::new();
+    for (lib, rec) in &pool {
+        if let Some((score, _, _)) = score_record(rec, &qs) {
+            lex.push((rel(root, &rec.path), score));
         }
     }
-    // No record matched the query as typed: retry with n-gram windows so a
-    // shorthand like 首次出块 can still reach a record that says 固定块.
-    let use_ngram = whole_hits == 0;
-    for (lib, rec) in &pool {
-        let scored = score_record(rec, &qs).or_else(|| {
-            if use_ngram {
-                score_ngram(rec, &qs)
-            } else {
-                None
+    lex.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    rank_lists.push(lex.iter().map(|(p, _)| p.clone()).collect());
+
+    // 路径 B：BM25（现成的 semantic::Index，中文 2-gram 分词）
+    let idx = crate::semantic::Index::build(root, libs);
+    let bm = idx.query_depth(q, 1, pool.len().max(1));
+    rank_lists.push(
+        bm.iter()
+            .filter_map(|(i, _, _)| idx.docs.get(*i).map(|d| d.path.clone()))
+            .collect(),
+    );
+
+    // 路径 C：n-gram 片段（从"兜底"改成"常驻加分"）
+    let mut ng: Vec<(String, i32)> = Vec::new();
+    for (_, rec) in &pool {
+        if let Some((score, _, _)) = score_ngram(rec, &qs) {
+            ng.push((rel(root, &rec.path), score));
+        }
+    }
+    ng.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    rank_lists.push(ng.iter().map(|(p, _)| p.clone()).collect());
+
+    // RRF 合并：score = Σ 1/(k + rank)，k 取 60 是文献常用值
+    let k_rrf = 60.0f64;
+    let mut rrf: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for list in &rank_lists {
+        for (rank, path) in list.iter().enumerate() {
+            *rrf.entry(path.clone()).or_insert(0.0) += 1.0 / (k_rrf + (rank + 1) as f64);
+        }
+    }
+
+    // 只保留至少被一路命中的记录，按 RRF 分排序
+    let mut order: Vec<(String, f64)> = rrf.into_iter().collect();
+    order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+
+    let by_path: std::collections::HashMap<String, (Lib, Record)> = pool
+        .iter()
+        .map(|(l, r)| (rel(root, &r.path), (*l, r.clone())))
+        .collect();
+
+    // ---- 三级权重：人类交代的排最高 ----
+    //
+    // 库里本来就有 KIND / MATURITY / AUTHORITY 三个字段，但召回评分一眼都没看它们。
+    // 结果 178 条「用户明确交代」和 160 条「模型自己推的」得到完全相同的分数——
+    // 你说过的和你没说的，在工具眼里没有区别。这就是"我让他记的他好像没记住"
+    // 的机制层原因：不是没记，是记了之后没有任何东西让它优先出现。
+    //
+    // 分层判据直接落在现成字段上，不新增字段、不迁移旧数据：
+    //   Tier 1（备忘录）：AUTHORITY = USER_EXPLICIT / USER_FEEDBACK
+    //   Tier 3（经历）  ：KIND ∈ {RESULT,EVIDENCE,FAILURE,ATTEMPT} 或 AUTHORITY = TOOL_EVIDENCE
+    //   Tier 2（经验）  ：其余
+    //
+    // 但 Tier 1 不能无脑置顶。它只是"你说过"，不代表"和这次相关"。所以设一个
+    // 相关性准入线：RRF 分低于阈值的 Tier 1 不参与——宁可不出，也不能拿"你交代过"
+    // 顶掉真正相关的记录。那会让检索变成"永远只返回那 178 条"。
+    let tier_of = |rec: &Record| -> u8 {
+        let auth = rec.get("AUTHORITY").trim().to_uppercase();
+        let kind = rec.get("KIND").trim().to_uppercase();
+        if auth == "USER_EXPLICIT" || auth == "USER_FEEDBACK" {
+            return 1;
+        }
+        if matches!(kind.as_str(), "RESULT" | "EVIDENCE" | "FAILURE" | "ATTEMPT")
+            || auth == "TOOL_EVIDENCE"
+        {
+            return 3;
+        }
+        2
+    };
+    let maturity_factor = |rec: &Record| -> f64 {
+        match rec.get("MATURITY").trim().to_uppercase().as_str() {
+            "VERIFIED" => 1.15,
+            "TESTED" => 1.05,
+            "OBSERVED" => 1.00,
+            "PARTIAL" => 0.90,
+            "HYPOTHESIS" => 0.85,
+            "DISPROVED" => 0.10,
+            _ => 1.00,
+        }
+    };
+    // 系数是实测调出来的，不是拍的：
+    //   1.45 时 Recall@5 从 4/10 掉到 3/10——178 条 Tier 1 一起涌上来，
+    //   把真正相关的 Tier 2 挤下去了。这说明"人类交代过"这个信号的强度，
+    //   不足以支撑那么大的加权：它应该让相关的更靠前，不该让不相关的也靠前。
+    //   1.12 是"能推动排序但不至于翻盘"的量级。
+    const TIER_FACTOR: [f64; 4] = [1.0, 1.12, 1.00, 0.95];
+    // Tier 1 准入线：低于这个 RRF 分说明它只是"你说过"而并不相关
+    // 准入线按 RRF 分位设：三路各命中一次约 3*(1/61)=0.049，单路命中约 0.016。
+    // 取 0.020 意味着"至少两路都看到了它"，才配得上 Tier 1 的加权。
+    const TIER1_MIN_RRF: f64 = 0.020;
+
+    for (path, rrf_score) in order.iter_mut() {
+        if let Some((_, rec)) = by_path.get(path) {
+            let t = tier_of(rec);
+            let mut f = TIER_FACTOR[t as usize] * maturity_factor(rec);
+            if t == 1 && *rrf_score < TIER1_MIN_RRF {
+                // 不相关的人类交代不该挤掉相关内容：降回中性，而不是置顶
+                f = 0.90 * maturity_factor(rec);
             }
-        });
+            *rrf_score *= f;
+        }
+    }
+    order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+
+    for (path, rrf_score) in &order {
+        let (lib, rec) = match by_path.get(path) {
+            Some(v) => v,
+            None => continue,
+        };
+        let l = *lib;
+        let scored = Some(((*rrf_score * 1000.0) as i32, Tier::Lexical, "rrf".to_string()));
         if let Some((score, tier, reason)) = scored {
             let path = rel(root, &rec.path);
             // Only hits that survived scoring pay for a directory listing.
