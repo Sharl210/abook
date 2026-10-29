@@ -760,37 +760,20 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 平面只给摘要，必须留一条回到原文的路，否则"看得见摘要却拿不到正文"
     // 比不显示更糟——读者知道有这条规矩，却没法照着做。
     if let Some(sel) = a.get("plane") {
-        // `--plane all`：把两类都列全，不受上限截断。
+        // `--plane all`：两类都列全，不受上限截断。
         //
-        // 上限是为了"预加载别太大"，不是"不许看全"。提示里说了可以看全
-        // 就必须真能看全，否则那句话本身就是假的。
-        if sel == "all" || sel == "none" {
-            let (mut dirs, mut rules, _) = plane_view_all(&root);
-            let cap = if sel == "none" { 0 } else { usize::MAX };
-            dirs.truncate(cap);
-            rules.truncate(cap);
-            if a.has("json") {
-                let dj: Vec<String> = dirs.iter().map(|(n, s, _)| format!("{{\"id\":{},\"summary\":{}}}", jstr(n), jstr(s))).collect();
-                let rj: Vec<String> = rules.iter().map(|(n, s, _)| format!("{{\"id\":{},\"summary\":{}}}", jstr(n), jstr(s))).collect();
-                println!("{{\"directive\":[{}],\"rule\":[{}]}}", dj.join(","), rj.join(","));
-            } else {
-                if !dirs.is_empty() {
-                    println!("【用户交代】共 {} 条", dirs.len());
-                    for (i, (n, s, _)) in dirs.iter().enumerate() {
-                        println!("  D{}｜{s}｜{n}", i + 1);
-                    }
-                }
-                if !rules.is_empty() {
-                    println!("【通用强约束】共 {} 条", rules.len());
-                    for (i, (n, s, _)) in rules.iter().enumerate() {
-                        println!("  R{}｜{s}｜{n}", i + 1);
-                    }
-                }
-            }
-            return Ok(0);
+        // 上限只是"预加载别太大"，不是"不许看全"——提示里说了能看全，
+        // 就必须真能看全，否则那句话本身是假的。
+        let (dirs, rules, _) = if sel == "all" {
+            plane_view(&root, usize::MAX)
+        } else {
+            plane_view(&root, PLANE_MAX)
+        };
+        if sel == "all" {
+            let nums = crate::num::Numbers::load_or_build(&root);
+            return print_plane(&a, &dirs, &rules, &nums);
         }
         {
-            let (dirs, rules, _) = plane_view(&root, a);
             let idx: Option<usize> = sel
                 .trim_start_matches(['D', 'd', 'R', 'r'])
                 .parse()
@@ -1074,7 +1057,7 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     //   ① 每条只给一行摘要（SUMMARY 首句截断），不是正文；
     //   ② 每类有硬上限，超出时按最近活跃排序截断并如实报"还有 N 条"。
     //      报数而不静默丢弃——静默截断会让"平面看起来完整"变成谎言。
-    let (plane_dirs, plane_rules, plane_dropped) = plane_view(&root, a);
+    let (plane_dirs, plane_rules, plane_dropped) = plane_view(&root, PLANE_MAX);
     // 先把每条路由的元信息算出来。分支走 Atlas 聚合（条目数/体积/行数/最近活跃），
     // 记录级路由直接指向单个文件。
     //
@@ -1091,6 +1074,8 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     // 解析不到单条文件的候选路由（地图文件、`A..B` 区间指针），单独收。
     // 它们既不是待办也不是结论，混进任何一段都会让那一段的数字失真。
     let mut pointer_rows: Vec<String> = Vec::new();
+    // 入口文件（Global.md、Atlas.md、tools/*）：不属于分支也不属于记录。
+    let mut entry_rows: Vec<String> = Vec::new();
     // 命中的已晋升候选数：不打印内容，只报个数，并说明去哪看。
     // 完全不提也不行——读者会以为索引漏了这些记录。
     let mut promoted_hidden = 0usize;
@@ -1142,19 +1127,11 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 canon_rows.push(row);
             }
         } else {
-            let agg = branch_agg.get(path);
-            let (n, by, ln, ts) = match agg {
-                Some((n, b, l, t)) => (Some(*n), *b, *l, *t),
-                None => (None, None, None, 0),
-            };
-            let nshow = match n {
-                Some(x) => format!("{x:>4}条"),
-                None => "    -".to_string(),
-            };
-            br_rows.push(format!(
-                "{}  {nshow}  {path}｜{when}",
-                crate::util::row_meta(ts, by, ln)
-            ));
+            // 路由里剩下的是入口文件（`Global.md`、`tools/*.py` 这类），
+            // 不是知识分支。以前把它们塞进「知识分支」段，统计必然全是 `-`——
+            // 分支的条目数/体积/行数是 Atlas 成员求和，而这些是单个文件，
+            // 两者不是同一量纲。分开之后各自的数字才有意义。
+            entry_rows.push(format!("  {path}｜{when}"));
         }
     }
 
@@ -1167,6 +1144,30 @@ pub fn cmd_index(a: &Args) -> R<i32> {
     //
     // 抬头数字与实际行数不符是读者最先会去数的地方，数一次对不上就再也不敢信
     // 这张表。
+    // 知识分支段从 Atlas 聚合表直接生成，不再从路由里找。
+    //
+    // 原来这里是反的：拿路由路径去 `branch_agg` 里查，而 `branch_agg` 的键是
+    // **分支名**（`记忆系统`），路由里装的是**文件路径**（`canonical/records/…`）。
+    // 两套命名永远对不上，于是分支段的条目数/体积/行数全是 `-`，而且分支总数
+    // 只数到两个被误判为分支的入口文件。读者看到的结果是"知识分支统计没有效果"。
+    //
+    // 真分支只存在于 Atlas：它在 Index.md 的 Active Routes 里没有对应行。
+    // 所以要列分支就得读 Atlas，而不是筛路由。
+    {
+        let mut branches: Vec<(&String, &(usize, Option<u64>, Option<usize>, i64))> =
+            branch_agg.iter().collect();
+        branches.sort_by(|a, b| b.1 .3.cmp(&a.1 .3));
+        for (name, (cnt, by, ln, ts)) in branches {
+            if !q.is_empty() && !ci_contains(name, &q) {
+                continue;
+            }
+            br_rows.push(format!(
+                "{}  {:>4}条  {name}",
+                crate::util::row_meta(*ts, *by, *ln),
+                cnt
+            ));
+        }
+    }
     let n_branch = br_rows.len();
     let n_rec = canon_rows.len() + cand_rows.len() + pointer_rows.len();
     println!("Index.md  路由 {} 条（分支 {} / 记录 {}）", n_branch + n_rec, n_branch, n_rec);
@@ -1191,7 +1192,7 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 println!("  D{}｜{summary}", i + 1);
             }
             if plane_dropped.0 > 0 {
-                println!("   ……另有 {} 条较早交代未列（--plane all 可看全）", plane_dropped.0);
+                println!("   ……另有 {} 条更早的交代，`index --plane all` 看全", plane_dropped.0);
             }
         }
         if !plane_rules.is_empty() {
@@ -1201,7 +1202,13 @@ pub fn cmd_index(a: &Args) -> R<i32> {
                 println!("  R{}｜{summary}", i + 1);
             }
             if plane_dropped.1 > 0 {
-                println!("   ……另有 {} 条较早约束未列（--plane all 可看全）", plane_dropped.1);
+                println!("   ……另有 {} 条更早的约束，`index --plane all` 看全", plane_dropped.1);
+            }
+        }
+        if !entry_rows.is_empty() {
+            println!("【入口文件】不是分支也不是记录，读它们是为了拿路由与凭据");
+            for row in entry_rows.iter() {
+                println!("{row}");
             }
         }
         println!("【知识分支】时间 / 体积 / 行数 / 条目数 —— 聚合值，据此判断该不该进去翻");
@@ -1826,26 +1833,67 @@ mod tests {
     }
 }
 
+/// 把平面两类整段打印出来，供 `--plane all` 与 `--plane none` 用。
+///
+/// 与 `list` 里的平面段共用同一份数据，只是不受 `PLANE_MAX` 截断。
+fn print_plane(
+    a: &Args,
+    dirs: &[(String, String, i64)],
+    rules: &[(String, String, i64)],
+    nums: &crate::num::Numbers,
+) -> R<i32> {
+    // 文件名带 `.md`，分配表存的是去掉后缀的 ID。
+    let id = |n: &str| n.trim_end_matches(".md").to_string();
+    if a.has("json") {
+        let dj: Vec<String> = dirs
+            .iter()
+            // `id` 与 `list --json` 同口径：不带 `.md`。两处口径不同会让
+            // 调用方对同一条记录拿到两个"ID"，拼接路径时必错。
+            .map(|(n, s, _)| format!("{{\"id\":{},\"summary\":{}}}", jstr(&id(n)), jstr(s)))
+            .collect();
+        let rj: Vec<String> = rules
+            .iter()
+            .map(|(n, s, _)| format!("{{\"id\":{},\"summary\":{}}}", jstr(&id(n)), jstr(s)))
+            .collect();
+        println!("{{\"directive\":[{}],\"rule\":[{}]}}", dj.join(","), rj.join(","));
+        return Ok(0);
+    }
+    println!("【用户交代】共 {} 条", dirs.len());
+    for (i, (n, s, _)) in dirs.iter().enumerate() {
+        println!("  D{}｜{s}｜{}", i + 1, nums.num_of(&id(n)).unwrap_or(n));
+    }
+    println!();
+    println!("【通用强约束】共 {} 条", rules.len());
+    for (i, (n, s, _)) in rules.iter().enumerate() {
+        println!("  R{}｜{s}｜{}", i + 1, nums.num_of(&id(n)).unwrap_or(n));
+    }
+    Ok(0)
+}
+
 /// 预加载平面：把记录分成「用户交代 / 通用强约束 / 经历」三类，前两类列出。
 ///
 /// 为什么需要这一层：`index` 原来只按"知识分支 vs 正式记录"分组，那是**位置**
 /// 的分类，不是**作用**的分类。模型看完仍然不知道"用户交代过哪些事非做不可"。
 /// 而这类失误的代价最高——不是检索不到，是根本没往那个方向想。
 ///
-/// 体积控制的三条设计：
-///   ① 每条只给摘要（SUMMARY 首句，截断到 60 字），不读正文；
-///   ② 每类硬上限 DIRECTIVE_MAX / RULE_MAX，超出按最近活跃截断；
-///   ③ 截断时**如实报出剩余条数**，不静默丢。
+/// 体积控制的两条设计：
+///   ① 每条只给一行描述（`BRIEF`，上限 100 字），不读正文；
+///   ② 每类最多 `PLANE_MAX` 条，按时间倒序——超出的不静默丢，如实报条数
+///      并指向 `--plane all`。
+///
+/// 为什么是 200 而不是更少：预加载要"开局全见"，砍到几十条就等于
+/// 让早期交代消失。200 条 × 100 字仍在上限内，而 200 条之外的记录
+/// 通常已被后来的记录覆盖，留个入口就够。
 ///
 /// 经历类不列：它相当于往事档案，用到时才查。把它也铺开会让预加载
 /// 随库增长线性膨胀——而这正是这套机制要避免的第一件事。
-const DIRECTIVE_MAX: usize = 25;
-const RULE_MAX: usize = 18;
-const SUMMARY_CHARS: usize = 42;
+const SUMMARY_CHARS: usize = crate::schema::BRIEF_MAX_CHARS;
+const PLANE_MAX: usize = 200;
 
+/// `cap` 是每类允许列出的条数；`--plane all` 传 `usize::MAX`。
 fn plane_view(
     root: &std::path::Path,
-    a: &Args,
+    cap: usize,
 ) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, (usize, usize)) {
     use crate::idx::Plane;
     let mut dirs: Vec<(String, String, i64)> = Vec::new();
@@ -1902,15 +1950,20 @@ fn plane_view(
                         format!("{cut}…")
                     }
                 } else {
+                    // 存量记录没有 BRIEF：按正文截断到上限，不做分句处理。
+                    //
+                    // 早先这里是"取第一个分句"，那是我的发明而不是约定——
+                    // 分句会把 80 字能讲完的事砍成 20 字的半句。截断只是
+                    // 到界限为止，界限内一个字不丢。
                     let s = field("SUMMARY");
                     let s = if s.is_empty() { field("TITLE") } else { s };
-                    let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
-                    let n = first.chars().count();
+                    let flat = s.replace('\n', " ").trim().to_string();
+                    let n = flat.chars().count();
                     if n > SUMMARY_CHARS {
-                        let cut: String = first.chars().take(SUMMARY_CHARS).collect();
+                        let cut: String = flat.chars().take(SUMMARY_CHARS).collect();
                         format!("{cut}…")
                     } else {
-                        first
+                        flat
                     }
                 }
             };
@@ -1926,78 +1979,14 @@ fn plane_view(
             }
         }
     }
-    // 最近活跃优先：截断时留下的是刚更新过的，那些最可能是当前还在用的。
+    // 时间倒序：留下的是刚写过的，那些最可能还在用。
     dirs.sort_by(|a, b| b.2.cmp(&a.2));
     rules.sort_by(|a, b| b.2.cmp(&a.2));
-    let d_drop = dirs.len().saturating_sub(DIRECTIVE_MAX);
-    let r_drop = rules.len().saturating_sub(RULE_MAX);
-    dirs.truncate(DIRECTIVE_MAX);
-    rules.truncate(RULE_MAX);
-    let _ = a;
+    let d_drop = dirs.len().saturating_sub(cap);
+    let r_drop = rules.len().saturating_sub(cap);
+    dirs.truncate(cap);
+    rules.truncate(cap);
     (dirs, rules, (d_drop, r_drop))
 }
 
 
-/// 全量平面（不截断），供 `--plane all` 用。
-///
-/// 与 `plane_view` 共用同一套分类判据，只是不设上限。分成两个函数而不是
-/// 加个 bool 参数，是因为"预加载视图"和"全量清单"是两个用途：
-/// 前者体积敏感、后者完整性敏感，混在一起容易在改动时误伤其中一个。
-fn plane_view_all(root: &std::path::Path) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, (usize, usize)) {
-    use crate::idx::Plane;
-    let mut dirs: Vec<(String, String, i64)> = Vec::new();
-    let mut rules: Vec<(String, String, i64)> = Vec::new();
-    let dir = root.join(Lib::Canonical.dir());
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if !p.is_file() {
-                continue;
-            }
-            let raw = match std::fs::read_to_string(&p) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let field = |name: &str| -> String {
-                raw.lines()
-                    .find(|l| l.starts_with(name) && l[name.len()..].starts_with('='))
-                    .map(|l| l[name.len() + 1..].trim().to_string())
-                    .unwrap_or_default()
-            };
-            let status = field("STATUS");
-            if status == "DELETED" || status == "ARCHIVED" {
-                continue;
-            }
-            let plane = Plane::of(&field("KIND"), &field("AUTHORITY"));
-            if plane == Plane::Experience {
-                continue;
-            }
-            let summary = {
-                let brief = field("BRIEF");
-                if !brief.is_empty() {
-                    brief
-                } else {
-                    let s = field("SUMMARY");
-                    let s = if s.is_empty() { field("TITLE") } else { s };
-                    let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
-                    let n = first.chars().count();
-                    if n > SUMMARY_CHARS {
-                        first.chars().take(SUMMARY_CHARS).collect::<String>() + "…"
-                    } else {
-                        first
-                    }
-                }
-            };
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let ts = e.metadata().ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64).unwrap_or(0);
-            if plane == Plane::Directive { dirs.push((name, summary, ts)); }
-            else { rules.push((name, summary, ts)); }
-        }
-    }
-    dirs.sort_by(|a, b| b.2.cmp(&a.2));
-    rules.sort_by(|a, b| b.2.cmp(&a.2));
-    (dirs, rules, (0, 0))
-}

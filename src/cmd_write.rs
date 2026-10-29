@@ -1308,7 +1308,9 @@ mod batch_promote_tests {
 /// 平面只能退回截断 SUMMARY——那正是要避免的形态。所以写入时自动派生，
 /// `--brief` 显式给出可覆盖。
 ///
-/// 压缩策略（按序取第一个能在上限内说完整的）：
+/// 压缩策略：
+///   ⓪ 摘要本身就在上限内 → **不写 BRIEF**（返回 `None`）。正文已经够短，
+///      再压一遍只会丢信息，平面直接显示摘要；
 ///   ① 第一个分句（到 。；换行为止）；
 ///   ② 第一个逗号前的部分；
 ///   ③ 硬截断加省略号。
@@ -1322,6 +1324,10 @@ fn derive_brief(summary: &str) -> Option<String> {
         return None;
     }
     let max = crate::schema::BRIEF_MAX_CHARS;
+    // ⓪ 短记录不必另写描述：全文已经在上限内，压一遍反而丢信息。
+    if s.chars().count() <= max {
+        return None;
+    }
     for sep in ['。', '；', '\n'] {
         if let Some(p) = s.split(sep).next() {
             let p = p.trim();

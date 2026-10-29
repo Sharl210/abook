@@ -86,9 +86,13 @@ pub const EXPECTED: &[&str] = &[
 /// （"在输入法进程里，PopupWindow 与 type=0x3eb 的附加 …"），
 /// 既占地方又没传达意思。
 ///
-/// 40 字的上限是"一句话说清一件事"的经验值：再长就说明这条记录
-/// 想讲的不止一件事，那应该拆成两条。
-pub const BRIEF_MAX_CHARS: usize = 40;
+/// 100 字是平面里一条记录的省略界限。定成 100 而不是更短，是因为这个长度
+/// 足够把"做了什么、为什么、结论是什么"讲完，读者不必点进全文就能判断这条
+/// 跟自己当前这步有没有关系。
+///
+/// 反过来，正文本身不超过 100 字的记录不写 BRIEF——全文已经在界限内，再压
+/// 一遍只会丢信息。这类记录 `derive_brief` 返回 `None`，平面直接显示正文。
+pub const BRIEF_MAX_CHARS: usize = 100;
 
 /// Fields that must exist in one of several acceptable spellings.
 /// KEYS arrived after the first records were written, so CONCEPTS is an
