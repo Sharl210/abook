@@ -347,7 +347,15 @@ pub fn cmd_show(a: &Args) -> R<i32> {
         }
     }
 
-    println!("{}  [{}]", rel(&root, &path), lib.name());
+    // 抬头也用短号：`show` 是读一条记录最常用的命令，抬头每行印一次
+    // 48 字符路径，一屏里就是几十次。完整编号用 `abook num --of` 反查。
+    {
+        let nums = crate::num::Numbers::load_or_build(&root);
+        let relp = rel(&root, &path);
+        let id = relp.rsplit('/').next().unwrap_or(&relp).trim_end_matches(".md");
+        let shown = nums.num_of(id).map(|n| n.to_string()).unwrap_or(relp);
+        println!("{}  [{}]", shown, lib.name());
+    }
     // Rendered here rather than read out of the header, so records written
     // before `UPDATED` existed still show a date instead of nothing. The
     // fallback chain lives in `Record::updated`.
