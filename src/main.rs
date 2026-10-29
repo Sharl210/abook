@@ -12,6 +12,7 @@ mod rx;
 mod search;
 mod idx;
 mod related;
+mod num;
 mod semantic;
 mod paging;
 mod schema;
@@ -146,6 +147,7 @@ fn help_text() -> String {
   check [记录|-]            检查一条（或 stdin），只报不改
   refs [--fix]              全库检查引用是否指得着；--fix 只修能唯一推导的
   related <ID>              从一条记录走到相邻记录（显式引用/共享键/共享硬标识符）
+  num --of <号>             短编号（C1/N2）与完整编号互查
   repair [记录] [--apply]   按校验器自动修复，默认预演
   normalize [lib] [--dry-run]   旧命名升级为新方案
   refresh [lib]             按磁盘重建地图并推进收录时刻
@@ -894,6 +896,47 @@ fn main() {
         }
     }
 
+    // 写命令跑完后维护短号分配表，仍在库级锁内。
+    //
+    // 必须与索引同一处、同一把锁：发号是"读表→取 next→写表"的读改写序列，
+    // 锁外做就会两条并发记录拿到同一个号——而那正是短号唯一的硬约束。
+    //
+    // 失败不阻断：短号是派生物，记录本身已经写好了，缺号下次补齐。
+    let num_root = root.clone();
+    if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+        eprintln!("[NUM] need_index={need_index} code={code}");
+    }
+    if need_index {
+        let mut nums = crate::num::Numbers::load_or_build(&num_root);
+        let mut changed = false;
+        for lib in [crate::rec::Lib::Canonical, crate::rec::Lib::Candidate] {
+            let dir = num_root.join(lib.dir());
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if !name.ends_with(".md") {
+                        continue;
+                    }
+                    let id = name.trim_end_matches(".md").to_string();
+                    if nums.num_of(&id).is_none() {
+                        nums.assign(&id, lib);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+            eprintln!("[NUM] changed={changed} total={}", nums.len());
+        }
+        if changed || nums.fresh {
+            if let Err(e) = nums.save(&num_root) {
+                if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+                    eprintln!("[NUM] save 失败: {e:?}");
+                }
+            }
+        }
+    }
+
     let is_selftest = std::env::args().nth(1).as_deref() == Some("selftest");
     // The document is emitted for a non-zero exit too. `check`, `repair`,
     // `leftover` and `preflight` all exit 5 to mean "ran fine, found real
@@ -1082,6 +1125,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("check", cmd_audit::cmd_check),
         ("refs", cmd_audit::cmd_refs),
         ("related", related::cmd_related),
+        ("num", num::cmd_num),
         ("repair", cmd_audit::cmd_repair),
         ("fix", cmd_audit::cmd_repair),
         // -- admin

@@ -140,6 +140,11 @@ pub fn neighbors(root: &std::path::Path, target: &str, limit: usize) -> R<(Strin
     for lib in [Lib::Canonical, Lib::Candidate] {
         all.extend(load_lib(root, lib));
     }
+    // 短号先换成完整 ID，再按 ID 找。
+    let target = crate::num::Numbers::load(root)
+        .and_then(|n| n.resolve(target))
+        .unwrap_or_else(|| target.to_string());
+    let target = target.as_str();
     let me = all
         .iter()
         .find(|r| {
@@ -271,8 +276,11 @@ pub fn cmd_related(a: &Args) -> R<i32> {
         crate::say_line!("  没有相邻记录。");
         return Ok(0);
     }
+    // 邻居行也用短号：一次列 12 条就是 12 个 26 字符 ID。
+    let nums = crate::num::Numbers::load_or_build(&root);
     for n in &ns {
-        crate::say_line!("  {:<14} {:>6.1}  {}  {}", n.why, n.score, n.id, n.title);
+        let shown = nums.num_of(&n.id).map(|s| s.to_string()).unwrap_or_else(|| n.id.clone());
+        crate::say_line!("  {:<14} {:>6.1}  {}  {}", n.why, n.score, shown, n.title);
     }
     Ok(0)
 }

@@ -190,6 +190,9 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
     if res.hits.is_empty() {
         println!("  无命中。");
     }
+    // 命中行里的路径也换短号：一次召回 5 条就是 5 个 48 字符路径。
+    // 完整编号用 `abook num --of <短号>` 反查。
+    let nums = crate::num::Numbers::load_or_build(&root);
     for h in &res.hits {
         // Score order stays; the date rides along so a hit can be placed in
         // time. Without it a reader cannot tell "this is how it works now" from
@@ -206,7 +209,10 @@ pub fn cmd_recall(a: &Args) -> R<i32> {
             h.lib.name(),
             att,
             h.title,
-            h.path,
+            {
+                let id = h.path.rsplit('/').next().unwrap_or(&h.path).trim_end_matches(".md");
+                nums.num_of(id).map(|n| n.to_string()).unwrap_or_else(|| h.path.clone())
+            },
             h.tier.label(),
             h.reason
         );

@@ -79,6 +79,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
         "检查引用是否指得着；--fix 只修能唯一推导的",
         "--fix --dry-run",
     ),
+    ("num", "of", "json", "短编号与完整编号互查；--of <号> 反查", "--of C1"),
     ("related", "per-page", "json", "从一条记录走到相邻记录（显式边/共享引用键/共享硬标识符）", "related N-20261029T000956"),
     ("lint", "lib", "json", "风格检查", ""),
     ("doctor", "lib,fix,dry-run", "fix,apply,dry-run,json", "诊断，--fix 就地修（--dry-run 只看不改）", "--fix --dry-run"),

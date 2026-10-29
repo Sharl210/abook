@@ -759,6 +759,19 @@ pub fn resolve_record(root: &Path, sel: &str) -> R<(PathBuf, Lib)> {
         };
         return Ok((cand, lib));
     }
+    // 短号（`C123` / `N45`）先查分配表换回完整 ID。
+    //
+    // 放在文件名匹配之前：短号是 2-4 个字符，直接拿去当文件名匹配会撞上
+    // 真实文件名前缀（比如 `C1` 撞 `C10`），而且更慢。分配表是一次读表，
+    // 命中就是精确的。
+    if let Some(id) = crate::num::Numbers::load(root).and_then(|n| n.resolve(sel)) {
+        for lib in [Lib::Canonical, Lib::Candidate] {
+            let p = root.join(lib.dir()).join(format!("{id}.md"));
+            if p.exists() {
+                return Ok((p, lib));
+            }
+        }
+    }
     for lib in [Lib::Canonical, Lib::Candidate] {
         let dir = root.join(lib.dir());
         let by_name = dir.join(sel);

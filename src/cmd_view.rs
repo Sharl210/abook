@@ -1544,6 +1544,12 @@ pub fn cmd_list(a: &Args) -> R<i32> {
         println!("{{{},\"records\":[{items}]}}", pg.json_fields());
         return Ok(0);
     }
+    // 文本输出里用短号代替完整路径。
+    //
+    // 完整编号 `canonical/records/C-20261029T101635-f449f353.md` 是 48 字符，
+    // 每行都印一遍，一页 30 行就是 1.4KB 的纯编号。短号 `C123` 是 4 字符，
+    // 而且不暴露创建时间与内容哈希。要看完整编号用 `abook num --of C123`。
+    let nums = crate::num::Numbers::load_or_build(&root);
     for rec in page.iter().copied() {
         // 元信息一律走 `row_meta`：此处自己写 `{:>4}` 放过行数，于是从"行数"往后
         // 整行相对其它命令左移一格，并排看就错位。附件列是命令特有信息，接在
@@ -1569,13 +1575,13 @@ pub fn cmd_list(a: &Args) -> R<i32> {
         match att {
             Some(att) => println!(
                 "{meta}  {att:>12}  {}  [{}] {}",
-                rel(&root, &rec.path),
+                short_path(&nums, &root, &rec.path),
                 rec.lib.name(),
                 truncate_chars(&rec.title(), 70)
             ),
             None => println!(
                 "{meta}  {}  [{}] {}",
-                rel(&root, &rec.path),
+                short_path(&nums, &root, &rec.path),
                 rec.lib.name(),
                 truncate_chars(&rec.title(), 70)
             ),
@@ -1965,5 +1971,19 @@ mod tests {
         let e = cmd_review(&args(&root, &["--show", "nope.md"])).expect_err("必须报错");
         assert!(!format!("{e:?}").contains("closed/"), "review 下没有 closed/ 却提了它: {e:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+
+/// 记录路径 → 短号；没有短号时退回原路径。
+///
+/// 退回而不是显示空：新写入的记录可能还没分到号（分配表在写命令收尾时才
+/// 更新），此时显示原路径能让人看到它确实存在，而不是以为丢了。
+fn short_path(nums: &crate::num::Numbers, root: &std::path::Path, p: &std::path::Path) -> String {
+    let relp = rel(root, p);
+    let id = relp.rsplit('/').next().unwrap_or(&relp).trim_end_matches(".md");
+    match nums.num_of(id) {
+        Some(n) => n.to_string(),
+        None => relp,
     }
 }
