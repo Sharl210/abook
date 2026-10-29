@@ -12,7 +12,7 @@
 /// `params` are the ones that consume the next token; `flags` are the bare
 /// switches. Both are validated by the parser before the command runs.
 pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
-    ("write", "title,read-when,not-for,body-file,lib,approve,dry-run,force,body", "approve,dry-run,force,json", "新建记录，带格式校验", "--title 示例 --body-file @file --lib candidate"),
+    ("write", "title,read-when,not-for,body-file,lib,approve,dry-run,force,body,summary,brief", "approve,dry-run,force,json", "新建记录，带格式校验", "--title 示例 --body-file @file --lib candidate"),
     ("update", "if-version,title,body,body-file,approve,dry-run", "approve,dry-run,json", "改已有记录的头部或正文", "@any --title 示例"),
     ("set", "if-version,value,dry-run,approve", "dry-run,json", "改单个字段", "@any TITLE \"新标题\" --approve"),
     ("unset", "if-version,text,file,body,approve,dry-run", "dry-run,json", "删正文里的一段", "@any --text x"),
@@ -35,7 +35,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("diff", "page,per-page", "json", "两条记录差异", "@any @any"),
     ("recall", "q,limit,page,per-page,all,body,include-promoted,raw,lib", "all,body,raw,include-promoted,json", "召回", "--limit 2"),
     ("export", "lib,format,out,include-deleted,page,per-page", "include-deleted,json", "导出", "--format json"),
-    ("index", "limit,page,per-page", "json", "Index.md 路由", "--limit 2"),
+    ("index", "limit,page,per-page,plane", "json", "Index.md 路由 + 预加载平面；--plane D5 取该条全文", "--plane D5"),
     ("atlas", "card,page,per-page", "json", "地图分支", ""),
     ("recent", "limit,page,per-page", "json", "最近变更", "--limit 2"),
     ("log", "limit,page,per-page", "json", "变更记录", "--limit 2"),

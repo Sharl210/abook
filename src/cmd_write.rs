@@ -100,17 +100,31 @@ fn build_record(a: &Args, lib: Lib) -> R<Record> {
         },
     );
     rec.set("TITLE", &title);
-    rec.set(
-        "SUMMARY",
-        &{
-            let p = opt(a, "summary");
-            if p.is_empty() {
-                derive_summary(&body)
-            } else {
-                p
-            }
-        },
-    );
+    let summary = {
+        let p = opt(a, "summary");
+        if p.is_empty() {
+            derive_summary(&body)
+        } else {
+            p
+        }
+    };
+    rec.set("SUMMARY", &summary);
+    // BRIEF：预加载平面里那一行，登记时就要有。
+    //
+    // 允许 `--brief` 显式给；没给就从事先算好的 SUMMARY 派生。
+    // 派生而不留空，是因为留空的后果是平面退回截断 SUMMARY——
+    // 截断出来的是半截话，而这正是加这个字段要解决的问题。
+    let brief = {
+        let p = opt(a, "brief");
+        if p.is_empty() {
+            derive_brief(&summary).unwrap_or_default()
+        } else {
+            p
+        }
+    };
+    if !brief.is_empty() {
+        rec.set("BRIEF", &brief);
+    }
     let read_when = opt(a, "read-when");
     if read_when.is_empty() {
         return usage("缺少 --read-when：将来什么情况下该读这条");
@@ -1286,4 +1300,40 @@ mod batch_promote_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// 从摘要压出 `BRIEF`：预加载平面里那一行。
+///
+/// 为什么不要求调用方手填：要求手填的结果就是大批记录没有 BRIEF，
+/// 平面只能退回截断 SUMMARY——那正是要避免的形态。所以写入时自动派生，
+/// `--brief` 显式给出可覆盖。
+///
+/// 压缩策略（按序取第一个能在上限内说完整的）：
+///   ① 第一个分句（到 。；换行为止）；
+///   ② 第一个逗号前的部分；
+///   ③ 硬截断加省略号。
+///
+/// 注意入参是**摘要文本**，不是整篇记录。早先版本从原始记录里找
+/// `SUMMARY=` 行，于是 `write` 传摘要进来时永远找不到、BRIEF 静默为空——
+/// 自己给自己埋的坑，靠"写入后 grep 一下"才发现。
+fn derive_brief(summary: &str) -> Option<String> {
+    let s = summary.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let max = crate::schema::BRIEF_MAX_CHARS;
+    for sep in ['。', '；', '\n'] {
+        if let Some(p) = s.split(sep).next() {
+            let p = p.trim();
+            if !p.is_empty() && p.chars().count() <= max {
+                return Some(p.to_string());
+            }
+        }
+    }
+    let p = s.split(['，', ',']).next().unwrap_or(s).trim();
+    if !p.is_empty() && p.chars().count() <= max {
+        return Some(p.to_string());
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    Some(format!("{cut}…"))
 }

@@ -80,6 +80,7 @@ const ALIASES: &[(&[&str], &str)] = &[
     (&["ENTITIES", "ENTITY"], "ENTITIES"),
     (&["SEQUENCE", "SEQ", "ORDER"], "SEQUENCE"),
     (&["SUMMARY", "ABSTRACT", "DESC"], "SUMMARY"),
+    (&["BRIEF", "SHORT", "ONELINE"], "BRIEF"),
     (&["MATURITY", "MATURE"], "MATURITY"),
     (&["AUTHORITY", "AUTH"], "AUTHORITY"),
     (&["EVIDENCE", "PROOF"], "EVIDENCE"),

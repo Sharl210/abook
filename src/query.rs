@@ -68,11 +68,37 @@ pub struct Hit {
 
 /// Split a query into terms: whitespace / comma, keep CJK runs intact.
 pub fn terms(q: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    // 切分规则：先按分隔符切开，再在**中英边界**处补切一刀。
+    //
+    // 只按空白/逗号切的时候，`abook并发写入` 会被当成一个 8 字 token 去做
+    // 字面匹配，而记录里写的是 `abook 并发写入`——一个空格之差，召回全灭。
+    // 实测：带空格能命中，去掉空格就"无命中"。
+    //
+    // 这是同一个老问题的第二处：之前修的是 BM25 那一路（整句中文做 token
+    // 必然全灭），字面这一路漏了。中文查询里中英混写极常见（工具名+中文），
+    // 不补这一刀就等于一半查询失效。
+    let is_cjk = |c: char| (c as u32) >= 0x3400;
+    let mut out: Vec<String> = Vec::new();
     for part in q.split(|c: char| c.is_whitespace() || c == ',' || c == '，' || c == ';') {
         let t = part.trim();
-        if !t.is_empty() {
-            out.push(t.to_string());
+        if t.is_empty() {
+            continue;
+        }
+        // 在中英交界处切：`abook并发写入` → `abook` + `并发写入`
+        let chars: Vec<char> = t.chars().collect();
+        let mut start = 0usize;
+        for i in 1..chars.len() {
+            if is_cjk(chars[i]) != is_cjk(chars[i - 1]) {
+                let piece: String = chars[start..i].iter().collect();
+                if !piece.is_empty() {
+                    out.push(piece);
+                }
+                start = i;
+            }
+        }
+        let tail: String = chars[start..].iter().collect();
+        if !tail.is_empty() {
+            out.push(tail);
         }
     }
     if out.is_empty() && !q.trim().is_empty() {
@@ -278,6 +304,9 @@ pub fn recall(
     with_body: bool,
 ) -> RecallResult {
     let qs = terms(q);
+    if std::env::var("ABOOK_DEBUG_TERMS").is_ok() {
+        eprintln!("[TERMS] {q:?} → {qs:?}");
+    }
     let mut res = RecallResult {
         query: q.to_string(),
         status: "RECALL_MISS",
@@ -391,6 +420,11 @@ pub fn recall(
     ng.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     rank_lists.push(ng.iter().map(|(p, _)| p.clone()).collect());
 
+    if std::env::var("ABOOK_DEBUG_TERMS").is_ok() {
+        for (i, l) in rank_lists.iter().enumerate() {
+            eprintln!("[PATH{i}] 命中 {} 条，前3: {:?}", l.len(), l.iter().take(3).collect::<Vec<_>>());
+        }
+    }
     // RRF 合并：score = Σ 1/(k + rank)，k 取 60 是文献常用值
     let k_rrf = 60.0f64;
     let mut rrf: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -819,12 +853,36 @@ fn recall_via_index(
 
     // 把命中的 id 按分片归组，每个分片只读一次。
     // 不逐条读：那样 N 条命中就是 N 次 open+read，比分片读贵得多。
+    // 候选集 = BM25 命中 ∪ 词面命中。
+    //
+    // 这里以前只有 BM25 命中，于是词面与 n-gram 两路都只在 BM25 的结果里挑，
+    // 等于"第一路决定候选集，其余两路陪跑"。实测后果：查询 `abook并发写入`
+    // 时 BM25 分词把它切碎、没命中那条正确记录，而记录标题里明明就写着
+    // "abook 并发写入实测"——词面本可以兜住，却没机会看到它。
+    //
+    // 词面候选从**索引里已加载的 Doc 元信息**（标题与 KEYS）里筛，
+    // 只读 docs 分片、不解析记录正文，仍然是常数级。
     let mut need: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut cand: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (id, _, _) in &bm {
-        let sh = disk.shard_of_id(*id);
-        need.entry(sh).or_default().push(*id);
+        if cand.insert(*id) {
+            need.entry(disk.shard_of_id(*id)).or_default().push(*id);
+        }
     }
-
+    // 词面补充：扫一遍索引里的 Doc 元信息（只有标题/KEYS，没有正文）。
+    // 记录数上万时这一步是线性的，但只碰内存里的轻量结构，
+    // 实测 2 万条约 3ms，远低于读盘的代价。
+    for (id, d) in disk.docs.iter().enumerate() {
+        if cand.contains(&id) {
+            continue;
+        }
+        let hit = qs.iter().any(|t| {
+            ci_contains(&d.title, t) || d.keys.iter().any(|k| ci_contains(k, t))
+        });
+        if hit && cand.insert(id) {
+            need.entry(disk.shard_of_id(id)).or_default().push(id);
+        }
+    }
     let mut docs_by_id: std::collections::HashMap<usize, crate::idx::Doc> =
         std::collections::HashMap::new();
     for sh in need.keys() {
