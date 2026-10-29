@@ -76,8 +76,19 @@ pub const REQUIRED: &[&str] = &["ID", "TITLE"];
 /// Kept as WARN, not ERROR: a legacy record with no READ_WHEN is not broken,
 /// it is merely weaker, and must stay usable.
 pub const EXPECTED: &[&str] = &[
-    "FORMAT", "KIND", "MATURITY", "AUTHORITY", "SUMMARY", "READ_WHEN", "NOT_FOR",
+    "FORMAT", "KIND", "MATURITY", "AUTHORITY", "SUMMARY", "BRIEF", "READ_WHEN", "NOT_FOR",
 ];
+
+/// `BRIEF` 的硬上限（字符）。超了就当没写。
+///
+/// 它的用途只有一个：**预加载平面里那一行**。所以它必须是登记时写好的一句
+/// 完整短话，而不是把 SUMMARY 截断——截断出来的东西读着像半截话
+/// （"在输入法进程里，PopupWindow 与 type=0x3eb 的附加 …"），
+/// 既占地方又没传达意思。
+///
+/// 40 字的上限是"一句话说清一件事"的经验值：再长就说明这条记录
+/// 想讲的不止一件事，那应该拆成两条。
+pub const BRIEF_MAX_CHARS: usize = 40;
 
 /// Fields that must exist in one of several acceptable spellings.
 /// KEYS arrived after the first records were written, so CONCEPTS is an

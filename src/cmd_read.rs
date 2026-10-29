@@ -1870,19 +1870,34 @@ fn plane_view(
             if plane == Plane::Experience {
                 continue;
             }
+            // 优先用 BRIEF：那是登记时专门为平面写的一句短话。
+            //
+            // 没有 BRIEF 才退回 SUMMARY 首句截断——这一步只为兼容存量记录，
+            // 截断出来的东西读着是半截话，所以新记录必须写 BRIEF。
+            // 优先顺序写死：BRIEF > SUMMARY 首句 > TITLE。
             let summary = {
-                let s = field("SUMMARY");
-                let s = if s.is_empty() { field("TITLE") } else { s };
-                // 首句 + 截断。摘要本身是登记时写的一句人话，这里只做
-                // "取第一句、超长截断"两件事，不再加工——加工过的摘要
-                // 就变成了另一种东西，读者无法与原文对照。
-                let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
-                let n = first.chars().count();
-                if n > SUMMARY_CHARS {
-                    let cut: String = first.chars().take(SUMMARY_CHARS).collect();
-                    format!("{cut}…")
+                let brief = field("BRIEF");
+                if !brief.is_empty() {
+                    let n = brief.chars().count();
+                    if n <= crate::schema::BRIEF_MAX_CHARS {
+                        brief
+                    } else {
+                        // 超长说明登记时没按"一句话"写，如实标出来而不是静默截断：
+                        // 静默截断会让作者以为写对了。
+                        let cut: String = brief.chars().take(crate::schema::BRIEF_MAX_CHARS).collect();
+                        format!("{cut}…")
+                    }
                 } else {
-                    first
+                    let s = field("SUMMARY");
+                    let s = if s.is_empty() { field("TITLE") } else { s };
+                    let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
+                    let n = first.chars().count();
+                    if n > SUMMARY_CHARS {
+                        let cut: String = first.chars().take(SUMMARY_CHARS).collect();
+                        format!("{cut}…")
+                    } else {
+                        first
+                    }
                 }
             };
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1944,14 +1959,19 @@ fn plane_view_all(root: &std::path::Path) -> (Vec<(String, String, i64)>, Vec<(S
                 continue;
             }
             let summary = {
-                let s = field("SUMMARY");
-                let s = if s.is_empty() { field("TITLE") } else { s };
-                let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
-                let n = first.chars().count();
-                if n > SUMMARY_CHARS {
-                    first.chars().take(SUMMARY_CHARS).collect::<String>() + "…"
+                let brief = field("BRIEF");
+                if !brief.is_empty() {
+                    brief
                 } else {
-                    first
+                    let s = field("SUMMARY");
+                    let s = if s.is_empty() { field("TITLE") } else { s };
+                    let first = s.split(['。', '；', '\n']).next().unwrap_or(&s).trim().to_string();
+                    let n = first.chars().count();
+                    if n > SUMMARY_CHARS {
+                        first.chars().take(SUMMARY_CHARS).collect::<String>() + "…"
+                    } else {
+                        first
+                    }
                 }
             };
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
