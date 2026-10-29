@@ -35,7 +35,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("diff", "page,per-page", "json", "两条记录差异", "@any @any"),
     ("recall", "q,limit,page,per-page,all,body,include-promoted,raw,lib", "all,body,raw,include-promoted,json", "召回", "--limit 2"),
     ("export", "lib,format,out,include-deleted,page,per-page", "include-deleted,json", "导出", "--format json"),
-    ("index", "limit,page,per-page", "json", "Index.md 路由", "--limit 2"),
+    ("index", "limit,page,per-page,plane", "json", "Index.md 路由 + 预加载平面；--plane D5 取该条全文", "--plane D5"),
     ("atlas", "card,page,per-page", "json", "地图分支", ""),
     ("recent", "limit,page,per-page", "json", "最近变更", "--limit 2"),
     ("log", "limit,page,per-page", "json", "变更记录", "--limit 2"),

@@ -630,14 +630,46 @@ impl Index {
             }
         }
 
+        // docs 元信息也要读进来（只读标题/KEYS，不碰正文）。
+        //
+        // 初版这里给的是 `docs: Vec::new()`，理由是"浅加载省内存"。代价是
+        // 词面那一路在快路径里彻底失效——它只能在 BM25 命中集里挑，
+        // 于是"四路并行"实际退化成"BM25 一路说了算"。
+        // 实测：查询 `abook并发写入` 时 BM25 切词没命中，而记录标题里就写着
+        // "abook 并发写入实测"，词面本可兜住，却因为 docs 空而无从查起。
+        //
+        // docs 分片里每行只有 path/title/len/keys/kind/maturity/authority，
+        // 2 万条约 3MB、读一次约 20ms，比"召回整体失效"便宜得多。
+        let mut docs: Vec<Doc> = Vec::with_capacity(total_docs);
+        let nsh = 16usize; // 与 save 的 SHARDS 一致
+        for sh in 0..nsh {
+            let p = docs_path(root).with_extension(format!("d{sh}"));
+            if let Ok(body) = std::fs::read_to_string(&p) {
+                for line in body.lines() {
+                    if let Some(d) = parse_doc_line(line) {
+                        docs.push(d);
+                    }
+                }
+            }
+        }
+        let mut by_path: HashMap<String, u32> = HashMap::with_capacity(docs.len());
+        for (i, d) in docs.iter().enumerate() {
+            by_path.insert(d.path.clone(), i as u32);
+        }
+        let avgdl = if docs.is_empty() {
+            0.0
+        } else {
+            docs.iter().map(|d| d.len as f64).sum::<f64>() / docs.len() as f64
+        };
+
         Some(Index {
-            docs: Vec::new(),
+            docs,
             postings,
-            avgdl: 0.0,
+            avgdl,
             total_docs,
             total_bytes,
             dirty: false,
-            by_path: HashMap::new(),
+            by_path,
         })
     }
 
@@ -791,3 +823,39 @@ pub fn bucket_of(term: &str, buckets: usize) -> usize {
 
 /// 桶总数。写读两侧必须一致。
 pub const BUCKETS: usize = 64;
+
+/// 预加载平面的三类。判据只用已有字段，不引入新字段（零迁移）。
+///
+/// 设计来自一条实测需求：开局就要知道"用户交代过什么""有哪些硬规矩"，
+/// 而不是等搜索时才加权——加权只在召回时生效，而很多失误发生在"根本没去查"。
+/// 经历类不进来：它相当于往事档案，想到了再查，不该占预加载的体积。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Plane {
+    /// 用户主动要求记住的。最高优先级，必须在预加载里全见。
+    Directive,
+    /// 模型判断为通用强约束的：约束、决策、纠正、教训、方法论。
+    Rule,
+    /// 经历类：观测、结果、证据、失败、尝试、假设。按需查，不预加载。
+    Experience,
+}
+
+impl Plane {
+    pub fn of(kind: &str, authority: &str) -> Plane {
+        // 用户交代优先于一切：哪怕它同时是 CONSTRAINT，也算 Directive。
+        if authority == "USER_EXPLICIT" || authority == "USER_FEEDBACK" {
+            return Plane::Directive;
+        }
+        match kind {
+            "CONSTRAINT" | "DECISION" | "CORRECTION" | "LESSON" | "METHODOLOGY" => Plane::Rule,
+            _ => Plane::Experience,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Plane::Directive => "directive",
+            Plane::Rule => "rule",
+            Plane::Experience => "experience",
+        }
+    }
+}
