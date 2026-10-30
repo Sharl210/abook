@@ -241,7 +241,17 @@ pub fn cmd_set(a: &Args) -> R<i32> {
         _ => {}
     }
     rec.set(&canon, &value);
+    // 改的若是不参与分词的字段（TASK/PROJECT/STATUS/RELATED…），索引一个字节
+    // 都不用动。必须在**写盘前**判定：save 会刷新文件 mtime，事后看 mtime
+    // 已经分不清"改了元数据"和"改了正文"，只能保守重建 1.8MB。
+    // 注意 `save` 在值与现值相同时会跳过写入，那时更不该碰索引。
+    let touched_index = crate::idx::is_index_relevant(&canon);
     let wrote = save(&root, &mut rec, a, "set-field")?;
+    // `wrote == false` 表示值与原值相同、文件根本没被写。这时索引百分之百不用动，
+    // 而且这是比任何事后比对都便宜、都准确的信号——无需读、无需算。
+    if !wrote || !touched_index {
+        crate::idx::note_meta_only();
+    }
     if !a.has("dry-run") {
         if wrote {
             crate::say_line!("{}= {}", canon, value);
@@ -262,7 +272,11 @@ pub fn cmd_unset(a: &Args) -> R<i32> {
     let (canon, _) = crate::parse::canon_key(&field);
     let had = rec.fields.iter().any(|(k, _)| k == &canon);
     rec.fields.retain(|(k, _)| k != &canon);
+    let touched_index = crate::idx::is_index_relevant(&canon);
     let changed = save(&root, &mut rec, a, "unset-field")?;
+    if !changed || !touched_index {
+        crate::idx::note_meta_only();
+    }
     // Only claim to have removed something when the removal actually happened.
     // A dry run used to print "已移除 X" and write nothing; a field that was
     // never there printed the same line. Both make the caller believe the file

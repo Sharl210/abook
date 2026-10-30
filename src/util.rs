@@ -1820,9 +1820,32 @@ pub fn split_list(s: &str) -> Vec<String> {
 /// The summary the tool derives from a body when the caller supplies none.
 /// Kept as one function so edits can tell "still the derived value" from
 /// "the author wrote this".
+/// Strip Markdown scaffolding so it never becomes a record's first impression.
+///
+/// Bodies routinely open with `## 起因`/`> 【…】`/a fenced block/a table, and folding
+/// those into SUMMARY verbatim produced summaries whose first real characters were
+/// `## 起因` — visible in every list row and in the preload plane, carrying no
+/// information at all. Structure lines are dropped here, at the single place both
+/// SUMMARY and BRIEF derive from, rather than at each display site.
+pub fn strip_md_scaffolding(body: &str) -> String {
+    body.lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with('#')
+                && !l.starts_with('>')
+                && !l.starts_with("```")
+                && !l.starts_with('|')
+                && !l.starts_with("---")
+                && !l.starts_with("===")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn derive_summary(body: &str) -> String {
     // A body may span many lines; SUMMARY must stay on one.
-    truncate_chars(&crate::rec::fold_to_one_line(body), 160)
+    truncate_chars(&crate::rec::fold_to_one_line(&strip_md_scaffolding(body)), 160)
 }
 
 /// Re-derive body-dependent fields, but only where they still hold the

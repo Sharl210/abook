@@ -75,7 +75,15 @@ pub fn tokenize(text: &str) -> Vec<String> {
             }
         } else if chars[i].is_alphanumeric() {
             let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
+            // 关键：`is_alphanumeric()` 对汉字也返回 true，所以这里必须显式
+            // 排除 CJK，否则 `abook并发写入实测` 会被当成**一个** 11 字 token，
+            // 与库里任何二元组都对不上——带空格的同义查询却能命中，因为空格
+            // 恰好断开了两者。这一步是"中英连写查询全灭"的真正根因。
+            while i < chars.len()
+                && ((chars[i].is_alphanumeric() && !cjk(chars[i]))
+                    || chars[i] == '_'
+                    || chars[i] == '-')
+            {
                 i += 1;
             }
             let w: String = chars[start..i].iter().collect::<String>().to_lowercase();

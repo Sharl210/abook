@@ -869,19 +869,35 @@ fn recall_via_index(
             need.entry(disk.shard_of_id(*id)).or_default().push(*id);
         }
     }
-    // 词面补充：扫一遍索引里的 Doc 元信息（只有标题/KEYS，没有正文）。
-    // 记录数上万时这一步是线性的，但只碰内存里的轻量结构，
-    // 实测 2 万条约 3ms，远低于读盘的代价。
-    for (id, d) in disk.docs.iter().enumerate() {
-        if cand.contains(&id) {
-            continue;
+    // 词面补充：**走 head_postings，不扫 docs，也不用全量 postings**。
+    //
+    // 这里曾经是 `for (id, d) in disk.docs.iter()`——遍历全量 Doc 做子串匹配。
+    // 它是对的但代价 O(n)，而 build 早已把 title 与 KEYS 分词写进 postings，
+    // 所以按词查桶即可拿到同一批候选，代价只与词频有关。
+    //
+    // 精度上这里只做"是否同现"，不排序；排序交给后面的 RRF 在真实 doc 上算。
+    //
+    // 注意这里用 `tokenize` 而不是 `qs`：postings 是按汉字二元组建的键，
+    // 而 `terms` 把连续中文保留成整段（`abook并发写入实测` → ["abook",
+    // "并发写入实测"]）。拿整段去查 postings 必然查不到——词组在库里存的是
+    // 「并发/发写/写入/…」。两条切词规则各用在对的地方：
+    //   `terms`    → 记录正文子串匹配（旧路径）
+    //   `tokenize` → head_postings 键查找（索引路径）
+    let qterms: Vec<String> = crate::semantic::tokenize(q);
+    for t in &qterms {
+        if let Some(plist) = disk.head_postings.get(t) {
+            for (id, _) in plist {
+                let id = *id as usize;
+                if cand.insert(id) {
+                    need.entry(disk.shard_of_id(id)).or_default().push(id);
+                }
+            }
         }
-        let hit = qs.iter().any(|t| {
-            ci_contains(&d.title, t) || d.keys.iter().any(|k| ci_contains(k, t))
-        });
-        if hit && cand.insert(id) {
-            need.entry(disk.shard_of_id(id)).or_default().push(id);
-        }
+    }
+    if std::env::var("ABOOK_DEBUG_RECALL").is_ok() {
+        eprintln!("[RECALL] q={q:?} tokenize={:?}", crate::semantic::tokenize(q));
+        eprintln!("[RECALL] bm 候选 {} 条，词面后候选 {} 条", bm.len(), cand.len());
+        eprintln!("[RECALL] 528 在候选集: {}", cand.contains(&528));
     }
     let mut docs_by_id: std::collections::HashMap<usize, crate::idx::Doc> =
         std::collections::HashMap::new();
@@ -905,7 +921,16 @@ fn recall_via_index(
     let mut lex: Vec<(String, i32)> = Vec::new();
     for (_, d) in docs_by_id.iter() {
         let mut sc = 0i32;
-        for t in qs {
+        // 这里必须遍历 `qterms`（tokenize 的二元组），不能用 `qs`。
+        //
+        // `qs` 是 `terms()` 的结果，中文连续段被整段保留：`索引放哪里` →
+        // `["索引放哪里"]`。拿它去做 `title.contains()`，等于要求标题里出现
+        // 这五个字的完整连续串，实际永远为假——标题这一路打了很久的 0 分，
+        // 却没人发现，因为"没有加分"和"没有命中"在输出上看不出区别。
+        //
+        // 实测后果：查「索引放哪里」时，标题正是《记忆资产身份与索引维护》
+        // 的那条记录词面得 0，被一条正文反复出现"索引"的长记录挤掉。
+        for t in &qterms {
             if ci_contains(&d.title, t) {
                 sc += 60;
             }

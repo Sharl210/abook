@@ -1096,6 +1096,12 @@ pub fn cmd_update(a: &Args) -> R<i32> {
     if changed.is_empty() {
         return usage("没有要改的字段");
     }
+    // 改的若全是不参与分词的字段（TASK/STATUS/RELATED…），索引一个字节都不用动。
+    // 这一判断必须在这里做：set 会刷新文件 mtime，事后任何基于 mtime 的检查
+    // 都会把它当成内容变更，于是改个 TASK 也要重写 1.8MB 索引（实测 400ms）。
+    if changed.iter().all(|k| !crate::idx::is_index_relevant(k)) {
+        crate::idx::note_meta_only();
+    }
     if a.has("dry-run") {
         crate::say_line!("[dry-run] 将修改 {}", rel(&root, &path));
         for c in &changed {
@@ -1319,11 +1325,13 @@ mod batch_promote_tests {
 /// `SUMMARY=` 行，于是 `write` 传摘要进来时永远找不到、BRIEF 静默为空——
 /// 自己给自己埋的坑，靠"写入后 grep 一下"才发现。
 fn derive_brief(summary: &str) -> Option<String> {
-    let s = summary.trim();
+    let max = crate::schema::BRIEF_MAX_CHARS;
+    // 结构行由公共实现统一剥离，SUMMARY 与 BRIEF 走同一处，别再各写一份。
+    let body = crate::util::strip_md_scaffolding(summary);
+    let s = body.trim();
     if s.is_empty() {
         return None;
     }
-    let max = crate::schema::BRIEF_MAX_CHARS;
     // ⓪ 短记录不必另写描述：全文已经在上限内，压一遍反而丢信息。
     if s.chars().count() <= max {
         return None;

@@ -885,6 +885,21 @@ fn main() {
     // 索引维护：只在写命令且成功时做。失败/预览都不碰。
     if need_index && code == 0 && !index_root.as_os_str().is_empty() {
         let libs = [crate::rec::Lib::Canonical, crate::rec::Lib::Candidate];
+        // 快路径：写命令已证明改的全是非索引字段，整块跳过。
+        //
+        // 一次 `save` 要重写 16 个 docs 分片 + 63 个 postings 桶 + meta，约 1.8MB；
+        // `set TASK` 这种动作一个索引字节都不该动。实测单次写 400ms 几乎全在这里。
+        if !crate::idx::content_changed() {
+            if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+                eprintln!("[IDX] 仅元数据变更，跳过索引维护");
+            }
+        } else {
+        // 慢路径：内容确实变了，老实重建。
+        //
+        // 曾经的写法是先 `Index::load` 旧索引、build 完比 sig 相同就只刷 meta。
+        // 它省掉的是"把某字段设成它原本的值"这种罕见情况，代价却是**每次内容
+        // 变更都要额外解析 1.8MB postings**：实测 600ms → 5077ms。
+        // 为罕见收益付每次的固定成本，是笔亏账，整块去掉。
         let idx = crate::idx::Index::build(&index_root, &libs);
         if let Err(e) = idx.save(&index_root) {
             // 索引写失败不影响本次写入的结论：标脏，下次重建。
@@ -893,6 +908,7 @@ fn main() {
                 eprintln!("[IDX] save 失败: {e:?}");
             }
             crate::idx::Index::mark_dirty(&index_root);
+        }
         }
     }
 

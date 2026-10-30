@@ -81,6 +81,15 @@ pub struct Doc {
     pub authority: String,
     /// 记录文件的 mtime，用于判断索引是否过期。
     pub mtime: i64,
+    /// 索引相关内容的内容签名。
+    ///
+    /// 只覆盖参与分词的字段（标题/KEYS/CONCEPTS/SUMMARY/KIND/MATURITY/
+    /// AUTHORITY/正文）。`set TASK`、`set PROJECT` 这类改元数据的动作会刷新
+    /// 文件 mtime，但一个索引字节都不该动——靠 mtime 判断会把它们全当成变更，
+    /// 于是每次改个任务名就重建 1.8MB 索引。
+    ///
+    /// 0 表示旧索引没有这个字段，一律按"内容未知"处理，走全量重建。
+    pub sig: u64,
 }
 
 impl Doc {
@@ -107,6 +116,14 @@ pub struct Index {
     pub total_bytes: u64,
     /// 索引落后于磁盘时置位，下次写入时全量重建。
     pub dirty: bool,
+    /// 只含**标题 / KEYS / CONCEPTS** 的词表。
+    ///
+    /// 为什么需要第二张表：`postings` 里混着正文词，拿它做词面兜底会把
+    /// "正文里提到过该词"的记录也拉进来。实测退化的例子是查「索引放哪里」，
+    /// 一条 5.7KB 的长记录因为正文反复出现"索引"而挤掉了真正讲索引的那条。
+    /// 旧的全量扫描版本只在 title/KEYS 里做子串匹配，天然带这个限制；
+    /// 改走 postings 后必须显式区分，否则等于丢掉一层相关性信号。
+    pub head_postings: HashMap<String, Vec<(u32, u32)>>,
     /// path → doc_id。查 term 是否属于某条记录时必须用映射，
     /// 不能每次 `docs.iter().position()`——那是 O(n)，
     /// 实测 2 万条时把一次查询从 340ms 拖到 933ms。
@@ -115,6 +132,10 @@ pub struct Index {
 
 fn dir_of(root: &Path) -> PathBuf {
     root.join(DIR)
+}
+
+fn head_path(root: &Path) -> PathBuf {
+    dir_of(root).join("head")
 }
 
 fn meta_path(root: &Path) -> PathBuf {
@@ -166,6 +187,109 @@ fn disk_snapshot(root: &Path) -> (usize, u64) {
         }
     }
     (n, h)
+}
+
+/// 记录中**参与分词**的那几个字段的指纹。
+///
+/// 刻意不含 TASK/PROJECT/SESSION/UPDATED 等元数据：它们改了不影响召回，
+/// 却会刷新文件 mtime。用 mtime 单独判断"要不要重建索引"，结果就是
+/// `set TASK` 也要重写 81 个文件、1.8MB——实测 400ms 全耗在这上面。
+/// 只读现有索引的 docs 头部（不读 postings），用于增量判断。
+fn load_docs_only(root: &Path) -> Option<Vec<Doc>> {
+    let meta = std::fs::read_to_string(meta_path(root)).ok()?;
+    let mut lines = meta.lines();
+    let schema: u32 = lines.next()?.trim().parse().ok()?;
+    if schema != SCHEMA {
+        return None;
+    }
+    if lines.next().map(|s| s.trim() == "dirty").unwrap_or(true) {
+        return None;
+    }
+    let mut v = Vec::new();
+    for sh in 0..16 {
+        if let Ok(body) = std::fs::read_to_string(docs_path(root).with_extension(format!("d{sh}"))) {
+            for line in body.lines() {
+                if let Some(d) = parse_doc_line(line) {
+                    v.push(d);
+                }
+            }
+        }
+    }
+    if v.is_empty() {
+        return None;
+    }
+    Some(v)
+}
+
+/// 本次命令是否改动了**参与分词**的字段。
+///
+/// 默认 `true`（保守：宁可重建）。只有写命令能证明"改的全是不参与分词的字段"
+/// 时才调到 `false`，索引维护据此整块跳过——这是 O(1)，不靠事后比对全库。
+///
+/// 为什么必须由写命令来判定：`set TASK` 会把记录文件 mtime 刷新，任何基于
+/// mtime 的事后判断都会把它当成变更，白写 1.8MB；只有写命令自己知道
+/// "我刚改的是 TASK，不是正文"。
+pub static INDEX_CONTENT_CHANGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub fn note_meta_only() {
+    INDEX_CONTENT_CHANGED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn content_changed() -> bool {
+    INDEX_CONTENT_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 哪些字段参与分词（因此改它们必须重建索引）。
+///
+/// 与 `content_sig` 覆盖的集合必须一致，两处改动要同步。
+pub const INDEX_RELEVANT_FIELDS: &[&str] = &[
+    "TITLE",
+    "SUMMARY",
+    "KEYS",
+    "CONCEPTS",
+    "KIND",
+    "MATURITY",
+    "AUTHORITY",
+    "BODY",
+];
+
+pub fn is_index_relevant(field: &str) -> bool {
+    INDEX_RELEVANT_FIELDS.contains(&field)
+}
+
+/// 新旧索引在**参与分词的字段**上是否完全一致（决定要不要落盘）。
+///
+/// 只看 sig，不看 mtime：`set TASK` 会让 mtime 变但 sig 不变，
+/// 那种情况不该重写 1.8MB。
+pub fn same_content(a: &Index, b: &Index) -> bool {
+    if a.docs.len() != b.docs.len() {
+        return false;
+    }
+    let mut m: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for d in &a.docs {
+        // 旧索引没有 sig，无法判断，宁可重写。
+        if d.sig == 0 {
+            return false;
+        }
+        m.insert(d.path.as_str(), d.sig);
+    }
+    b.docs.iter().all(|d| m.get(d.path.as_str()) == Some(&d.sig))
+}
+
+pub fn content_sig(rec: &crate::rec::Record) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    rec.title().hash(&mut h);
+    rec.get("KEYS").hash(&mut h);
+    rec.get("CONCEPTS").hash(&mut h);
+    rec.get("SUMMARY").hash(&mut h);
+    rec.get("KIND").hash(&mut h);
+    rec.get("MATURITY").hash(&mut h);
+    rec.get("AUTHORITY").hash(&mut h);
+    rec.body.hash(&mut h);
+    h.finish()
 }
 
 impl Index {
@@ -228,6 +352,7 @@ impl Index {
                 maturity: f[4].to_string(),
                 authority: f[5].to_string(),
                 mtime: f[6].parse().unwrap_or(0),
+                sig: f.get(8).and_then(|x| x.parse().ok()).unwrap_or(0),
                 keys: f[7]
                     .split(',')
                     .filter(|s| !s.is_empty())
@@ -273,6 +398,7 @@ impl Index {
         Some(Index {
             docs,
             postings,
+            head_postings: HashMap::new(),
             avgdl,
             total_docs,
             total_bytes,
@@ -288,6 +414,7 @@ impl Index {
     pub fn build(root: &Path, libs: &[Lib]) -> Index {
         let mut docs: Vec<Doc> = Vec::new();
         let mut postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+        let mut head_postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         let mut total_bytes = 0u64;
 
         for &lib in libs {
@@ -324,6 +451,21 @@ impl Index {
                     postings.entry(t.clone()).or_default().push((id, *c));
                 }
 
+                // 标题 / KEYS / CONCEPTS 单独建一张小词表，供"词面优先"那一路用。
+                let mut hbuf = String::new();
+                hbuf.push_str(&rec.title());
+                hbuf.push(' ');
+                hbuf.push_str(&rec.get("KEYS"));
+                hbuf.push(' ');
+                hbuf.push_str(&rec.get("CONCEPTS"));
+                let mut htf: HashMap<String, u32> = HashMap::new();
+                for t in crate::semantic::tokenize(&hbuf) {
+                    *htf.entry(t).or_insert(0) += 1;
+                }
+                for (t, c) in &htf {
+                    head_postings.entry(t.clone()).or_default().push((id, *c));
+                }
+
                 let keys = split_list(&rec.get("KEYS"))
                     .into_iter()
                     .chain(split_list(&rec.get("CONCEPTS")))
@@ -338,6 +480,7 @@ impl Index {
                     maturity: rec.get("MATURITY").trim().to_string(),
                     authority: rec.get("AUTHORITY").trim().to_string(),
                     mtime,
+                    sig: content_sig(&rec),
                 });
             }
         }
@@ -362,6 +505,7 @@ impl Index {
             total_docs: if sig_n > 0 { sig_n } else { docs.len() },
             docs,
             postings,
+            head_postings,
             avgdl,
             total_bytes: sig,
             dirty: false,
@@ -381,7 +525,7 @@ impl Index {
         let mut docs_buf = String::new();
         for doc in &self.docs {
             docs_buf.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 doc.path,
                 doc.title.replace('\t', " "),
                 doc.len,
@@ -390,6 +534,7 @@ impl Index {
                 doc.authority,
                 doc.mtime,
                 doc.keys.join(","),
+                doc.sig,
             ));
         }
 
@@ -421,6 +566,23 @@ impl Index {
         }
         // 旧的单文件 postings 删掉，避免与新分桶混淆
         let _ = std::fs::remove_file(postings_path(root));
+
+        // 标题/KEYS 小词表同样分桶。它比 postings 小一个数量级（正文不参与），
+        // 所以读它的代价可忽略，但换来的是"标题命中"这个强信号。
+        let mut hbuckets: Vec<String> = vec![String::new(); BUCKETS];
+        for (term, list) in &self.head_postings {
+            let b = bucket_of(term, BUCKETS);
+            let s = list.iter().map(|(i, c)| format!("{i}:{c}")).collect::<Vec<_>>().join(",");
+            hbuckets[b].push_str(&format!("{term}\t{s}\n"));
+        }
+        for (b, body) in hbuckets.iter().enumerate() {
+            let p = head_path(root).with_extension(format!("h{b}"));
+            if body.is_empty() {
+                let _ = std::fs::remove_file(&p);
+            } else {
+                write_atomic(&p, body)?;
+            }
+        }
 
         // docs 分片写：查询时按需读分片，不必把全部记录头读进内存。
         //
@@ -454,6 +616,24 @@ impl Index {
             ),
         )?;
         Ok(())
+    }
+
+    /// 内容一致时只刷新 meta 里的对账数字，不重写任何分片。
+    ///
+    /// 用于"文件 mtime 变了、参与分词的字段没变"：分片内容与上次一模一样，
+    /// 重写它们纯属浪费闪存；但 meta 里的条数/字节签名必须更新，否则下次查询
+    /// 对账失败会走回退路径。
+    pub fn touch_meta(root: &Path, idx: &Index) {
+        let _ = write_atomic(
+            &meta_path(root),
+            &format!(
+                "{}\n{}\n{}\n{}\n",
+                SCHEMA,
+                idx.total_docs,
+                idx.total_bytes,
+                if idx.dirty { "dirty" } else { "clean" }
+            ),
+        );
     }
 
     /// 标记索引失效，但不清空。
@@ -596,6 +776,32 @@ impl Index {
         if dirty {
             return None;
         }
+        // 标题/KEYS 小词表：同样只读查询词所在的桶。
+        let mut head_postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+        let mut hloaded: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for t in crate::semantic::tokenize(q) {
+            let b = bucket_of(&t, BUCKETS);
+            if !hloaded.insert(b) {
+                continue;
+            }
+            let hp = head_path(root).with_extension(format!("h{b}"));
+            if let Ok(body) = std::fs::read_to_string(&hp) {
+                for line in body.lines() {
+                    if let Some((term, rest)) = line.split_once('\t') {
+                        let mut v = Vec::new();
+                        for pair in rest.split(',') {
+                            if let Some((i, c)) = pair.split_once(':') {
+                                if let (Ok(i), Ok(c)) = (i.parse::<u32>(), c.parse::<u32>()) {
+                                    v.push((i, c));
+                                }
+                            }
+                        }
+                        head_postings.insert(term.to_string(), v);
+                    }
+                }
+            }
+        }
+
         let (dn, db) = disk_snapshot(root);
         if dn != total_docs || db != total_bytes {
             return None;
@@ -630,28 +836,17 @@ impl Index {
             }
         }
 
-        // docs 元信息也要读进来（只读标题/KEYS，不碰正文）。
+        // 这里**不读 docs 分片**。
         //
-        // 初版这里给的是 `docs: Vec::new()`，理由是"浅加载省内存"。代价是
-        // 词面那一路在快路径里彻底失效——它只能在 BM25 命中集里挑，
-        // 于是"四路并行"实际退化成"BM25 一路说了算"。
-        // 实测：查询 `abook并发写入` 时 BM25 切词没命中，而记录标题里就写着
-        // "abook 并发写入实测"，词面本可兜住，却因为 docs 空而无从查起。
+        // 早期版本为了修"BM25 分词没命中、标题里明明有词"而把 16 个 docs 分片
+        // 全读进来做词面兜底，代价是每次召回都要解析全部行——O(n) 读盘，正好
+        // 抵消了索引的意义。
         //
-        // docs 分片里每行只有 path/title/len/keys/kind/maturity/authority，
-        // 2 万条约 3MB、读一次约 20ms，比"召回整体失效"便宜得多。
-        let mut docs: Vec<Doc> = Vec::with_capacity(total_docs);
-        let nsh = 16usize; // 与 save 的 SHARDS 一致
-        for sh in 0..nsh {
-            let p = docs_path(root).with_extension(format!("d{sh}"));
-            if let Ok(body) = std::fs::read_to_string(&p) {
-                for line in body.lines() {
-                    if let Some(d) = parse_doc_line(line) {
-                        docs.push(d);
-                    }
-                }
-            }
-        }
+        // 正确的做法是让词面也走 postings：`build` 已经把 title 与 KEYS 分词
+        // 写进 postings（见 build 里对 title/keys 的 push），而 postings 是
+        // 按词寻址的，查一个词只读一个桶。所以兜底能力不丢，全量读取可以去掉。
+        // 候选命中之后，再由 `shard()` 读取命中分片取真实标题与长度。
+        let docs: Vec<Doc> = Vec::new();
         let mut by_path: HashMap<String, u32> = HashMap::with_capacity(docs.len());
         for (i, d) in docs.iter().enumerate() {
             by_path.insert(d.path.clone(), i as u32);
@@ -665,6 +860,7 @@ impl Index {
         Some(Index {
             docs,
             postings,
+            head_postings,
             avgdl,
             total_docs,
             total_bytes,
@@ -742,6 +938,7 @@ fn parse_doc_line(line: &str) -> Option<Doc> {
         authority: f[5].to_string(),
         mtime: f[6].parse().unwrap_or(0),
         keys: f[7].split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
+        sig: f.get(8).and_then(|x| x.parse().ok()).unwrap_or(0),
     })
 }
 
