@@ -40,6 +40,7 @@ mod util;
 mod vault;
 mod selfupdate;
 mod out;
+mod guard;
 
 use util::*;
 
@@ -341,10 +342,15 @@ fn cmd_detect(a: &Args) -> R<i32> {
         .map(|d| d == root.as_path())
         .unwrap_or(false);
 
+    // 截断防护的可用性。放在 detect 里而不是文档里，是因为"这台机器上到底
+    // 生效没有"只有程序自己能回答；写在文档里的承诺无法被核对。
+    let guard = crate::guard::support();
+
     if a.has("json") {
         println!(
             "{{\"os\":{},\"arch\":{},\"target\":{},\"exe\":{},\"self\":{},\"root\":{},\
-\"initialized\":{},\"in_root\":{},\"ready\":{}}}",
+\"initialized\":{},\"in_root\":{},\"ready\":{},\
+\"guard\":{{\"platform\":{},\"functional\":{},\"detail\":{}}}}}",
             jstr(os),
             jstr(arch),
             jstr(target),
@@ -353,7 +359,10 @@ fn cmd_detect(a: &Args) -> R<i32> {
             jstr(&root.to_string_lossy()),
             initialized,
             in_root,
-            in_root && initialized
+            in_root && initialized,
+            jstr(guard.os),
+            guard.functional,
+            jstr(guard.detail)
         );
         return Ok(if in_root && initialized { 0 } else { 4 });
     }
@@ -363,6 +372,14 @@ fn cmd_detect(a: &Args) -> R<i32> {
     println!("已装路径    {self_str}");
     println!("库根        {}", root.display());
     println!("库状态      {}", if initialized { "已初始化" } else { "未初始化（没有 Global.md/Index.md）" });
+    println!(
+        "截断防护    {}",
+        if guard.functional {
+            format!("已启用（{}）", guard.detail)
+        } else {
+            format!("未启用：{}", guard.detail)
+        }
+    );
     if in_root && initialized {
         println!("结论        就绪（程序与库在同一目录，路径不依赖环境变量）");
         println!("调用        {}", root.join(exe).display());
@@ -717,6 +734,8 @@ fn cmd_install(a: &Args) -> R<i32> {
 }
 
 fn main() {
+    // 第一件事：装上截断防护。必须早于任何输出，否则第一行就已经被截走了。
+    crate::guard::install();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let parsed = Args::parse(&argv);
     // root is resolved the same way every command resolves it, so the write

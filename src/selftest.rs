@@ -2208,8 +2208,12 @@ if crate::util::Args::known("per-page") {
     // 删掉，提示词那边只留一句话指向一段不存在的文本——两边都读不到，
     // 而没有任何检查会报错。这是最坏的一种：不是分成两份，是彻底消失。
     {
-        const MIGRATED: &[&str] = &[
-            "BUILTIN_SPEC_OVER_ENV_SKILL_GATE",
+        // 通用形式：提示词 `DEFERRED_SYMBOL_GATE` 里按主题登记的每批门，
+        // 一旦提示词改成指针，工具侧就必须真有定义。以后往 spec 里迁门，
+        // 只需往下面这张表加一行，不必再写一遍检查逻辑。
+        const MIGRATED_BY_TOPIC: &[(&str, &[&str])] = &[
+            ("skill", &[
+                "BUILTIN_SPEC_OVER_ENV_SKILL_GATE",
             "SKILL_AUTHORING_NO_SCOPE_TALK",
             "SKILL_CREATION_DELIVERY_GATE",
             "SKILL_CREATION_TRIGGER_GATE",
@@ -2219,32 +2223,135 @@ if crate::util::Args::known("per-page") {
             "SKILL_PROGRESSIVE_DISCLOSURE_GATE",
             "SKILL_REUSE_DECISION_IS_NOT_REFUSAL",
             "SKILL_REUSE_QUERY_NOT_BLOCK",
-            "SKILL_SPLIT_DEFAULT_LANDING",
+                "SKILL_SPLIT_DEFAULT_LANDING",
+            ]),
+            ("integrity", &[
+                "ANTI_CONTEXT_BLOWUP_DESIGN",
+                "NO_PAGINATION_COMMANDS",
+                "TRUNCATION_COUNT_AS_UNREAD",
+                "TRUNCATION_HARM_CLASS",
+                "TRUNCATION_REVERSE_TEST",
+                "TRUNCATION_EXCUSE_DENY",
+            ]),
         ];
-        let skill_text = crate::spec_text::SPECS
-            .iter()
-            .find(|(k, _)| *k == "skill")
-            .map(|(_, v)| *v)
-            .unwrap_or("");
-        let mut missing: Vec<&str> = Vec::new();
-        for g in MIGRATED {
-            // 判据是"有定义"而非"出现过"：`NAME=` 才叫定义，正文里提到名字不算。
-            let needle = format!("`{}`=", g);
-            if !skill_text.contains(&needle) {
-                missing.push(g);
+        let mut missing: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for (topic, gates) in MIGRATED_BY_TOPIC {
+            let text = crate::spec_text::SPECS
+                .iter()
+                .find(|(k, _)| k == topic)
+                .map(|(_, v)| *v)
+                .unwrap_or("");
+            // 主题本身不存在，比个别门缺失更严重：整族都读不到了。
+            if text.is_empty() {
+                missing.push(format!("<主题 {} 不存在>", topic));
+                continue;
+            }
+            for g in *gates {
+                checked += 1;
+                // 判据是"有定义"而非"出现过"：`NAME=` 才叫定义，正文里提到名字不算。
+                let needle = format!("`{}`=", g);
+                if !text.contains(&needle) {
+                    missing.push(format!("{}@{}", g, topic));
+                }
             }
         }
         if missing.is_empty() {
             pass += 1;
             if verbose {
-                msgs.push(format!("PASS  迁移到 spec skill 的 {} 门正文都在", MIGRATED.len()));
+                msgs.push(format!(
+                    "PASS  {} 个迁到 spec 的门正文都在（{} 个主题）",
+                    checked,
+                    MIGRATED_BY_TOPIC.len()
+                ));
             }
         } else {
             fail += 1;
             msgs.push(format!(
-                "FAIL  提示词指针指向的 Skill 门在 spec skill 里没有正文: {:?}",
+                "FAIL  提示词指针指向的门在 spec 里没有正文: {:?}",
                 missing
             ));
+        }
+    }
+
+    // ---- 截断防护：接上截断管道时，完整输出必须真的绕开截断器
+    //
+    // 这条不能只测"support() 返回 true"——那只证明函数被调到了，不证明防护
+    // 在真实管道里有效。所以真起一个 shell 跑 `abook version | head -2`，
+    // 然后检查两件事：head 那边拿到 0 行、完整内容出现在 stderr。
+    //
+    // 为什么值得进自检：截断是本项目里最会"看起来成功"的失败——退出码 0、
+    // 输出少一截、没有任何错误信号。防护一旦在某次重构里失效，没有任何
+    // 别的检查会发现，而记忆库"读全才有用"的前提就塌了。
+    {
+        let sup = crate::guard::support();
+        let exe = crate::util::self_path().unwrap_or_default();
+        let exe_s = exe.to_string_lossy().to_string();
+
+        // Windows 没有 sh/head，构造不出管道；如实记为跳过，而不是算通过。
+        let probed = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v head")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some();
+
+        if !probed {
+            skip += 1;
+            msgs.push(format!(
+                "SKIP  截断防护实测：本平台没有 sh/head，无法构造截断管道（防护本身 functional={}）",
+                sup.functional
+            ));
+        } else {
+            // 正向：接 head -2。head 应拿到 0 行，完整输出改由 stderr 出去。
+            let piped = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("'{exe_s}' version | head -2"))
+                // 父进程若设了逃生门，子进程会跳过防护，测出来就是假绿。
+                .env_remove("ABOOK_NO_GUARD")
+                .output();
+            // 反向：不接管道。不该有防护提示，版本行应照常在 stdout。
+            let plain = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("'{exe_s}' version"))
+                .env_remove("ABOOK_NO_GUARD")
+                .output();
+
+            let mut problems: Vec<String> = Vec::new();
+            match (&piped, &plain) {
+                (Ok(p), Ok(q)) => {
+                    let head_lines = String::from_utf8_lossy(&p.stdout).lines().count();
+                    let err = String::from_utf8_lossy(&p.stderr);
+                    let plain_out = String::from_utf8_lossy(&q.stdout);
+                    let plain_err = String::from_utf8_lossy(&q.stderr);
+                    if head_lines != 0 {
+                        problems.push(format!("head 仍拿到 {head_lines} 行（应 0 行）"));
+                    }
+                    if !err.contains("截断防护已生效") {
+                        problems.push("stderr 没有防护生效提示".into());
+                    }
+                    if !err.contains("abook ") {
+                        problems.push("完整结果没有从 stderr 出去".into());
+                    }
+                    if !plain_out.contains("abook ") {
+                        problems.push("不接管道时版本行没在 stdout".into());
+                    }
+                    if plain_err.contains("截断防护") {
+                        problems.push("不接管道时误触发防护".into());
+                    }
+                }
+                _ => problems.push("无法启动子进程构造管道".into()),
+            }
+            if problems.is_empty() {
+                pass += 1;
+                if verbose {
+                    msgs.push("PASS  截断防护：| head 拿到 0 行、完整结果改由 stderr 出去、不接管道时不误触发".into());
+                }
+            } else {
+                fail += 1;
+                msgs.push(format!("FAIL  截断防护无效: {}", problems.join("；")));
+            }
         }
     }
 

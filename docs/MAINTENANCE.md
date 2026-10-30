@@ -269,6 +269,92 @@ AI 读记录  →  AI 思考几分钟  →  AI 发出写入命令
 `--if-version` 缺省不校验（保持既有脚本兼容）。这是有意的取舍：强制会让所有
 现存调用失败，而它们本来也没有版本意识。
 
+## 三点五、截断防护（`src/guard.rs` + `src/guard/`）
+
+这件事的存在理由，是一类特殊的失败：**违反后看起来像成功**。
+`abook list | head -3` 原本退出码 0、输出 3 行、没有任何错误信号，而完整输出
+是 201 行——198 行静默消失，读的人无法察觉自己读的是残卷。
+
+所以这里不做"要求别截断"，而是让截断**不生效**：检测到 stdout 被截断程序接走，
+就把 fd 1 改接 stderr。截断器只读它那个 fd，读到 EOF 就走；完整内容经由
+stderr 抵达调用方。
+
+### 只有三处需要看：识别 / 找持有者 / 改道
+
+| 平台 | 识别 stdout 是管道 | 找持有者 | 改道 |
+|---|---|---|---|
+| Linux / Android | `/proc/self/fd/1` 是 `pipe:[N]` | 扫 `/proc/*/fd` 找持同一管道者 | `dup2(2,1)` |
+| macOS | `proc_pidfdinfo(self, 1, PROC_PIDFDPIPEINFO)` | `proc_listpids` + `proc_pidfdinfo` 比对 `pipe_handle`/`pipe_peer_handle` | `dup2(2,1)` |
+| Windows | `GetFileType(GetStdHandle(-11))==FILE_TYPE_PIPE` | `NtQuerySystemInformation` 全表 + `CompareObjectHandles` | `SetStdHandle(-11, stderr)` |
+| 其他 | 占位实现，`functional:false` | — | — |
+
+公共逻辑（程序名清单、basename、`.exe` 剥离、多合一程序识别）在 `guard.rs`，
+三平台共用；`guard/{procfs,macos,windows,none}.rs` 只实现上面三项。
+
+### 五个容易改坏的地方
+
+**一、`install()` 必须是 `main` 的第一行。** Rust 的 stdout 在首次使用时抓一次
+句柄，之后不再问内核。晚于任何一次输出，前几行就已经被截走了。
+
+**二、判定不能用命令行猜，要看 fd 归属。** 曾想用"父进程命令行里有没有 `head`"
+做快速闸门，这是错的：`abook list | head -3` 里 `head` 是**兄弟**进程，父进程
+命令行只是整段 `bash -c "…"`；含 `head` 不代表真在截断（脚本里提一句也算），
+不含也不代表没截断（`| xargs head`）。唯一可靠判据是"谁持有我这个管道的读端"。
+
+**三、链式管道必须往上追。** `abook list | grep x | head -3` 里我们管道的读端
+在 `grep` 手里。只看第一跳会放过——实测 54 条只剩 3 条，且因为有过滤器作掩护，
+比直接 `| head` 更隐蔽。`MAX_HOPS = 4` 跳，遇到 socket/文件自然终止。
+
+**四、`2>&1 | head` 是改不了的。** 那时 stderr 与 stdout 是同一管道，改道等于把
+内容倒回截断器。这种情况只报警告、不改道，并明确说"完整结果已被丢弃"——不装作
+成功。`stderr_is_stdout()` 读不到时**保守返回 true**：宁可只警告，也不要在不确定
+时乱改道。
+
+**五、`ABOOK_NO_GUARD` 是逃生门，自检里要 `env_remove` 它。** 父进程若设了它，
+子进程会跳过防护，那条自检就变成假绿。
+
+### 跨平台代码要在本机能过检查
+
+`#[cfg(target_os = "macos")]` 排掉的模块在 Linux 上**根本不参与编译**，于是
+macOS/Windows 的代码从写完到 CI 出结果之间一次都没被编译器看过。两个 feature
+用来在本机强制走一遍：
+
+```sh
+cargo check --features guard-force-macos   --target-dir ~/.rustpkg/abcheck
+cargo check --features guard-force-windows --target-dir ~/.rustpkg/abcheck
+```
+
+cfg 条件是「`target_os` 真值 or feature」，并互相排斥，保证只有一个 `imp`
+被定义。
+
+**但类型检查通过 ≠ 符号能解析。** `NtQuerySystemInformation` 在 ntdll.dll、
+`CompareObjectHandles` 在 kernel32，必须显式 `#[link(name = "ntdll")]` /
+`#[link(name = "kernel32")]`，否则本机 check 通过、CI 链接阶段报 undefined
+symbol。macOS 反过来不能写 `#[link(name = "libproc")]`——系统里没有这个独立
+dylib，libproc 声明在 `<libproc.h>`、实现在 libSystem，而 libSystem 是默认链接的。
+
+**Windows 不做链式追踪**（拿不到"某进程的 stdout 是哪个管道"），只拦直接写在
+管道后面的那一个截断程序。这是如实记录的能力差异，不是遗漏。
+
+### 自检怎么验的（第 153 项）
+
+不能只断言 `support().functional == true`——那只证明函数被调到了。实际起
+`sh -c 'abook version | head -2'`，查四件事：
+
+1. `head` 拿到 0 行
+2. stderr 含"防护已生效"
+3. stderr 含真实内容
+4. 不接管道时 stdout 有版本行，且**不**误触发防护
+
+反向验证过：把 `find_truncator` 改成恒返回 `None`，该项立刻报
+`FAIL 截断防护无效: head 仍拿到 1 行（应 0 行）`。
+
+### 性能
+
+常态调用有两次快速闸门，都落在噪声里：stdout 不是管道时一次 `readlink`/
+`GetFileType` 就返回；是管道才进入扫描（本机 8 进程约 1.1 ms，对 `list` 的
+210 ms 无感）。实测 `version` 接与不接防护无可测差异。
+
 ## 四、自检
 
 ```sh

@@ -7,6 +7,16 @@ description = "AgentsBook memory book CLI: single-binary, zero-dependency memory
 license = "MIT"
 repository = "https://github.com/Sharl210/abook"
 
+# 类型检查用：让 macOS / Windows 的截断防护实现能在本机（Linux）过一遍
+# `cargo check`。平时不开，只在验证跨平台代码时显式启用。
+#
+# 为什么需要：`#[cfg(target_os = "macos")]` 排掉的模块在 Linux 上根本不会被
+# 编译，语法错、类型错全都要等到 CI 那一轮才第一次暴露。开这个 feature 能在
+# 改完当场知道对错，不必赌 CI。
+[features]
+guard-force-macos = []
+guard-force-windows = []
+
 [[bin]]
 name = "abook"
 path = "src/main.rs"

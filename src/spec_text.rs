@@ -156,6 +156,15 @@ pub const SPECS: &[(&str, &str)] = &[
 `GATE_OSCILLATION_GATE`=里程碑后累计5个STOP且>=2个signature->`GATE_PING_PONG`并审门循环/冲突/前置;若严格死锁且未仲裁,可调用`CHIEF_ARBITRATION_GATE`一次,只有合法单动作waiver暂缓,否则立即`TERMINAL_BLOCK`.`STOP_DELIVERY`始终未交付;`STOP_TASK_ANSWER`仅按PRE_STOP_DELIVERY_COMPLETION_GATE进入USER_INPUT_REQUIRED或FIXED_TERMINAL;`STOP_NEXT_ACTION`终端禁关键动作.
 `GATE_ESCALATION_PRECEDENCE`=精确终端优先;原目标/记忆主权/破坏/权限边界不放宽.`GATE_REENTRY_GATE`=仅解除条件/门PASS所需证据/用户取消/取代或决定性环境变化后从唯一重入动作恢复;新轮/gate重载/清计数不算解除.`GATE_FAILURE_ESCALATION_ASSERT`=所有`STOP_*`前后查ledger/预算,并复核Owner规则;缺ledger/越预算=`FRAMEWORK_EXECUTION_GUARD` FAIL.
 "#),
+    ("integrity", r#"
+`ABOOK_OUTPUT_INTEGRITY_GATE`=abook 的原生命令输出是**证据本体**,不是可裁剪的展示文本:禁对它的输出施加任何截断——`|head`/`|tail`/`|head -n N`/`|tail -n N`/`|cut`/`|sed -n`/`|awk 'NR<=N'`/`truncate`/`|dd`/脚本侧`[:N]`切片/外部`limit=`裁剪,以及"只看前几行就下结论",一律禁.
+`ANTI_CONTEXT_BLOWUP_DESIGN`=abook 已把"不炸上下文又不丢信息"做进工具内部,因此外部截断不是省,是把设计好的完整结果砍成残缺证据:列表类命令(`list`/`search`/`recall`/`index`/`grep`/`find`/`log`/`history`/`get`/`cat`/`atlas`/`branch`/`map`/`commands`/`describe`/`export`/`fix`/`identity`/`index-search`/`diff`)统一`--page`/`--per-page`/`--offset`分页,默认每页200条;分页响应自带`total`与`pages`,直接告知总数与剩余页数;`--json`给结构化全量便于程序化取字段;`budget`在读正文前预估代价;`recall --level 1..5`由字面到深度逐级放大;`index --limit`控制平面体积;写入报告的索引分片自动折叠成一句;`--include-promoted`用于显式扩量.
+`NO_PAGINATION_COMMANDS`=汇总类与单主题类命令本身无篇幅参数(`selftest`/`spec`/`state`/`refs`/`paths`/`audit`/`vault`/`attach`/`num`/`path`/`lint`/`doctor`/`reconcile`/`skill`等),其输出按职责已收敛(实测最大spec主题约10KB),真嫌大时的合规做法是**收窄请求**(限定主题、加过滤参数、改`--json`取结构化)或**把完整输出重定向到文件再用分段读取**,而不是管道截断——后者读的是残卷,前者读的是完整数据的连续切片.
+`TRUNCATION_COUNT_AS_UNREAD`=被截断读到的内容**按未读论**:不得据其下结论、不得据此判PASS、不得据此报库存真值或一致性,须重取完整输出.
+`TRUNCATION_HARM_CLASS`=四类信息最容易被切坏,凡涉及必须完整:①字段行被切到下一行而读成"缺失";②`state`的"一致性"栏被切掉后半,让"通过"与"有差异"看起来一样;③错误信息被切掉只剩退出码,丢掉`error.tag`;④多行结果被压成一行,看不出真实条数.
+`TRUNCATION_REVERSE_TEST`=可观察判据:同一命令的完整口径与截断口径在**条数/字段数/是否带省略提示**上有差异,而结论依赖该差异→已违规.
+`TRUNCATION_EXCUSE_DENY`=禁以"太长""省token""只看关键几行""差不多够了"为由;上下文真有压力时改口径(`--limit`更小、改`--json`、分页、单条`show`),不改真值.
+"#),
     ("ui", r#"
 `UI_PRESENTATION_TRIGGER`=目标包含页面、应用界面、组件、原型或屏幕交互.`UI_SKILL_DISCOVERY_GATE`=首次设计/实现/渲染前只读已暴露Skill元数据,匹配则应用;不可用不降低目标.`UI_PRESENTATION_DELIVERY_GATE`=按用户视觉目标、信息层级、交互状态和已获得的渲染/测试证据交付;无实际证据禁编造视觉结论,成品禁泄露开发信息.
 `COMPOSITE_DOCUMENT_PARSE_TRIGGER`=任务要求理解、提取、总结、比较、翻译或审计含页面、图片、附件、嵌入对象、归档或媒体的复合文档.`DOCUMENT_MUST_BIND_VISUAL_GATE`=文字、图片、图表、截图、附件和媒体须放回原上下文共同理解,禁图文割裂或只读文字.`DOCUMENT_OUTPUT_PROVENANCE_GATE`=每项派生事实/判断绑定可定位来源,未知标UNKNOWN.`DOCUMENT_RECURSIVE_PARSE_COMPLETENESS_GATE`=所有影响结论的对象均已解析,明确不需或有证阻塞,并回填原上下文.`MULTIMODAL_DOCUMENT_PARSE_COMPLETENESS_GATE`=图文上下文、来源与阻塞披露共同PASS.
@@ -176,5 +185,6 @@ pub const SUMMARIES: &[(&str, &str)] = &[
     ("attach", "附件域规范：目录规则、清单回写、两步编辑协议、漂移检测、复制语义、旧库兼容"),
     ("vault", "凭据保险箱规范：范围、访问操作、身份索引预读、引用语义、懒补齐、入箱授权、用途字段"),
     ("stopbudget", "停止预算规范：失败签名、账本、计数规则、三级退化预算、振荡检测、重入条件"),
+    ("integrity", "输出完整性规范：命令输出是证据本体，禁一切截断管道、截断按未读论、四类易切坏信息、反向判据、不分页命令的合规出路"),
     ("ui", "UI 与复合文档规范：触发、Skill 发现、交付门、图文绑定、来源可溯、递归解析完备"),
 ];
