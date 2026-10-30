@@ -41,7 +41,7 @@
 //! 重建复用同一把 `.abook.lock`，不另起一把——多一把锁就多一种死锁可能，
 //! 而重建实测 121ms，不值得。
 
-use crate::rec::{load_lib, Lib};
+use crate::rec::{load_lib, Lib, Record};
 use crate::util::*;
 use crate::util::EE;
 use std::collections::HashMap;
@@ -427,82 +427,137 @@ impl Index {
     ///
     /// 写入侧的增量维护是另一条路（见 `append_doc`），不要因为这条慢就以为
     /// 每次写都要走它。
+    /// 单条记录分词，返回 (Doc, 正文词表, 头部词表, 文件字节数)。
+    ///
+    /// 抽出来是为了并行：`build` 里每条记录互不依赖，独占一个函数才能
+    /// 分给不同线程。id 由调用方给，因为倒排里的 doc_id 必须是全局序号。
+    fn one(root: &Path, rec: &Record, id: u32) -> (Doc, Vec<(String, u32)>, Vec<(String, u32)>, u64) {
+        let bytes = std::fs::metadata(&rec.path).map(|m| m.len()).unwrap_or(0);
+        let mtime = std::fs::metadata(&rec.path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // 正文 + 标题 + KEYS 一起分词。标题与 KEYS 重复计入是有意的：
+        // 它们比正文更能代表"这条讲什么"，多算几次等于加权。
+        let mut buf = String::new();
+        buf.push_str(&rec.title());
+        buf.push(' ');
+        buf.push_str(&rec.get("KEYS"));
+        buf.push(' ');
+        buf.push_str(&rec.get("CONCEPTS"));
+        buf.push(' ');
+        buf.push_str(&rec.get("SUMMARY"));
+        buf.push(' ');
+        buf.push_str(&rec.body);
+
+        let toks = crate::semantic::tokenize(&buf);
+        let mut tf: HashMap<String, u32> = HashMap::new();
+        for t in &toks {
+            *tf.entry(t.clone()).or_insert(0) += 1;
+        }
+
+        // 标题 / KEYS / CONCEPTS 单独建一张小词表，供"词面优先"那一路用。
+        let mut hbuf = String::new();
+        hbuf.push_str(&rec.title());
+        hbuf.push(' ');
+        hbuf.push_str(&rec.get("KEYS"));
+        hbuf.push(' ');
+        hbuf.push_str(&rec.get("CONCEPTS"));
+        let mut htf: HashMap<String, u32> = HashMap::new();
+        for t in crate::semantic::tokenize(&hbuf) {
+            *htf.entry(t).or_insert(0) += 1;
+        }
+
+        let keys = split_list(&rec.get("KEYS"))
+            .into_iter()
+            .chain(split_list(&rec.get("CONCEPTS")))
+            .collect::<Vec<_>>();
+
+        let doc = Doc {
+            path: rel(root, &rec.path),
+            title: rec.title(),
+            len: toks.len() as u32,
+            keys,
+            kind: rec.get("KIND").trim().to_string(),
+            maturity: rec.get("MATURITY").trim().to_string(),
+            authority: rec.get("AUTHORITY").trim().to_string(),
+            mtime,
+            sig: content_sig(&rec),
+        };
+        // 词表带成 Vec 而不是 HashMap：跨线程搬 HashMap 要合并，Vec 一次折完。
+        let terms: Vec<(String, u32)> = tf.into_iter().collect();
+        let hterms: Vec<(String, u32)> = htf.into_iter().collect();
+        (doc, terms, hterms, bytes)
+    }
+
     pub fn build(root: &Path, libs: &[Lib]) -> Index {
-        let mut docs: Vec<Doc> = Vec::new();
+        let mut all: Vec<Record> = Vec::new();
+        for &lib in libs {
+            for rec in load_lib(root, lib) {
+                all.push(rec);
+            }
+        }
+
+        // 并行分词。实测这段占单次写入的 85%：897 条串行 302~372ms，
+        // 而 save 只要 45ms。循环体里每条记录只读自己的文件、自己算 tf，
+        // 没有任何共享状态，串行做等于让其余核全闲着。
+        //
+        // 上限压到 8：手机大小核混布，切太碎会被调度拖慢。
+        let nthreads = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(4)
+            .clamp(1, 8);
+        let chunk = all.len().div_ceil(nthreads).max(1);
+
+        type Part = (Vec<Doc>, Vec<(String, u32, u32)>, Vec<(String, u32, u32)>, u64);
+        let parts: Vec<Part> = std::thread::scope(|sc| {
+            let handles: Vec<_> = all
+                .chunks(chunk)
+                .enumerate()
+                .map(|(ci, sl)| {
+                    let base = (ci * chunk) as u32;
+                    sc.spawn(move || {
+                        let mut docs = Vec::with_capacity(sl.len());
+                        let mut terms = Vec::new();
+                        let mut hterms = Vec::new();
+                        let mut bytes = 0u64;
+                        for (li, rec) in sl.iter().enumerate() {
+                            let (d, t, h, b) = Self::one(root, rec, base + li as u32);
+                            docs.push(d);
+                            for (w, c) in t {
+                                terms.push((w, base + li as u32, c));
+                            }
+                            for (w, c) in h {
+                                hterms.push((w, base + li as u32, c));
+                            }
+                            bytes += b;
+                        }
+                        (docs, terms, hterms, bytes)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut docs: Vec<Doc> = Vec::with_capacity(all.len());
         let mut postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         let mut head_postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         let mut total_bytes = 0u64;
-
-        for &lib in libs {
-            for rec in load_lib(root, lib) {
-                let rel_path = rel(root, &rec.path);
-                let mtime = std::fs::metadata(&rec.path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                total_bytes += std::fs::metadata(&rec.path).map(|m| m.len()).unwrap_or(0);
-
-                // 正文 + 标题 + KEYS 一起分词。标题与 KEYS 重复计入是有意的：
-                // 它们比正文更能代表"这条讲什么"，多算几次等于加权。
-                let mut buf = String::new();
-                buf.push_str(&rec.title());
-                buf.push(' ');
-                buf.push_str(&rec.get("KEYS"));
-                buf.push(' ');
-                buf.push_str(&rec.get("CONCEPTS"));
-                buf.push(' ');
-                buf.push_str(&rec.get("SUMMARY"));
-                buf.push(' ');
-                buf.push_str(&rec.body);
-
-                let toks = crate::semantic::tokenize(&buf);
-                let mut tf: HashMap<String, u32> = HashMap::new();
-                for t in &toks {
-                    *tf.entry(t.clone()).or_insert(0) += 1;
-                }
-                let id = docs.len() as u32;
-                for (t, c) in &tf {
-                    postings.entry(t.clone()).or_default().push((id, *c));
-                }
-
-                // 标题 / KEYS / CONCEPTS 单独建一张小词表，供"词面优先"那一路用。
-                let mut hbuf = String::new();
-                hbuf.push_str(&rec.title());
-                hbuf.push(' ');
-                hbuf.push_str(&rec.get("KEYS"));
-                hbuf.push(' ');
-                hbuf.push_str(&rec.get("CONCEPTS"));
-                let mut htf: HashMap<String, u32> = HashMap::new();
-                for t in crate::semantic::tokenize(&hbuf) {
-                    *htf.entry(t).or_insert(0) += 1;
-                }
-                for (t, c) in &htf {
-                    head_postings.entry(t.clone()).or_default().push((id, *c));
-                }
-
-                let keys = split_list(&rec.get("KEYS"))
-                    .into_iter()
-                    .chain(split_list(&rec.get("CONCEPTS")))
-                    .collect::<Vec<_>>();
-
-                docs.push(Doc {
-                    path: rel_path,
-                    title: rec.title(),
-                    len: toks.len() as u32,
-                    keys,
-                    kind: rec.get("KIND").trim().to_string(),
-                    maturity: rec.get("MATURITY").trim().to_string(),
-                    authority: rec.get("AUTHORITY").trim().to_string(),
-                    mtime,
-                    sig: content_sig(&rec),
-                });
+        for (d, terms, hterms, b) in parts {
+            docs.extend(d);
+            total_bytes += b;
+            for (w, i, c) in terms {
+                postings.entry(w).or_default().push((i, c));
+            }
+            for (w, i, c) in hterms {
+                head_postings.entry(w).or_default().push((i, c));
             }
         }
 
         let total_len: u64 = docs.iter().map(|d| d.len as u64).sum();
-        let avgdl = if docs.is_empty() {
+        let avgdl = if docs.is_empty() || total_len == 0 {
             1.0
         } else {
             total_len as f64 / docs.len() as f64
@@ -528,6 +583,7 @@ impl Index {
             by_path,
         }
     }
+
 
     /// 写回磁盘。调用方负责保证这在库级锁内。
     ///

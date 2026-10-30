@@ -900,7 +900,10 @@ fn main() {
         // 它省掉的是"把某字段设成它原本的值"这种罕见情况，代价却是**每次内容
         // 变更都要额外解析 1.8MB postings**：实测 600ms → 5077ms。
         // 为罕见收益付每次的固定成本，是笔亏账，整块去掉。
+        let _t0 = std::time::Instant::now();
         let idx = crate::idx::Index::build(&index_root, &libs);
+        let _tb = _t0.elapsed().as_millis();
+        let _t1 = std::time::Instant::now();
         if let Err(e) = idx.save(&index_root) {
             // 索引写失败不影响本次写入的结论：标脏，下次重建。
             // 但**要让人看得见**——静默吞掉会让索引没生成变成无解的谜。
@@ -908,6 +911,9 @@ fn main() {
                 eprintln!("[IDX] save 失败: {e:?}");
             }
             crate::idx::Index::mark_dirty(&index_root);
+        }
+        if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+            eprintln!("[IDX] build={_tb}ms save={}ms docs={}", _t1.elapsed().as_millis(), idx.docs.len());
         }
         }
     }
