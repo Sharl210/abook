@@ -109,7 +109,7 @@ fn help_text() -> String {
   cat <记录>                只输出正文
   diff <记录A> <记录B>      字段级差异
   history [关键词]          变更记录，支持 --page
-  staging [关键词]          待决暂存件；--show <名> 看全文
+  staging [子命令]          待决暂存件；--show <名> 看全文
   staging resolve <名> --decision 结论 [--ref 记录ID]
                             结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
@@ -147,7 +147,8 @@ fn help_text() -> String {
   check [记录|-]            检查一条（或 stdin），只报不改
   refs [--fix]              全库检查引用是否指得着；--fix 只修能唯一推导的
   related <ID>              从一条记录走到相邻记录（显式引用/共享键/共享硬标识符）
-  num --of <号>             短编号（C1/N2）与完整编号互查
+  num [记录]                短编号（C1/N2）与完整编号互查
+  num --of <号>             反查：短号 -> 完整编号
   repair [记录] [--apply]   按校验器自动修复，默认预演
   normalize [lib] [--dry-run]   旧命名升级为新方案
   refresh [lib]             按磁盘重建地图并推进收录时刻
@@ -1108,7 +1109,7 @@ pub fn needs_capture(c: &str) -> bool {
         "help"
             | "write" | "add" | "update" | "edit" | "delete" | "rm" | "restore"
             | "promote" | "demote" | "set" | "unset" | "append" | "prepend"
-            | "patch" | "rename" | "move" | "copy" | "cp" | "merge" | "split"
+            | "patch" | "rename" | "move" | "mv" | "copy" | "cp" | "merge" | "split"
             | "repair" | "fix" | "normalize" | "recount" | "vault" | "init"
             | "commit" | "refresh" | "sync" | "leftover"
     )
@@ -1178,6 +1179,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("patch", cmd_edit::cmd_patch),
         ("rename", cmd_edit::cmd_rename),
         ("move", cmd_edit::cmd_move),
+        ("mv", cmd_edit::cmd_move),
         ("copy", cmd_edit::cmd_copy),
         ("cp", cmd_edit::cmd_copy),
         ("demote", cmd_edit::cmd_demote),

@@ -191,6 +191,31 @@ const FUZZY_CASES: &[(&str, &str, usize, bool)] = &[
     ("abc", "xyz", 1, false),
 ];
 
+/// 找"当前所在的仓库根"，用来跑 `tools/` 里那几个只读检查脚本。
+///
+/// 原先三处都直接用 `env!("CARGO_MANIFEST_DIR")`。那是**编译期**常量：
+/// 本地编译时它正好等于仓库路径，所以一切看着正常；而 CI 编出来的二进制
+/// 里它写的是 runner 上的路径，到手机上根本不存在。结果发布版在仓库里跑
+/// 自检时三项检查全部 SKIP，还照样报"0 失败"——一个永远够不到的仓库被
+/// 当成了"环境不支持"。CI 全绿而产物其实是残的，就是这么来的。
+///
+/// 正确的语义是"审计我脚下的这个仓库"：先看当前工作目录，再看编译期路径。
+/// 开发者在自己的 checkout 里跑发布版，验的就是这个 checkout 的脚本。
+/// 只有两处都没有（真正的终端用户机器）才 SKIP，那才是合理的跳过。
+fn repo_root() -> Option<std::path::PathBuf> {
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        cands.push(cwd);
+    }
+    cands.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    for c in cands {
+        if c.join("src").is_dir() && c.join("tools").is_dir() {
+            return Some(c);
+        }
+    }
+    None
+}
+
 pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<String>) {
     let mut pass = 0usize;
     let mut fail = 0usize;
@@ -2095,7 +2120,8 @@ if crate::util::Args::known("per-page") {
     // built but Rust never mapped, and a compiler name that Configure and
     // Verify each spelled differently.
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root_buf = repo_root().unwrap_or_default();
+        let root = root_buf.as_path();
         let script = root.join("tools").join("check_workflow.py");
         // A released binary runs on a machine that has no checkout, so
         // CARGO_MANIFEST_DIR points nowhere. That is not a defect in the tool:
@@ -2123,7 +2149,8 @@ if crate::util::Args::known("per-page") {
     // runs each line in a fresh copy (a preceding `move` would otherwise make
     // the next `delete` report NOT_FOUND and look like a tool bug).
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root_buf = repo_root().unwrap_or_default();
+        let root = root_buf.as_path();
         let script = root.join("tools").join("check_docs.py");
         if !script.exists() {
             skip += 1;
@@ -2138,6 +2165,39 @@ if crate::util::Args::known("per-page") {
         } else {
             fail += 1;
             msgs.push("FAIL  操作文档里有命令跑不通（python3 tools/check_docs.py 看详情）".to_string());
+        }
+    }
+
+    // ---- 契约类脚本：describe/params/nowrite
+    //
+    // 这三个脚本一直在 `tools/` 里，但**自检从来不调它们**。于是它们的
+    // 存在等于没有：改了 `describe` 的用法、往帮助里加了不存在的参数、
+    // 或者让只读命令偷偷写了文件，自检一律报绿。
+    //
+    // 实测发现过程：我故意把帮助里 `num` 的占位符写成 `[错占位]`，
+    // 自检仍报 "148 通过 / 0 失败"——那一刻才知道它压根没跑。
+    // 一个不跑的检查比没有检查更坏：它让人以为这一块有人看着。
+    for (script_name, label) in [
+        ("check_describe.py", "describe 与 help 双向一致"),
+        ("check_params.py", "帮助里每个参数解析器都接受"),
+        ("check_nowrite.py", "只读命令不写盘"),
+    ] {
+        let root_buf = repo_root().unwrap_or_default();
+        let root = root_buf.as_path();
+        let script = root.join("tools").join(script_name);
+        if !script.exists() {
+            skip += 1;
+            if verbose {
+                msgs.push(format!("SKIP  {label}（不在仓库内，无 tools/{script_name}）"));
+            }
+        } else if run_tool_script(&script, root, &[]) {
+            pass += 1;
+            if verbose {
+                msgs.push(format!("PASS  {label}"));
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!("FAIL  {label} 不成立（python3 tools/{script_name} 看详情）"));
         }
     }
 
@@ -2164,7 +2224,7 @@ if crate::util::Args::known("per-page") {
         }
         // Spellings that intentionally share another command's help entry.
         const ALIASES: &[&str] = &[
-            "cp", "ls", "rm", "find", "where", "add", "c", "n", "candidate",
+            "cp", "ls", "rm", "mv", "find", "where", "add", "c", "n", "candidate",
             "canonical", "self-install", "self-update", "index-search", "repair",
         ];
         let hidden: Vec<&str> = crate::known_commands()
@@ -2223,7 +2283,8 @@ if crate::util::Args::known("per-page") {
     // tree. It must be proven, not assumed -- and the proof has to run the real
     // ending branch, since relaxing `exit 1` to `exit 0` is exactly the bug.
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root_buf = repo_root().unwrap_or_default();
+        let root = root_buf.as_path();
         let script = root.join("tools").join("preflight.sh");
         if !script.exists() {
             skip += 1;
@@ -3573,11 +3634,44 @@ MATURITY=VERIFIED\nAUTHORITY=USER_EXPLICIT\nSUMMARY=摘要{i}\nKEYS=索引,损�
                         Err(e) => problems.push(format!("起不了子进程: {e}")),
                     }
                 }
+                // 第二种失效：整个 `.index/` 被删掉。
+                //
+                // 这和"缺一个分片"不是同一条代码路径：缺片时
+                // `load_shallow` 还能返回一个 `Some`，于是走"索引坏了"分支；
+                // 整个目录没了则返回 `None`，上面那段判定被整段跳过。
+                // 我第一版只修了前者，结果最常用的两种场景（第一次用、
+                // `rm -rf .index/` 之后）永远不重建——实测连跑三次
+                // 365/387/541ms 恒不下降。所以这条必须单独测。
+                if problems.is_empty() {
+                    let _ = std::fs::remove_dir_all(&idxdir);
+                    let r = std::process::Command::new(&exe)
+                        .arg("--root")
+                        .arg(&root_s)
+                        .arg("recall")
+                        .arg("索引")
+                        .output();
+                    match r {
+                        Ok(o) => {
+                            let so = String::from_utf8_lossy(&o.stdout).to_string();
+                            if !o.status.success() || so.trim().is_empty() {
+                                problems.push("删整个 .index 后召回无结果".into());
+                            }
+                        }
+                        Err(e) => problems.push(format!("删整个 .index 后起不了子进程: {e}")),
+                    }
+                    if !idxdir.join("meta").is_file() {
+                        problems.push("删掉整个 .index 后读路径没重建索引".into());
+                    }
+                }
+
                 let _ = std::fs::remove_dir_all(&tmp);
                 if problems.is_empty() {
                     pass += 1;
                     if verbose {
-                        msgs.push("PASS  索引缺片时回退且自愈重建，不 panic 不空结果".into());
+                        msgs.push(
+                            "PASS  索引缺片/整目录被删时回退且自愈重建，不 panic 不空结果"
+                                .into(),
+                        );
                     }
                 } else {
                     fail += 1;
@@ -3654,31 +3748,39 @@ MATURITY=VERIFIED\nAUTHORITY=USER_EXPLICIT\nSUMMARY=摘要{i}\nKEYS=索引,损�
     (pass, fail, skip, msgs)
 }
 
+/// 跑 `tools/` 里的 python 检查脚本，并把**正在运行的这份二进制**告诉它。
+///
+/// 脚本里原先写死 `target/release/abook`。于是自检拿仓库里那份可能过期的
+/// 二进制去核对，而不是核对自己——源码改了、编译了、部署了，脚本仍然对着
+/// 旧的报红（指错人），或者对着旧的报绿（假绿，更坏）。检查的语义必须是
+/// "验我脚下这一份"，所以这里把自身路径显式传下去。
+fn run_tool_script(script: &std::path::Path, root: &std::path::Path, extra: &[&str]) -> bool {
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(script).current_dir(root);
+    if let Some(me) = self_path() {
+        cmd.env("ABOOK_BIN", me);
+    }
+    for a in extra {
+        cmd.arg(a);
+    }
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
 fn ok_workflow(script: &std::path::Path, root: &std::path::Path) -> bool {
-    std::process::Command::new("python3")
-        .arg(script)
-        .current_dir(root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    run_tool_script(script, root, &[])
 }
 
 fn ok_docs(script: &std::path::Path, root: &std::path::Path) -> bool {
-    std::process::Command::new("python3")
-        .arg(script)
-        .current_dir(root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    run_tool_script(script, root, &[])
 }
 
 fn ok_preflight(script: &std::path::Path) -> bool {
-    std::process::Command::new("sh")
-        .arg(script)
-        .arg("--verify-exit")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg(script).arg("--verify-exit");
+    if let Some(me) = self_path() {
+        cmd.env("ABOOK_BIN", me);
+    }
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn self_path() -> Option<std::path::PathBuf> {
