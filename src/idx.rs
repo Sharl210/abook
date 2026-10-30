@@ -52,7 +52,7 @@ pub const DIR: &str = ".index";
 
 /// 索引格式版本。版本不符直接重建，不做兼容——
 /// 兼容旧格式的代码比重新生成一次贵得多。
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// 一条记录在索引里的头部信息。
 ///
@@ -90,6 +90,16 @@ pub struct Doc {
     ///
     /// 0 表示旧索引没有这个字段，一律按"内容未知"处理，走全量重建。
     pub sig: u64,
+    /// 这条记录是否已经晋升进正式库。
+    ///
+    /// 必须在索引里存：`recall` 有快慢两条路径，慢路径在 `query.rs` 里
+    /// 按 `PROMOTED_TO` 过滤掉已晋升的候选，快路径只从 postings 拿 id、
+    /// 拿不到原始字段，于是漏了这道过滤——症状极隐蔽：同一条内容出现两次，
+    /// 旧的候选副本排在前面，正式的排在后面，两边都不报错。
+    ///
+    /// 晋升是"已经有更好的正式版了"，所以默认视图里不该再出现，
+    /// 但它留在盘上是为了溯源（`--include-promoted` 仍可查）。
+    pub promoted: bool,
 }
 
 impl Doc {
@@ -339,26 +349,11 @@ impl Index {
             if line.trim().is_empty() {
                 continue;
             }
-            // 行格式：path \t title \t len \t kind \t maturity \t authority \t mtime \t keys(逗号) \t terms(词:频,词:频)
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 8 {
-                return None;
-            }
-            docs.push(Doc {
-                path: f[0].to_string(),
-                title: f[1].to_string(),
-                len: f[2].parse().unwrap_or(0),
-                kind: f[3].to_string(),
-                maturity: f[4].to_string(),
-                authority: f[5].to_string(),
-                mtime: f[6].parse().unwrap_or(0),
-                sig: f.get(8).and_then(|x| x.parse().ok()).unwrap_or(0),
-                keys: f[7]
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect(),
-            });
+            // 行格式由 `parse_doc_line` 一处定义，这里不再抄一份。
+            // 坏行直接让整个索引作废（`?` 返回 None）→ 走重建。
+            // **不能**跳过坏行继续用：那会静默少几条记录，而"少几条"
+            // 在召回结果上和"这几条不相关"看不出区别。
+            docs.push(parse_doc_line(line)?);
         }
 
         // 读 64 个分桶，**不是**单文件。
@@ -486,6 +481,7 @@ impl Index {
             authority: rec.get("AUTHORITY").trim().to_string(),
             mtime,
             sig: content_sig(&rec),
+            promoted: rec.promotion.is_some() || !rec.get("PROMOTED_TO").trim().is_empty(),
         };
         // 词表带成 Vec 而不是 HashMap：跨线程搬 HashMap 要合并，Vec 一次折完。
         let terms: Vec<(String, u32)> = tf.into_iter().collect();
@@ -613,7 +609,7 @@ impl Index {
         let mut docs_buf = String::new();
         for doc in &self.docs {
             docs_buf.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 doc.path,
                 doc.title.replace('\t', " "),
                 doc.len,
@@ -623,6 +619,7 @@ impl Index {
                 doc.mtime,
                 doc.keys.join(","),
                 doc.sig,
+                if doc.promoted { 1 } else { 0 },
             ));
         }
 
@@ -1016,7 +1013,10 @@ fn parse_doc_line(line: &str) -> Option<Doc> {
         return None;
     }
     let f: Vec<&str> = line.split('\t').collect();
-    if f.len() < 8 {
+    // 列数不够就当坏行。**不能**把缺失列悄悄当成默认值：那会让
+    // "索引是上一版写的"退化成"所有记录都是未晋升"，正是这次要修的 bug。
+    // schema 号已一并升到 2，旧索引在 meta 处就被拒掉了。
+    if f.len() < 10 {
         return None;
     }
     Some(Doc {
@@ -1029,6 +1029,7 @@ fn parse_doc_line(line: &str) -> Option<Doc> {
         mtime: f[6].parse().unwrap_or(0),
         keys: f[7].split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
         sig: f.get(8).and_then(|x| x.parse().ok()).unwrap_or(0),
+        promoted: f[9] == "1",
     })
 }
 

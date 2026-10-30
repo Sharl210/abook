@@ -329,7 +329,7 @@ pub fn recall(
     // 而不是库里有多少条。这是常数级的来源。
     if let Some(disk) = crate::idx::Index::load_shallow(root, q) {
         if disk.total_docs > 0 {
-            return recall_via_index(root, q, &qs, &disk, limit, with_body);
+            return recall_via_index(root, q, &qs, &disk, limit, with_body, include_promoted);
         }
     }
 
@@ -839,6 +839,7 @@ fn recall_via_index(
     disk: &crate::idx::Index,
     limit: usize,
     with_body: bool,
+    include_promoted: bool,
 ) -> RecallResult {
     let mut res = RecallResult {
         query: q.to_string(),
@@ -903,6 +904,17 @@ fn recall_via_index(
         std::collections::HashMap::new();
     for sh in need.keys() {
         for (id, d) in disk.shard(root, *sh) {
+            // 已晋升的候选在默认视图里不再出现——它在正式库里有更好的版本。
+            //
+            // 这道过滤慢路径一直有（见上面 `pool` 构建处），快路径是另一套
+            // 实现，重写时漏了它。症状不报错：同一条内容出现两次，旧的候选
+            // 副本排第一、正式的排第三，看起来"结果挺相关"，实际是重复占位。
+            //
+            // 所以判定只写这一处（`Doc::promoted` 在索引里存好），
+            // 不要在两条路径里各判一次——那样迟早再分叉。
+            if !include_promoted && d.lib() == Lib::Candidate && d.promoted {
+                continue;
+            }
             docs_by_id.insert(id, d);
         }
     }
