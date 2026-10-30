@@ -73,23 +73,21 @@ mod imp;
 #[path = "guard/none.rs"]
 mod imp;
 
-/// 会削减读入内容、且可能被挂在 abook 输出后面的程序。
+/// 无条件视为截断的程序：它们的存在意义就是"只取一部分"。
 ///
-/// 判据是"读完就丢一部分"：`head`/`tail`/`sed`/`awk`/`cut`/`dd` 都在其列。
-/// `grep`/`sort`/`uniq`/`wc` 不在此列——它们过滤或统计，不截断。
-///
-/// 这份清单三平台共用：程序名是同一个概念，只有"怎么找到它"随平台不同。
-const TRUNCATORS: &[&str] = &[
-    "head", "tail", "sed", "awk", "gawk", "mawk", "nawk", "cut", "dd", "truncate", "more", "less",
-    "most", "pg", "bat", "batcat", "sponge",
-];
+/// `head -3` / `tail -3` / `head -n 5` 都是明确的截断，不需看参数。
+const ALWAYS: &[&str] = &["head", "tail"];
+
+/// 看参数才知道是不是截断的程序。这类既能截断也能做纯信息处理，
+/// 一刀切会误伤——见 `truncator_of` 里的说明。
+const SOMETIMES: &[&str] = &["sed", "awk", "gawk", "mawk", "nawk", "cut", "dd"];
+
+/// Windows 上的等价物。PowerShell 的 `Select-Object -First` 落在
+/// powershell.exe 自己身上，只能按整程序名匹配，看不到参数。
+const ALWAYS_WIN: &[&str] = &["more", "findstr"];
 
 /// busybox / toybox 这类多合一程序：真正的截断器是第二个名字。
 const MULTI_CALL: &[&str] = &["busybox", "toybox", "coreutils"];
-
-/// Windows 上等价的截断程序。PowerShell 的 `Select-Object -First` 落在
-/// powershell.exe 自己身上，只能按整程序名匹配，看不到参数。
-const TRUNCATORS_WIN: &[&str] = &["more", "findstr", "head"];
 
 fn basename_of(s: &str) -> &str {
     // 同时按 `/` 与 `\` 切：Windows 的可执行名用反斜杠。
@@ -110,18 +108,197 @@ fn in_list(name: &str, list: &[&str]) -> bool {
     list.iter().any(|t| t.eq_ignore_ascii_case(name))
 }
 
-/// 从一条 argv 判断它是不是截断程序；是就返回用于报告的程序名。
-fn truncator_of(argv: &[String]) -> Option<String> {
+/// `sed` 是否在截断。
+///
+/// 判据是**行号范围**，不是"用了 sed"：
+///
+/// | 写法 | 行为 | 判定 |
+/// |---|---|---|
+/// | `sed -n '1,3p'` | 只输出前 3 行 | 截断 |
+/// | `sed -n '1p'` / `'$p'` | 只输出 1 行 | 截断 |
+/// | `sed -n 's/.*src=\(.*\)/\1/p'` | 提取字段，行数不变 | 放行 |
+/// | `sed -n '/foo/p'` | 正则过滤，类似 grep | 放行 |
+/// | `sed 's/a/b/'` | 无 `-n`，全部行输出 | 放行 |
+/// | `sed -n '1,3p;5q'` | 带 `q` 提前退出 | 截断 |
+fn sed_truncates(argv: &[String]) -> bool {
+    // 必须有 `-n`：没有它 sed 默认打印每一行，不会减少内容。
+    let mut quiet = false;
+    let mut script = String::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "-n" || a == "--quiet" || a == "--silent" {
+            quiet = true;
+        } else if a == "-e" || a == "--expression" {
+            if let Some(v) = argv.get(i + 1) {
+                script.push_str(v);
+                script.push(';');
+            }
+            i += 1;
+        } else if a.starts_with("--") || (a.starts_with('-') && a.len() > 1) {
+            // 其他选项（-i / -E / -r / -f …）不影响此判定
+        } else if script.is_empty() {
+            script.push_str(a);
+        }
+        i += 1;
+    }
+    if !quiet {
+        return false;
+    }
+    // 含 `s` 替换命令的，输出的是改写后的整行，不是残卷。
+    let has_substitute = script.contains('s');
+    // 提前退出等同截断。
+    if script.split(';').any(|c| c.trim().ends_with('q')) {
+        return true;
+    }
+    // 行号范围打印：`1,3p` / `1p` / `$p` / `1,$p`
+    let mut num = String::new();
+    for part in script.split(|c| c == ';' || c == '\n') {
+        let t = part.trim();
+        num.clear();
+        let mut has_range = false;
+        for ch in t.chars() {
+            match ch {
+                '0'..='9' | '$' => {
+                    num.push(ch);
+                    has_range = true;
+                }
+                ',' => {
+                    if !num.is_empty() {
+                        num.push(',');
+                    }
+                }
+                'p' => {
+                    if has_range && !num.is_empty() && !has_substitute {
+                        return true;
+                    }
+                    break;
+                }
+                _ => break, // 遇到 `s`、`/` 等说明不是纯行号
+            }
+        }
+    }
+    false
+}
+
+/// `awk` 是否在截断：有 `exit` 或 `NR` 比较就是。`{print $1}` 只是选列，放行。
+fn awk_truncates(argv: &[String]) -> bool {
+    let mut prog = String::new();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "-F" || a == "-v" || a == "-f" {
+            i += 1; // 跳过该选项的值
+        } else if !a.starts_with('-') && prog.is_empty() {
+            prog.push_str(a);
+        }
+        i += 1;
+    }
+    if prog.is_empty() {
+        return false;
+    }
+    let p = prog.replace(' ', "");
+    if p.contains("exit") {
+        return true;
+    }
+    // NR<=10 / NR==5 / NR<3 都意味着"到点就停"
+    let has_nr = p.contains("NR");
+    let cmpHit = p.contains("<") || p.contains("==");
+    has_nr && cmpHit
+}
+
+/// `cut` 是否在截断：`-c` 按字符切会丢内容；`-f` 只选列，行数不变。
+fn cut_truncates(argv: &[String]) -> bool {
+    for a in argv.iter().skip(1) {
+        if a == "-c" || a == "--characters" || a.starts_with("-c") && !a.starts_with("-d") {
+            return true;
+        }
+        if a.starts_with("--characters=") {
+            return true;
+        }
+    }
+    false
+}
+
+/// `dd` 是否在截断：只有带 `count=` 才会提前停。
+fn dd_truncates(argv: &[String]) -> bool {
+    argv.iter().skip(1).any(|a| a.starts_with("count="))
+}
+
+/// 从一条 argv 判断它是不是**真的在截断**；是就返回用于报告的程序名。
+///
+/// ## 为什么必须看参数，而不是只看程序名
+///
+/// 第一版把 `sed`/`awk`/`cut` 一并当作截断器，结果 CI 的发布校验脚本被拦：
+///
+/// ```sh
+/// EXPECT=$(./target/release/abook version | sed -n 's/.*src=\([0-9a-f]*\).*/\1/p')
+/// ```
+///
+/// 这是**提取字段**——输出短，但信息完整（就是那个指纹）。防护把输出改道到
+/// stderr，`$(...)` 只捕获 stdout，于是 `EXPECT` 为空，整个 15 目标发布会话
+/// 卡死在这一步。
+///
+/// 教训：**误报的代价比漏报更大**。漏报只是没拦住违规，模型读到残卷；误报会
+/// 打断本来正确的流程，而且现场表现为"工具坏了"，很难第一时间联想到防护。
+/// 所以判据从严：只有确证会削减内容的写法才拦。
+fn truncator_of(raw: &[String]) -> Option<String> {
+    // Android（bionic）的 /proc/<pid>/cmdline 会多出一项：第一项是进程名，
+    // 第二项又是完整的 argv[0]。实测 `sed -n '1,3p'` 读出来是：
+    //
+    //     ["sed", "/data/.../bin/sed", "-n", "1,3p"]
+    //
+    // 不处理这一项，脚本参数就从 `/data/.../bin/sed` 开始解析——那个字符串
+    // 里含 `s`，被判成"含替换命令"，于是 `sed -n '1,3p'` 这个真截断被放行，
+    // 而判定结果与真实行为完全相反。这类错误比不实现更糟：它给出确定的错答案。
+    let owned;
+    let argv: &[String] = match (raw.first(), raw.get(1)) {
+        (Some(a), Some(b)) if b.contains('/') && basename_of(b) == basename_of(a) => {
+            owned = std::iter::once(a.clone())
+                .chain(raw.iter().skip(2).cloned())
+                .collect::<Vec<String>>();
+            &owned
+        }
+        _ => raw,
+    };
+
     let first = argv.first()?;
     let stem = strip_exe(basename_of(first));
-    if in_list(stem, TRUNCATORS) || in_list(stem, TRUNCATORS_WIN) {
+    if in_list(stem, ALWAYS) || in_list(stem, ALWAYS_WIN) {
         return Some(stem.to_string());
+    }
+    if in_list(stem, SOMETIMES) {
+        let hit = match stem {
+            "sed" => sed_truncates(argv),
+            "awk" | "gawk" | "mawk" | "nawk" => awk_truncates(argv),
+            "cut" => cut_truncates(argv),
+            "dd" => dd_truncates(argv),
+            _ => false,
+        };
+        if hit {
+            return Some(stem.to_string());
+        }
     }
     if in_list(stem, MULTI_CALL) {
         if let Some(sub) = argv.get(1) {
             let sstem = strip_exe(basename_of(sub));
-            if in_list(sstem, TRUNCATORS) {
+            if in_list(sstem, ALWAYS) {
                 return Some(format!("{stem} {sstem}"));
+            }
+            if in_list(sstem, SOMETIMES) {
+                // 多合一程序后面的参数整体右移一位
+                let mut rest = vec![sstem.to_string()];
+                rest.extend(argv.iter().skip(2).cloned());
+                let hit = match sstem {
+                    "sed" => sed_truncates(&rest),
+                    "awk" | "gawk" | "mawk" | "nawk" => awk_truncates(&rest),
+                    "cut" => cut_truncates(&rest),
+                    "dd" => dd_truncates(&rest),
+                    _ => false,
+                };
+                if hit {
+                    return Some(format!("{stem} {sstem}"));
+                }
             }
         }
     }

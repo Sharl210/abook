@@ -2355,6 +2355,89 @@ if crate::util::Args::known("per-page") {
         }
     }
 
+    // ---- 截断防护的分类：误报比漏报更贵
+    //
+    // 两件事都来自真实事故，必须钉在自检里：
+    //
+    // 1) `sed -n 's/.*src=.../.../p'` 是**提取字段**，不是截断。第一版把 sed
+    //    一刀切当截断器，结果 CI 的发布校验脚本拿到空指纹，15 目标发布会话
+    //    卡死在"无法从本机探针取得源码指纹"。
+    // 2) Android 的 /proc/<pid>/cmdline 第一项是进程名、第二项又重复一次
+    //    argv[0]。不处理会让脚本参数解析从路径开始，`/.../sed` 里的 `s`
+    //    被当成替换命令，`sed -n '1,3p'` 这个真截断反而被放行。
+    //
+    // 所以这里逐条钉住"该拦的拦、该放的放"，两个方向都不能错。
+    {
+        let exe = crate::util::self_path().unwrap_or_default();
+        let exe_s = exe.to_string_lossy().to_string();
+        let has_sh = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v head && command -v sed")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !has_sh {
+            skip += 1;
+            msgs.push("SKIP  截断防护分类：本平台没有 sh/head/sed".into());
+        } else {
+            // (命令行尾部, 是否应被拦, 说明)
+            let cases: &[(&str, bool, &str)] = &[
+                ("head -3", true, "head 无条件截断"),
+                ("tail -3", true, "tail 无条件截断"),
+                ("sed -n '1,3p'", true, "行号范围 = 截断"),
+                ("sed -n '1p'", true, "单行号 = 截断"),
+                ("sed -n '$p'", true, "末行 = 截断"),
+                ("awk 'NR<=3'", true, "NR 比较 = 截断"),
+                ("awk '{if(NR==5)exit}1'", true, "exit = 截断"),
+                ("cut -c1-20", true, "按字符切 = 截断"),
+                ("sed -n 's/abook/X/p'", false, "替换提取字段 ≠ 截断"),
+                ("sed 's/abook/X/'", false, "无 -n 全行输出 ≠ 截断"),
+                ("sed -n '/abook/p'", false, "正则过滤 ≈ grep ≠ 截断"),
+                ("cut -d' ' -f1", false, "选列行数不变 ≠ 截断"),
+                ("awk '{print $1}'", false, "选列行数不变 ≠ 截断"),
+                ("grep abook", false, "过滤 ≠ 截断"),
+            ];
+            let mut wrong: Vec<String> = Vec::new();
+            for (tail, should_block, why) in cases {
+                // 判据用"截断器那边拿到几行"：被拦则 0 行，放行则 ≥1 行。
+                let cmd = format!("'{exe_s}' version 2>/dev/null | {tail}");
+                let got = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .env_remove("ABOOK_NO_GUARD")
+                    .output();
+                match got {
+                    Ok(o) => {
+                        let lines = String::from_utf8_lossy(&o.stdout).lines().count();
+                        let blocked = lines == 0;
+                        if blocked != *should_block {
+                            wrong.push(format!(
+                                "`{tail}` {}（应{}，实{}）",
+                                why,
+                                if *should_block { "拦截" } else { "放行" },
+                                if blocked { "拦截" } else { "放行" }
+                            ));
+                        }
+                    }
+                    Err(_) => wrong.push(format!("`{tail}` 无法执行")),
+                }
+            }
+            if wrong.is_empty() {
+                pass += 1;
+                if verbose {
+                    msgs.push(format!(
+                        "PASS  截断防护分类：{} 个用例方向全对（含 sed 提取字段放行、Android cmdline 重复项）",
+                        cases.len()
+                    ));
+                }
+            } else {
+                fail += 1;
+                msgs.push(format!("FAIL  截断防护分类错: {}", wrong.join("；")));
+            }
+        }
+    }
+
     // ---- every real command is discoverable
     // Aliases are fine, but a genuine capability that the help never mentions
     // is undiscoverable: `commit` writes a change record and was invisible.

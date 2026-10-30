@@ -119,6 +119,14 @@ pub fn find_truncator(first_pipe: &str, me: &str) -> Option<String> {
         if holders.is_empty() {
             return None;
         }
+        if std::env::var_os("ABOOK_GUARD_DEBUG").is_some() {
+            for (pid, argv) in &holders {
+                eprintln!(
+                    "[abook guard] 持有者 pid={pid} argv={argv:?} 判定={:?}",
+                    truncator_of(argv)
+                );
+            }
+        }
         // 这一跳里有截断程序就直接命中
         for (_, argv) in &holders {
             if let Some(t) = truncator_of(argv) {
