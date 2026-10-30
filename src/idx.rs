@@ -361,8 +361,24 @@ impl Index {
             });
         }
 
+        // 读 64 个分桶，**不是**单文件。
+        //
+        // 这里原先只读 `.index/postings` 单文件，但 `save` 早就改成只写
+        // `postings.p0..p63` 并在末尾把单文件删掉。于是这个函数**恒返回
+        // None**：`query.rs` 那句"先试落盘索引"永远走不到，每次都掉回
+        // `semantic::Index::build` 全量重建（读全部记录、重新分词）。
+        // 表面上看照样有结果，只是慢——慢得越多越像"这工具就这个速度"。
+        //
+        // 分桶也是为了查询：`search` 只需读查询词落在的那几个桶，
+        // 而不是整个词表。
         let mut postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-        let praw = std::fs::read_to_string(postings_path(root)).ok()?;
+        let mut praw = String::new();
+        for b in 0..BUCKETS {
+            // 桶可能不存在（该桶没词），缺一个不算索引坏。
+            if let Ok(body) = std::fs::read_to_string(postings_path(root).with_extension(format!("p{b}"))) {
+                praw.push_str(&body);
+            }
+        }
         for line in praw.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -515,12 +531,28 @@ impl Index {
 
     /// 写回磁盘。调用方负责保证这在库级锁内。
     ///
-    /// 三个文件各自原子写。不追求三者之间的事务性：`meta` 里的条数与字节
-    /// 是最后写的，如果中途失败，下次 `load` 对不上就会重建——这正是我们要的
-    /// 行为，不需要额外的一致性协议。
+    /// **开始写分片之前，先把 meta 打成 dirty。**
+    ///
+    /// 原先只在 `save` 返回 Err 之后由调用方 `mark_dirty`，这挡不住崩溃：
+    /// 进程如果在第 40 个分片写完、meta 还没更新时被杀，旧 meta 仍然是
+    /// `clean`，且它记的条数/字节签名可能**正好没变**（更新同一条记录时
+    /// 文件名不变、条数不变）。下一次 `load_shallow` 校验通过，于是读进
+    /// 一份「一半新一半旧」的分片，安静地返回错误结果——不报错、不降级，
+    /// 只是答案不对。崩掉的进程没有机会执行 `mark_dirty`，所以失效标记
+    /// 必须落在动第一片之前。
+    ///
+    /// 代价是一行小文件写；收益是"崩溃"与"未崩溃"在任何时刻断电下可区分。
     pub fn save(&self, root: &Path) -> R<()> {
         let d = dir_of(root);
         std::fs::create_dir_all(&d).map_err(|e| EE::Io(format!("建索引目录失败 {}: {e}", d.display())))?;
+        // 先立旗：这一刻起索引不可信，直到最后一步把 meta 写回 clean。
+        let _ = write_atomic(
+            &meta_path(root),
+            &format!(
+                "{}\n{}\n{}\n{}\n",
+                SCHEMA, self.total_docs, self.total_bytes, "dirty"
+            ),
+        );
 
         let mut docs_buf = String::new();
         for doc in &self.docs {
@@ -739,16 +771,18 @@ impl Index {
     /// docs 不再存词频（那是 6.8MB 的来源），所以这里查 postings：
     /// 先定位词，再在它的记录列表里找目标 id。postings 里每个词的记录列表
     /// 通常很短，实际是常数级。
-    pub fn has_term_in(&self, term: &str, path: &str) -> bool {
+    pub fn has_term_in(&self, term: &str, id: usize) -> bool {
+        // 按 **id** 查，不按 path。
+        //
+        // 早期签名是 `(term, path)`，内部靠 `by_path` 把 path 翻回 id。浅加载
+        // 之后 `docs` 是空的，`by_path` 也就空，于是这个函数**恒返回 false**
+        // ——n-gram 那一路整条失效，而且不报错，只是命中分数少了一档。
+        // 调用方（`recall_via_index`）本来就持有 id，直接传进来即可。
         let plist = match self.postings.get(term) {
             Some(p) => p,
             None => return false,
         };
-        let id = match self.by_path.get(path) {
-            Some(i) => *i,
-            None => return false,
-        };
-        plist.iter().any(|(i, _)| *i == id)
+        plist.iter().any(|(i, _)| *i as usize == id)
     }
 }
 

@@ -953,6 +953,47 @@ fn main() {
         }
     }
 
+    // 写命令跑完后维护短号分配表，仍在库级锁内。
+    //
+    // 必须与索引同一处、同一把锁：发号是"读表→取 next→写表"的读改写序列，
+    // 锁外做就会两条并发记录拿到同一个号——而那正是短号唯一的硬约束。
+    //
+    // 失败不阻断：短号是派生物，记录本身已经写好了，缺号下次补齐。
+    let num_root = root.clone();
+    if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+        eprintln!("[NUM] need_index={need_index} code={code}");
+    }
+    if need_index {
+        let mut nums = crate::num::Numbers::load_or_build(&num_root);
+        let mut changed = false;
+        for lib in [crate::rec::Lib::Canonical, crate::rec::Lib::Candidate] {
+            let dir = num_root.join(lib.dir());
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if !name.ends_with(".md") {
+                        continue;
+                    }
+                    let id = name.trim_end_matches(".md").to_string();
+                    if nums.num_of(&id).is_none() {
+                        nums.assign(&id, lib);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+            eprintln!("[NUM] changed={changed} total={}", nums.len());
+        }
+        if changed || nums.fresh {
+            if let Err(e) = nums.save(&num_root) {
+                if std::env::var("ABOOK_DEBUG_NUM").is_ok() {
+                    eprintln!("[NUM] save 失败: {e:?}");
+                }
+            }
+        }
+    }
+
     let is_selftest = std::env::args().nth(1).as_deref() == Some("selftest");
     // The document is emitted for a non-zero exit too. `check`, `repair`,
     // `leftover` and `preflight` all exit 5 to mean "ran fine, found real

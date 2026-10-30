@@ -947,13 +947,13 @@ fn recall_via_index(
 
     // n-gram（标题 + postings 词存在性）
     let mut ng: Vec<(String, i32)> = Vec::new();
-    for (_, d) in docs_by_id.iter() {
+    for (id, d) in docs_by_id.iter() {
         let mut sc = 0i32;
-        for t in qs {
+        for t in &qterms {
             for g in ngrams(t) {
                 if ci_contains(&d.title, &g) {
                     sc += 15;
-                } else if disk.has_term_in(&g, &d.path) {
+                } else if disk.has_term_in(&g, *id) {
                     sc += 8;
                 }
             }

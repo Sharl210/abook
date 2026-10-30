@@ -11,9 +11,23 @@ repository = "https://github.com/Sharl210/abook"
 name = "abook"
 path = "src/main.rs"
 
+# 发布体积优先：CI 在服务器上构建，单核跑满也不耗本机电。
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# 本机验证用：改代码时只求"快点编出来看一眼对不对"，不管体积。
+#
+# 原先本机也用 release 档，实测每次改动要 29 秒单核满载——手机上这就是
+# 一格电。差别的来源是 `codegen-units = 1`：整个程序只能由一个线程生成
+# 代码，多核全闲着；再加上全量 LTO 要等所有代码齐了做一次全局优化。
+# 换 thin LTO + 16 个生成单元，同样一次编译 16 秒，实测自检 146 项同样全过。
+#
+# 只在本机用，上游二进制仍由 CI 按 release 档产出（1515488 对 1920344 字节）。
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
