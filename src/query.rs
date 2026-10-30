@@ -329,7 +329,22 @@ pub fn recall(
     // 而不是库里有多少条。这是常数级的来源。
     if let Some(disk) = crate::idx::Index::load_shallow(root, q) {
         if disk.total_docs > 0 {
-            return recall_via_index(root, q, &qs, &disk, limit, with_body, include_promoted);
+            // `None` = 索引不可信，落到下面的全量路径重建。
+            if let Some(r) =
+                recall_via_index(root, q, &qs, &disk, limit, with_body, include_promoted)
+            {
+                return r;
+            }
+            // 走到这里说明索引坏了（缺桶、缺分片、条数对不上）。
+            //
+            // 光回退不够：回退是 O(n)，**这一次**能出结果，但索引还坏着，
+            // 之后每次读都要再付一遍全量代价——实测一次删片之后，
+            // 后续每次召回从 45ms 变成 400ms 且永不恢复，因为能重建索引的
+            // 只有写命令，而用户可能只读不写。
+            //
+            // 所以顺手修：拿得到库锁就重建一次（索引是派生物，重建它不改
+            // 用户数据），拿不到就算了——绝不为了修缓存让读的人等锁。
+            heal_index(root);
         }
     }
 
@@ -828,6 +843,30 @@ mod live_count_tests {
     }
 }
 
+/// 索引坏了就重建一次，拿不到库锁就放弃。
+///
+/// **只在读路径发现索引不可信时调用。** 一次 O(n) 重建换来之后所有读恢复
+/// 常数级，比"每次读都 O(n)"划算得多；而拿不到锁说明有人在写，那个人
+/// 写完之后本来就会重建索引，这里跳过正合适。
+///
+/// 失败静默：索引是派生物，修不好不影响本次召回（调用方已经回退到全量）。
+fn heal_index(root: &Path) {
+    let _lock = match crate::util::LibLock::try_acquire(root) {
+        Some(l) => l,
+        None => return,
+    };
+    let libs = [Lib::Canonical, Lib::Candidate];
+    let idx = crate::idx::Index::build(root, &libs);
+    if let Err(e) = idx.save(root) {
+        crate::idx::Index::mark_dirty(root);
+        if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+            eprintln!("[IDX] 自愈重建后写入失败: {}", e.msg());
+        }
+    } else if std::env::var("ABOOK_DEBUG_IDX").is_ok() {
+        eprintln!("[IDX] 索引已自愈重建，docs={}", idx.docs.len());
+    }
+}
+
 /// 纯索引召回：只在索引上打分排序，最后才读命中的那几条正文。
 ///
 /// 这是 O(1) 的来源。老路径要先把全库记录读进内存（`load_lib`），
@@ -840,7 +879,7 @@ fn recall_via_index(
     limit: usize,
     with_body: bool,
     include_promoted: bool,
-) -> RecallResult {
+) -> Option<RecallResult> {
     let mut res = RecallResult {
         query: q.to_string(),
         status: "RECALL_MISS",
@@ -903,7 +942,16 @@ fn recall_via_index(
     let mut docs_by_id: std::collections::HashMap<usize, crate::idx::Doc> =
         std::collections::HashMap::new();
     for sh in need.keys() {
-        for (id, d) in disk.shard(root, *sh) {
+        // 分片不可信（缺失/坏行）→ 整条快路径作废，走全量重建。
+        //
+        // 不能"读到什么算什么"：postings 里的 id 是按连续区间映射到分片的，
+        // 少一行就让后面所有 id 都指到别人的记录上——结果看起来正常，
+        // 对象是错的。这正是"不报错的错"里最难查的一种。
+        let rows = match disk.shard(root, *sh) {
+            Some(r) => r,
+            None => return None,
+        };
+        for (id, d) in rows {
             // 已晋升的候选在默认视图里不再出现——它在正式库里有更好的版本。
             //
             // 这道过滤慢路径一直有（见上面 `pool` 构建处），快路径是另一套
@@ -1077,5 +1125,5 @@ fn recall_via_index(
     } else {
         "RECALL_MISS"
     };
-    res
+    Some(res)
 }

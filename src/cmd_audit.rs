@@ -259,6 +259,43 @@ pub fn cmd_repair(a: &Args) -> R<i32> {
     let mut scanned = 0usize;
     let mut report: Vec<String> = Vec::new();
 
+    // `--only` 拼错必须当场报错。
+    //
+    // 原来的行为：类别名对不上任何 tag 时，每个字段的判定都恒为 false，
+    // 于是整轮输出「需修 0 条」并 **rc=0**。用户看到的是"跑过了，很干净"，
+    // 实际什么都没修——他知道自己要修 refs，工具告诉他一切都好。
+    //
+    // `schema::FIX_CLASSES` 早就定义好了类别表，只是一直没人用它校验。
+    if let Some(v) = a.get("only") {
+        if v.trim().is_empty() {
+            return crate::util::usage(format!(
+                "--only 需要一个类别名；不作限定请直接省略 --only。\n可用类别：{}",
+                crate::schema::FIX_CLASSES
+                    .iter()
+                    .map(|(k, d)| format!("  {k}\t{d}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        let bad: Vec<String> = v
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .filter(|x| !crate::schema::FIX_CLASSES.iter().any(|(k, _)| k == x))
+            .collect();
+        if !bad.is_empty() {
+            return crate::util::usage(format!(
+                "--only 不认识 {:?}。可用类别：{}",
+                bad,
+                crate::schema::FIX_CLASSES
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
     let targets: Vec<(std::path::PathBuf, Lib)> = if let Some(sel) = a.pos.first() {
         vec![crate::rec::resolve_record(&root, sel)?]
     } else {

@@ -1249,19 +1249,26 @@ pub fn cmd_search(a: &Args) -> R<i32> {
         // 行数这一列曾在这里是 `{:>7}`、在 `list` 是 `{:>4}`、在 `row_meta` 是
         // `{:>5}`：同一个含义三种宽度。现在三段元信息统一由 `row_meta` 铺开，
         // 命中分（这行真正的排序依据）接在后面，不与那三列抢位置。
+        //
+        // 分数**必须带"分"字**。原先它是裸数字，紧跟在"29行"后面：
+        //   10-30 13:10  529B  29行    114  candidate/records/N-....md
+        // 这行里 114 是评分，可它长得和列号、行数、短号（N114）一模一样。
+        // 实测我自己就把它当成了短号，拿去做删除——删掉了一条无关的真实记录
+        // （软删除，已恢复）。一个展示格式让人读错列，代价是数据。
+        // 加一个字就再也读不错。
         // 附件列与 `list` 同一处理：没有附件就不占位，空列与"字段缺失"在视觉上
         // 分不出来。
         let meta = crate::util::row_meta(h.updated, Some(h.bytes as u64), Some(h.lines));
         match if att.is_empty() { None } else { Some(att.as_str()) } {
             Some(a) => println!(
-                "{meta}  {:>5}  {a:>12}  {}  [{}] {}",
+                "{meta}  {:>4}分  {a:>12}  {}  [{}] {}",
                 h.score,
                 h.path,
                 h.where_,
                 truncate_chars(&h.title, 60)
             ),
             None => println!(
-                "{meta}  {:>5}  {}  [{}] {}",
+                "{meta}  {:>4}分  {}  [{}] {}",
                 h.score,
                 h.path,
                 h.where_,

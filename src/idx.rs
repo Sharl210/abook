@@ -332,18 +332,22 @@ impl Index {
         }
 
         let mut docs: Vec<Doc> = Vec::new();
-        // 读分片。整体 docs 文件已废弃（分片是为了让单次查询不必读全部记录头），
-        // 但仍兼容：如果只有整体文件存在，也照读——旧索引不该因为格式升级就失效。
+        // 读分片。整体 docs 文件已废弃（分片是为了让单次查询不必读全部记录头）。
+        //
+        // 旧版这里还留了"只有整体文件存在也照读"的兼容分支，但 save 早就不写
+        // 整体文件了，那条路永不命中——留着只会让人以为还有另一条格式。
         let mut raw = String::new();
-        let mut any_shard = false;
-        for sh in 0..16 {
-            if let Ok(body) = std::fs::read_to_string(docs_path(root).with_extension(format!("d{sh}"))) {
-                raw.push_str(&body);
-                any_shard = true;
-            }
-        }
-        if !any_shard {
-            raw = std::fs::read_to_string(docs_path(root)).ok()?;
+        for sh in 0..SHARDS {
+            // 分片**必须全在**。原来这里 `if let Ok(..)` 缺片就当没有这一片，
+            // 于是 `docs` 的长度比 `postings` 里的 id 短，而 search_shallow
+            // 直接用 `self.docs[*id as usize]` 索引——越界、panic。
+            // 而这个 panic 之前被另一处"读到失败就当空"掩盖着，只在索引
+            // 恰好缺片时才炸出来。
+            //
+            // 缺片 = 索引不完整 = 换全量重建，不是"少读几片也能用"。
+            let body = std::fs::read_to_string(docs_path(root).with_extension(format!("d{sh}")))
+                .ok()?;
+            raw.push_str(&body);
         }
         for line in raw.lines() {
             if line.trim().is_empty() {
@@ -392,6 +396,13 @@ impl Index {
                 }
             }
             postings.insert(term.to_string(), v);
+        }
+
+        // 条数对不上就是索引不完整：postings 的 id 是按 0..total_docs 编的，
+        // docs 短一条，后面所有 id 都会指向别人的记录（越界则 panic）。
+        // 这里直接拒绝，交给全量重建。
+        if docs.len() != total_docs {
+            return None;
         }
 
         let total_len: u64 = docs.iter().map(|d| d.len as u64).sum();
@@ -598,13 +609,19 @@ impl Index {
         let d = dir_of(root);
         std::fs::create_dir_all(&d).map_err(|e| EE::Io(format!("建索引目录失败 {}: {e}", d.display())))?;
         // 先立旗：这一刻起索引不可信，直到最后一步把 meta 写回 clean。
-        let _ = write_atomic(
+        //
+        // **写失败必须中止**，不能 `let _ =` 吞掉。旗子没立起来就往下写分片，
+        // 等于"分片已经半新半旧、meta 还说 clean"——正是这个标志要防的窗口。
+        // 中止的代价只是这次不更新索引（旧索引仍自洽），吞掉的代价是
+        // 以后每次查询都可能拿到错的结果且毫无异常。
+        write_atomic(
             &meta_path(root),
             &format!(
                 "{}\n{}\n{}\n{}\n",
                 SCHEMA, self.total_docs, self.total_bytes, "dirty"
             ),
-        );
+        )
+        .map_err(|e| EE::Io(format!("索引失效标记写不进去，本次放弃更新索引（旧索引仍可用）: {}", e.msg())))?;
 
         let mut docs_buf = String::new();
         for doc in &self.docs {
@@ -641,13 +658,12 @@ impl Index {
                 .join(",");
             buckets[b].push_str(&format!("{term}\t{s}\n"));
         }
+        // 空桶也落盘（同 head 的理由）：删掉空桶会让"桶文件不存在"
+        // 同时代表"没有词落在这里"和"文件被删了"，读侧只能当空桶处理，
+        // 于是索引损坏表现为静默少召回。
         for (b, body) in buckets.iter().enumerate() {
             let p = postings_path(root).with_extension(format!("p{b}"));
-            if body.is_empty() {
-                let _ = std::fs::remove_file(&p);
-            } else {
-                write_atomic(&p, body)?;
-            }
+            write_atomic(&p, body)?;
         }
         // 旧的单文件 postings 删掉，避免与新分桶混淆
         let _ = std::fs::remove_file(postings_path(root));
@@ -660,13 +676,15 @@ impl Index {
             let s = list.iter().map(|(i, c)| format!("{i}:{c}")).collect::<Vec<_>>().join(",");
             hbuckets[b].push_str(&format!("{term}\t{s}\n"));
         }
+        // 空桶也落盘（写空文件），不删。
+        //
+        // 原来空桶会 remove_file，于是读侧无法区分"这个词没有对应桶"
+        // 和"桶文件丢了/被删了"——两者都表现为 read 失败，而读到失败就
+        // 当空桶继续，结果是**静默少召回**。多写 64 个 0 字节文件，
+        // 换来"文件缺失=索引损坏"这个可判定的事实，很划算。
         for (b, body) in hbuckets.iter().enumerate() {
             let p = head_path(root).with_extension(format!("h{b}"));
-            if body.is_empty() {
-                let _ = std::fs::remove_file(&p);
-            } else {
-                write_atomic(&p, body)?;
-            }
+            write_atomic(&p, body)?;
         }
 
         // docs 分片写：查询时按需读分片，不必把全部记录头读进内存。
@@ -674,7 +692,6 @@ impl Index {
         // 不分片时 docs 随记录数线性增长（2 万条 3.1MB），每次查询都要全读，
         // 增长曲线实测 500→10000 条是 26→117ms，仍是线性。
         // 分片后单次查询只需读命中的那几片。
-        const SHARDS: usize = 16;
         let lines: Vec<&str> = docs_buf.lines().collect();
         let per = if lines.is_empty() { 1 } else { (lines.len() + SHARDS - 1) / SHARDS };
         for sh in 0..SHARDS {
@@ -793,10 +810,18 @@ impl Index {
                 continue;
             }
             for (id, tf) in plist {
-                let dl = self.docs[*id as usize].len as f64;
+                // 防御：postings 里的 id 超出 docs 范围说明索引不一致。
+                // 正常路径已在 load/load_shallow 拦掉，这里兜一层是为了
+                // **不要再 panic**——工具崩掉比返回旧结果更糟，用户看到的是
+                // "程序挂了"，而真正的原因（索引坏了）一个字都没说。
+                let idx = *id as usize;
+                if idx >= self.docs.len() || idx >= scores.len() {
+                    continue;
+                }
+                let dl = self.docs[idx].len as f64;
                 let denom = *tf as f64 + k1 * (1.0 - b + b * dl / self.avgdl);
-                scores[*id as usize] += idf * (*tf as f64 * (k1 + 1.0)) / denom;
-                covered[*id as usize] += 1;
+                scores[idx] += idf * (*tf as f64 * (k1 + 1.0)) / denom;
+                covered[idx] += 1;
             }
         }
 
@@ -872,7 +897,11 @@ impl Index {
                 continue;
             }
             let hp = head_path(root).with_extension(format!("h{b}"));
-            if let Ok(body) = std::fs::read_to_string(&hp) {
+            // 桶文件**必须存在**：save 无条件写全部 64 个桶（空桶也写）。
+            // 读不到就是索引损坏——返回 None 让调用方走全量重建，
+            // 而不是"当空桶继续"（那等于静默漏召回，而且永远查不出来）。
+            let body = std::fs::read_to_string(&hp).ok()?;
+            {
                 for line in body.lines() {
                     if let Some((term, rest)) = line.split_once('\t') {
                         let mut v = Vec::new();
@@ -904,11 +933,14 @@ impl Index {
                 continue;
             }
             let p = postings_path(root).with_extension(format!("p{b}"));
-            if let Ok(body) = std::fs::read_to_string(&p) {
+            // 同上：缺桶=损坏，不当空桶。
+            let body = std::fs::read_to_string(&p).ok()?;
+            {
                 for line in body.lines() {
                     let (term, rest) = match line.split_once('\t') {
                         Some(v) => v,
-                        None => continue,
+                        // 有内容却切不出 term：格式已坏，整份索引不可信。
+                        None => return None,
                     };
                     let mut v = Vec::new();
                     for pair in rest.split(',') {
@@ -972,39 +1004,49 @@ impl Index {
     }
 
     /// 一次读一整片，供需要连续取多条时用（比逐条读省）。
-    pub fn shard(&self, root: &Path, sh: usize) -> Vec<(usize, Doc)> {
-        let body = match std::fs::read_to_string(
+    ///
+    /// 返回 `None` 表示**这一片不可信**（文件缺失或含坏行），调用方必须
+    /// 退回全量重建，不能当空片继续。原来的实现 `Err(_) => return Vec::new()`
+    /// 加 `filter_map` 丢掉坏行，于是一片损坏只是少几条结果——错得完全安静。
+    pub fn shard(&self, root: &Path, sh: usize) -> Option<Vec<(usize, Doc)>> {
+        if sh >= SHARDS {
+            return None;
+        }
+        let body = std::fs::read_to_string(
             docs_path(root).with_extension(format!("d{sh}")),
-        ) {
-            Ok(b) => b,
-            Err(_) => return Vec::new(),
-        };
+        )
+        .ok()?;
         let first = shard_first_by_sh(sh, self.total_docs);
-        body.lines()
-            .enumerate()
-            .filter_map(|(i, l)| parse_doc_line(l).map(|d| (first + i, d)))
-            .collect()
+        let mut out = Vec::new();
+        for (i, l) in body.lines().enumerate() {
+            if l.trim().is_empty() {
+                continue;
+            }
+            let d = parse_doc_line(l)?;
+            out.push((first + i, d));
+        }
+        Some(out)
     }
 
     /// 分片总数（写侧固定 16，读侧据此定位）。
     pub fn shards(&self) -> usize {
-        16
+        SHARDS
     }
 }
 
 /// 记录 id 落在哪个分片。与 save 的分片规则必须完全一致。
 fn shard_of(id: usize, total: usize) -> usize {
-    let per = if total == 0 { 1 } else { (total + 16 - 1) / 16 };
-    (id / per).min(15)
+    let per = if total == 0 { 1 } else { (total + SHARDS - 1) / SHARDS };
+    (id / per).min(SHARDS - 1)
 }
 
 fn shard_first(id: usize, total: usize) -> usize {
-    let per = if total == 0 { 1 } else { (total + 16 - 1) / 16 };
-    (id / per).min(15) * per
+    let per = if total == 0 { 1 } else { (total + SHARDS - 1) / SHARDS };
+    (id / per).min(SHARDS - 1) * per
 }
 
 fn shard_first_by_sh(sh: usize, total: usize) -> usize {
-    let per = if total == 0 { 1 } else { (total + 16 - 1) / 16 };
+    let per = if total == 0 { 1 } else { (total + SHARDS - 1) / SHARDS };
     sh * per
 }
 
@@ -1110,6 +1152,14 @@ pub fn bucket_of(term: &str, buckets: usize) -> usize {
 }
 
 /// 桶总数。写读两侧必须一致。
+/// docs 分片总数。
+///
+/// 这个数原本散在 7 处（save 的局部 const、shard_of、shard_first、
+/// shard_first_by_sh、shards()、load 里的旧回退、文档注释），改一处就会
+/// 让"写进第 3 片、读第 4 片"这种错位悄悄发生——而错位不报错，只是把
+/// postings 里的 id 映射到别人的记录上，召回结果看起来正常但对象是错的。
+pub const SHARDS: usize = 16;
+
 pub const BUCKETS: usize = 64;
 
 /// 预加载平面的三类。判据只用已有字段，不引入新字段（零迁移）。

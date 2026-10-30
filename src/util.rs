@@ -173,6 +173,11 @@ const BOOLS: &[&str] = &[
     "no-expand", "no-index", "no-atlas", "no-commit",
     "summary-only", "purpose-only", "deviations", "fields",
     "remove-sources", "rebuild", "fix", "verify", "prune",
+    // 只改输出选择、不带动词的开关。漏在这里的后果不是"开关无效"，
+    // 而是它**吃掉后面那个词**：`recall --body GATE` 会把查询词 GATE
+    // 当成 --body 的值，于是报"需要查询词"；`upgrade --check` 同理。
+    // 两者都是 `a.has(...)` 语义（纯开关），所以必须在这里。
+    "body", "check",
     // search modes
     "regex", "re", "fuzzy", "approx", "literal", "exact",
     "semantic", "sem", "ask", "case", "deep", "expand", "raw-lines", "lines", "whole-line",
@@ -1591,6 +1596,17 @@ const STALE_LOCK_SECS: u64 = 600;
 
 impl LibLock {
     /// Acquire, waiting up to `wait_secs` for a competing writer to finish.
+    /// 试一次，拿不到就放弃（不等待）。给"顺手修一下"的场合用。
+    ///
+    /// 读路径自愈索引就属于这种：修不修得成都不影响本次结果，
+    /// 但绝不值得为了修缓存让用户等一把锁。
+    pub fn try_acquire(root: &std::path::Path) -> Option<LibLock> {
+        match LibLock::acquire(root, 0) {
+            Ok(l) => Some(l),
+            Err(_) => None,
+        }
+    }
+
     pub fn acquire(root: &std::path::Path, wait_secs: u64) -> R<LibLock> {
         let path = root.join(".abook.lock");
         if let Some(d) = path.parent() {
@@ -1888,16 +1904,25 @@ pub fn rederive_after_body_change(rec: &mut crate::rec::Record, old_body: &str) 
 /// `write` 那份更离谱，用的是 `starts_with('c') && !starts_with("cand")`：
 /// 于是 `--lib 正式` 落到候选库、`--lib CANONICAL` 也落到候选库，用户说
 /// "写正式库"，记录进了候选。这类代码不看代码看不出来，因为两个库都写得进去。
-pub fn lib_from(a: &Args) -> Option<crate::rec::Lib> {
-    // 大小写不敏感：`--lib CANONICAL` 和 `canonical` 是同一个意思，
-    // 没道理因为按了 CapsLock 就报错。`to_ascii_lowercase` 不动汉字，
-    // 所以中文别名照原样匹配。
-    let t = a.get("lib").unwrap_or("both").trim().to_ascii_lowercase();
-    match t.as_str() {
+/// 把一个字符串解析成库。`None` = "认不出来"（调用方决定是当 both 还是报错）。
+///
+/// **整个程序里认库名的 match 只有这一份。** `--lib`、`atlas` 的位置参数、
+/// `copy --to` 全部走这里——它们问的是同一个问题（"这是哪个库"），
+/// 只是从不同地方取到那个词。分成三份就等于让三处答案有可能不同。
+///
+/// 大小写不敏感：`CANONICAL` 和 `canonical` 是同一个意思，没道理因为按了
+/// CapsLock 就报错。`to_ascii_lowercase` 不动汉字，中文别名照原样匹配。
+pub fn parse_lib(s: &str) -> Option<crate::rec::Lib> {
+    match s.trim().to_ascii_lowercase().as_str() {
         "canonical" | "c" | "正式" => Some(crate::rec::Lib::Canonical),
         "candidate" | "n" | "候选" => Some(crate::rec::Lib::Candidate),
         _ => None,
     }
+}
+
+/// `--lib` 的值。缺省（或认不出）返回 `None`，由调用方决定语义。
+pub fn lib_from(a: &Args) -> Option<crate::rec::Lib> {
+    parse_lib(a.get("lib").unwrap_or("both"))
 }
 
 pub fn libs_from(a: &Args) -> Vec<crate::rec::Lib> {

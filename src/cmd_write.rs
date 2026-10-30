@@ -269,13 +269,13 @@ pub fn cmd_write(a: &Args) -> R<i32> {
     // 所以这里不猜：认不出来就报错，让用户看见。原来的实现是
     // `starts_with('c') && !starts_with("cand")`，于是 `--lib 正式` 和
     // `--lib CANONICAL` 全都落进了候选库。
-    let target = a.get("lib").unwrap_or("candidate").trim().to_ascii_lowercase();
-    let lib = match target.as_str() {
-        "canonical" | "c" | "正式" => Lib::Canonical,
-        "candidate" | "n" | "候选" | "" => Lib::Candidate,
-        other => {
+    let target = a.get("lib").unwrap_or("candidate");
+    let lib = match crate::util::parse_lib(&target) {
+        Some(l) => l,
+        None if target.trim().is_empty() => Lib::Candidate,
+        None => {
             return crate::util::blocked(format!(
-                "--lib 认的是 canonical/正式 或 candidate/候选，收到 {other:?}。\
+                "--lib 认的是 canonical/正式 或 candidate/候选，收到 {target:?}。\
 写正式库要加 --approve。"
             ))
         }

@@ -452,10 +452,9 @@ pub fn cmd_search(a: &Args) -> R<i32> {
 pub fn cmd_atlas(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     let which = a.pos_or(0, "both");
-    let libs: Vec<Lib> = match which.as_str() {
-        "canonical" | "c" => vec![Lib::Canonical],
-        "candidate" | "n" => vec![Lib::Candidate],
-        _ => vec![Lib::Canonical, Lib::Candidate],
+    let libs: Vec<Lib> = match crate::util::parse_lib(&which) {
+        Some(l) => vec![l],
+        None => vec![Lib::Canonical, Lib::Candidate],
     };
     // Same index `tree` builds: one pass over the library, then per-branch sums.
     // `atlas` and `tree` answering the same question with different numbers

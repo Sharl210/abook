@@ -547,11 +547,9 @@ pub fn cmd_copy(a: &Args) -> R<i32> {
     let sel = a.need_pos(0, "记录")?;
     let (path, lib) = resolve_record(&root, sel)?;
     let mut rec = Record::parse(&path, lib)?;
-    let target_lib = match a.get("to").unwrap_or("") {
-        "canonical" | "c" => Lib::Canonical,
-        "candidate" | "n" => Lib::Candidate,
-        _ => lib,
-    };
+    // `--to` 缺省时留在原库（这个语义和 `--lib` 不同，所以 `unwrap_or(lib)`
+    // 留在这里，而"词→库"的判定本身走 util::parse_lib）。
+    let target_lib = crate::util::parse_lib(&a.get("to").unwrap_or("")).unwrap_or(lib);
     if target_lib == Lib::Canonical && !a.has("approve") && !a.has("dry-run") {
         return blocked("复制到正式库需要 --approve。");
     }

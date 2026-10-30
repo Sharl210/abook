@@ -33,7 +33,10 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("list", "lib,kind,status,maturity,tag,q,page,per-page,include-promoted,project,title", "json", "列表，分页", "--limit 2"),
     ("get", "field,page,per-page", "json", "取单字段", "@any --field TITLE"),
     ("diff", "page,per-page", "json", "两条记录差异", "@any @any"),
-    ("recall", "q,limit,page,per-page,all,body,include-promoted,raw,lib", "all,body,raw,include-promoted,json", "召回", "--limit 2"),
+    // body 是纯开关（`cmd_read.rs` 用 `a.has("body")`），所以它在值栏里
+    // 也要写、在开关栏里也在；解析器按 BOOLS 判，规范表两栏都要对得上，
+    // 否则 `describe recall` 说的和实际解析的不一致。
+    ("recall", "q,limit,page,per-page,all,include-promoted,raw,lib", "all,body,raw,include-promoted,json", "召回", "--limit 2"),
     ("export", "lib,format,out,include-deleted,page,per-page", "include-deleted,json", "导出", "--format json"),
     ("index", "limit,page,per-page,plane", "json", "Index.md 路由 + 预加载平面；--plane D5 取该条全文", "--plane D5"),
     ("atlas", "card,page,per-page", "json", "地图分支", ""),
@@ -93,7 +96,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("version", "", "json", "版本", ""),
     ("detect", "", "json", "安装位置探测", ""),
     ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到库根", "--dry-run"),
-    ("upgrade", "url,dir,check", "check,force,dry-run,json", "自更新到最新版", "--check"),
+    ("upgrade", "url,dir", "check,force,dry-run,json", "自更新到最新版", "--check"),
     ("selftest", "only", "all,json,verbose", "内置用例；--only N 只跑第 N 条", "selftest --only 1"),
 
 ];
@@ -138,6 +141,13 @@ pub const POSITIONALS: &[(&str, &str)] = &[
     ("diff", "<记录> <记录>"),
     ("history", "<记录>"),
     ("budget", "[记录]"),
+    // 这五条全都吃位置参数，之前漏在表里，于是 `describe` 不给用法——
+    // 用户看到的是一条"不需要参数"的命令，实际它必须带一条记录。
+    ("path", "<记录>"),
+    ("num", "[记录]"),
+    ("related", "<记录>"),
+    ("attach", "<子命令> <记录>"),
+    ("staging", "<子命令> [参数]"),
 ];
 
 /// Positional form for one command, empty when it takes none.

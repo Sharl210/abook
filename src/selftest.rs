@@ -3460,6 +3460,197 @@ STATUS=ACTIVE\n\
         msgs.push("SKIP  无稳定自身路径，跳过 reconcile 判别检查".into());
     }
 
+    // 索引损坏必须能识别并自愈，不能静默返回错结果。
+    //
+    // 这条检查存在的理由：索引分片缺失时，原先的读法是"读到什么算什么"——
+    // 缺片当空片、坏行当没有，于是索引里 postings 的 id 与 docs 的长度对不上，
+    // `search_shallow` 直接用 `self.docs[*id]` 索引就越界 panic；而更常见、
+    // 更坏的情况是压根不 panic，只是安静地少召回几条。
+    //
+    // 两种失效都不该发生：坏了就回退全量（结果正确、只是慢），
+    // 并且顺手重建（下次恢复到快）。
+    {
+        use std::path::Path as P;
+        // 这条检查不需要仓库：它会自己造一个临时库、用**当前这个二进制**
+        // 建索引再破坏它。唯一的前提是能起子进程。
+        // 用 util::self_path()，**不要**用 `current_exe()`：
+        // Android 上内核 exec 的是动态链接器，`/proc/self/exe` 指向
+        // `/apex/.../linker64`，拿它当 abook 去建库会得到
+        // "expected absolute path: --root" 这种莫名其妙的错。
+        // （这正是 TOOL_USAGE_PITFALLS 第 ⑨ 条记的坑，我自己又踩了一次。）
+        let have_exe = crate::util::self_path().map(|p| p.is_file()).unwrap_or(false);
+        if have_exe {
+            let tmp = std::env::temp_dir().join(format!("abidx-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let _ = std::fs::create_dir_all(tmp.join("canonical/records"));
+            let _ = std::fs::create_dir_all(tmp.join("candidate/records"));
+            let _ = std::fs::write(tmp.join("Global.md"), "FORMAT=1\n");
+            let _ = std::fs::write(tmp.join("Index.md"), "FORMAT=1\n");
+            // 造三条：标题里带同一个词，够建出索引。
+            for i in 0..3 {
+                let body = format!(
+                    "[CANDIDATE_MEMORY]\nID=N-{i}\nTITLE=索引损坏样本{i}\nKIND=DECISION\n\
+MATURITY=VERIFIED\nAUTHORITY=USER_EXPLICIT\nSUMMARY=摘要{i}\nKEYS=索引,损坏\n\
+[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\n正文内容足够长可以接受{i}\n[/MEMORY_BODY]\n"
+                );
+                let _ = std::fs::write(
+                    tmp.join(format!("candidate/records/N-{i}.md")),
+                    body,
+                );
+            }
+            // 用真实二进制建索引：只有它知道 .index 的格式。
+            let exe = crate::util::self_path().unwrap_or_default();
+            // 正文用真实文件：空正文会被 write 拒绝（"正文不能为空"），
+            // 于是索引建不出来，整条检查退化成跳过——跳过看起来像"没问题"，
+            // 实际什么都没验证。这是自检里最需要提防的失效形状。
+            let bf = tmp.join("body.md");
+            let _ = std::fs::write(&bf, "## 内容\n索引自愈检查用的正文内容。\n");
+            let root_s = tmp.to_string_lossy().to_string();
+            let bf_s = bf.to_string_lossy().to_string();
+            let mut built = false;
+            let mut why = String::new();
+            if let Ok(out) = std::process::Command::new(&exe)
+                .arg("--root")
+                .arg(&root_s)
+                .arg("write")
+                .arg("--title")
+                .arg("触发建索引")
+                .arg("--read-when")
+                .arg("x")
+                .arg("--body-file")
+                .arg(&bf_s)
+                .output()
+            {
+                built = out.status.success();
+                if !built {
+                    why = String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").to_string();
+                }
+            }
+            if !built {
+                skip += 1;
+                msgs.push(format!("SKIP  无法在临时库上触发索引构建: {why}"));
+            } else {
+                let idxdir = tmp.join(".index");
+                let shard = idxdir.join("docs.d3");
+                let mut problems: Vec<String> = Vec::new();
+                // 前提：索引确实建出来了，否则下面的"删片"什么也没验证。
+                if !idxdir.join("meta").is_file() {
+                    problems.push("索引没建出来（meta 不存在），检查无效".into());
+                } else {
+                    // 破坏：删一个 docs 分片，然后召回。要求"有结果、不崩"。
+                    let _ = std::fs::remove_file(&shard);
+                    let r = std::process::Command::new(&exe)
+                        .arg("--root")
+                        .arg(&root_s)
+                        .arg("recall")
+                        .arg("索引")
+                        .output();
+                    match r {
+                        Ok(o) => {
+                            let so = String::from_utf8_lossy(&o.stdout).to_string();
+                            if !o.status.success() {
+                                problems.push(format!(
+                                    "删分片后召回失败 rc={:?}", o.status.code()
+                                ));
+                            } else if so.trim().is_empty() {
+                                problems.push("删分片后召回无任何输出".into());
+                            } else if so.contains("panicked") {
+                                problems.push("删分片后召回 panic".into());
+                            }
+                            // 自愈：再跑一次应当已经重建好，且分片回来了。
+                            let _ = std::process::Command::new(&exe)
+                                .arg("--root")
+                                .arg(&root_s)
+                                .arg("recall")
+                                .arg("索引")
+                                .output();
+                            if !shard.is_file() {
+                                problems.push(
+                                    "删掉的分片没有重建回来（读路径自愈没生效）".into(),
+                                );
+                            }
+                        }
+                        Err(e) => problems.push(format!("起不了子进程: {e}")),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&tmp);
+                if problems.is_empty() {
+                    pass += 1;
+                    if verbose {
+                        msgs.push("PASS  索引缺片时回退且自愈重建，不 panic 不空结果".into());
+                    }
+                } else {
+                    fail += 1;
+                    msgs.push(format!("FAIL  索引损坏处理：{}", problems.join("；")));
+                }
+            }
+        } else {
+            skip += 1;
+            msgs.push("SKIP  取不到自身路径，跳过索引损坏自愈检查".into());
+        }
+    }
+
+    // `--lib` 的别名判定必须只有一处（util::lib_from）。
+    //
+    // 这条检查存在的理由：`--lib` 曾经有七份各写一份的实现，别名集互不
+    // 相同。于是 `audit --lib 候选` 静默按两个库统计（数字全错）、
+    // `write --lib 正式` 把记录写进候选库（两个库都写得进去，写错不报错）。
+    //
+    // 检查的是**形态**而不是行为：只要 `src/` 里再冒出一份自己 match
+    // `"canonical" | "c"` 的地方，就说明有人又抄了一份。不等到数字错
+    // 了才在用户那里发现。
+    let mut lib_offenders: Vec<String> = Vec::new();
+    if std::path::Path::new("src").is_dir() {
+        let mut checked = 0usize;
+        if let Ok(rd) = std::fs::read_dir("src") {
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.extension().map(|x| x != "rs").unwrap_or(true) {
+                    continue;
+                }
+                let fname = path
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                // util.rs 是唯一允许持有判定的地方。
+                if fname == "util.rs" {
+                    continue;
+                }
+                checked += 1;
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                for line in body.lines() {
+                    let t = line.trim();
+                    // 形如 `"canonical" | "c" => ...` 的自建别名表。
+                    if t.starts_with("\"canonical\"") && t.contains('|') {
+                        lib_offenders.push(fname.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        if checked == 0 {
+            skip += 1;
+            msgs.push("SKIP  无 src/ 可查，跳过 --lib 单源检查".into());
+        } else if lib_offenders.is_empty() {
+            pass += 1;
+            if verbose {
+                msgs.push(format!(
+                    "PASS  --lib 别名判定只有 util::lib_from 一处（查了 {checked} 个文件）"
+                ));
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  --lib 别名判定被复制到了 {:?}；应统一调 util::lib_from",
+                lib_offenders
+            ));
+        }
+    } else {
+        skip += 1;
+        msgs.push("SKIP  不在仓库根，跳过 --lib 单源检查".into());
+    }
+
     (pass, fail, skip, msgs)
 }
 
