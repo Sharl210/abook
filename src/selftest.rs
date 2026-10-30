@@ -2201,6 +2201,53 @@ if crate::util::Args::known("per-page") {
         }
     }
 
+    // ---- 迁移到本工具的门，正文必须真的在这里
+    //
+    // 提示词里 K5 的 11 个 Skill 门已改成"正文在 abook spec skill"的指针。
+    // 这条设计成立的前提是：工具侧真的有那些正文。若某次改动把它们从这里
+    // 删掉，提示词那边只留一句话指向一段不存在的文本——两边都读不到，
+    // 而没有任何检查会报错。这是最坏的一种：不是分成两份，是彻底消失。
+    {
+        const MIGRATED: &[&str] = &[
+            "BUILTIN_SPEC_OVER_ENV_SKILL_GATE",
+            "SKILL_AUTHORING_NO_SCOPE_TALK",
+            "SKILL_CREATION_DELIVERY_GATE",
+            "SKILL_CREATION_TRIGGER_GATE",
+            "SKILL_ENTRY_BUDGET",
+            "SKILL_MUST_STAY_RESIDENCY_GATE",
+            "SKILL_NAV_IS_INDEX",
+            "SKILL_PROGRESSIVE_DISCLOSURE_GATE",
+            "SKILL_REUSE_DECISION_IS_NOT_REFUSAL",
+            "SKILL_REUSE_QUERY_NOT_BLOCK",
+            "SKILL_SPLIT_DEFAULT_LANDING",
+        ];
+        let skill_text = crate::spec_text::SPECS
+            .iter()
+            .find(|(k, _)| *k == "skill")
+            .map(|(_, v)| *v)
+            .unwrap_or("");
+        let mut missing: Vec<&str> = Vec::new();
+        for g in MIGRATED {
+            // 判据是"有定义"而非"出现过"：`NAME=` 才叫定义，正文里提到名字不算。
+            let needle = format!("`{}`=", g);
+            if !skill_text.contains(&needle) {
+                missing.push(g);
+            }
+        }
+        if missing.is_empty() {
+            pass += 1;
+            if verbose {
+                msgs.push(format!("PASS  迁移到 spec skill 的 {} 门正文都在", MIGRATED.len()));
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  提示词指针指向的 Skill 门在 spec skill 里没有正文: {:?}",
+                missing
+            ));
+        }
+    }
+
     // ---- every real command is discoverable
     // Aliases are fine, but a genuine capability that the help never mentions
     // is undiscoverable: `commit` writes a change record and was invisible.
