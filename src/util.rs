@@ -1209,7 +1209,33 @@ pub fn flush_write_report(root: &Path) {
     if names.is_empty() {
         return;
     }
-    println!("写入 {} 个文件: {}", names.len(), names.join("、"));
+    // 索引分片折叠成一句。
+    //
+    // 为什么要折叠：一次写入会重写 64 个 postings 桶 + 64 个 head 桶 +
+    // 16 个 docs 分片 + meta，共 145 行、约 4KB。这些是**派生物**，名字由
+    // 分桶规则机械生成，没有一条能指导下一步动作；而真正的资产（记录文件、
+    // Atlas、Index.md、Global.md、commit、短号表）被埋在中间看不见。
+    //
+    // 判据是「这条信息能不能指导下一步动作」：记录路径能（要去看它），
+    // `postings.p37` 不能（既不能定位也不能判断）。折叠后仍报总数与分片数；
+    // 需要逐条核对时用 `--json` 取完整 `changed` 字段。
+    let mut assets: Vec<&str> = Vec::new();
+    let mut idx = 0usize;
+    for n in &names {
+        if n.starts_with(".index/") {
+            idx += 1;
+        } else {
+            assets.push(n);
+        }
+    }
+    let mut head = assets.join("、");
+    if idx > 0 {
+        if !head.is_empty() {
+            head.push(' ');
+        }
+        head.push_str(&format!("（另 {} 个索引分片）", idx));
+    }
+    println!("写入 {} 个文件: {}", names.len(), head);
 }
 
 /// 临时文件的自动清理。
