@@ -9,11 +9,7 @@ use std::collections::BTreeMap;
 
 pub fn cmd_audit(a: &Args) -> R<i32> {
     let root = resolve_root(a);
-    let libs: Vec<Lib> = match a.get("lib").unwrap_or("both") {
-        "canonical" | "c" => vec![Lib::Canonical],
-        "candidate" | "n" => vec![Lib::Candidate],
-        _ => vec![Lib::Canonical, Lib::Candidate],
-    };
+    let libs: Vec<Lib> = crate::util::libs_from(a);
     let mut rule_counts: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new(); // (error,warn,fixed)
     let mut field_issue: BTreeMap<String, usize> = BTreeMap::new();
     let mut total = 0usize;
@@ -415,11 +411,7 @@ fn id_shaped(v: &str) -> bool {
 
 pub fn cmd_refs(a: &Args) -> R<i32> {
     let root = resolve_root(a);
-    let libs: Vec<Lib> = match a.get("lib").unwrap_or("both") {
-        "canonical" | "c" => vec![Lib::Canonical],
-        "candidate" | "n" => vec![Lib::Candidate],
-        _ => vec![Lib::Canonical, Lib::Candidate],
-    };
+    let libs: Vec<Lib> = crate::util::libs_from(a);
 
     // 身份集：文件名干 + ID 字段的全部别名。
     //

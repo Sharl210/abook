@@ -263,11 +263,22 @@ pub fn cmd_write(a: &Args) -> R<i32> {
     if !a.has("dry-run") {
         crate::cmd_admin::init_book(&root)?;
     }
-    let target = a.get("lib").unwrap_or("candidate");
-    let lib = if target.starts_with('c') && !target.starts_with("cand") {
-        Lib::Canonical
-    } else {
-        Lib::Candidate
+    // 目标库。判错一次，用户的记录就落进另一个库，而且**两个库都写得进去、
+    // 都不报错**，事后只能靠翻 `--lib` 才发现。
+    //
+    // 所以这里不猜：认不出来就报错，让用户看见。原来的实现是
+    // `starts_with('c') && !starts_with("cand")`，于是 `--lib 正式` 和
+    // `--lib CANONICAL` 全都落进了候选库。
+    let target = a.get("lib").unwrap_or("candidate").trim().to_ascii_lowercase();
+    let lib = match target.as_str() {
+        "canonical" | "c" | "正式" => Lib::Canonical,
+        "candidate" | "n" | "候选" | "" => Lib::Candidate,
+        other => {
+            return crate::util::blocked(format!(
+                "--lib 认的是 canonical/正式 或 candidate/候选，收到 {other:?}。\
+写正式库要加 --approve。"
+            ))
+        }
     };
     // canonical writes require explicit approval
     if lib == Lib::Canonical && !a.has("approve") {

@@ -788,11 +788,7 @@ pub fn cmd_diff(a: &Args) -> R<i32> {
 /// `export` — dump records in a machine-readable form, paged.
 pub fn cmd_export(a: &Args) -> R<i32> {
     let root = resolve_root(a);
-    let lib = match a.get("lib").unwrap_or("both") {
-        "canonical" | "c" => Some(Lib::Canonical),
-        "candidate" | "n" => Some(Lib::Candidate),
-        _ => None,
-    };
+    let lib = crate::util::lib_from(a);
     let fmt = a.get("format").unwrap_or("jsonl").to_string();
     // `--format` is a free-form string, so an unrecognised value used to fall
     // through to the markdown branch. Asking for `json` therefore returned raw
@@ -1204,11 +1200,7 @@ pub fn cmd_search(a: &Args) -> R<i32> {
         max_hits: a.num("max").unwrap_or(0) as usize,
         min_score: a.num("min-score").unwrap_or(0) as i32,
         raw_lines: a.has("raw-lines") || a.has("lines") || a.has("whole-line"),
-        lib: match a.get("lib").unwrap_or("") {
-            "canonical" | "c" => Some(crate::rec::Lib::Canonical),
-            "candidate" | "n" => Some(crate::rec::Lib::Candidate),
-            _ => None,
-        },
+        lib: crate::util::lib_from(a),
         include_deleted: a.has("include-deleted"),
         include_promoted: !a.has("hide-promoted"),
     };
@@ -1290,11 +1282,7 @@ pub fn cmd_search(a: &Args) -> R<i32> {
 /// `search --semantic` — BM25 + association expansion, rebuilt in memory.
 fn semantic_search(a: &Args, root: &Path, patterns: Vec<String>) -> R<i32> {
     let q = patterns.join(" ");
-    let libs: Vec<Lib> = match a.get("lib").unwrap_or("") {
-        "canonical" | "c" => vec![Lib::Canonical],
-        "candidate" | "n" => vec![Lib::Candidate],
-        _ => vec![Lib::Canonical, Lib::Candidate],
-    };
+    let libs: Vec<Lib> = crate::util::libs_from(a);
     let t0 = std::time::Instant::now();
     let idx = crate::semantic::Index::build(root, &libs);
     let build_ms = t0.elapsed().as_millis();

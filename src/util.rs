@@ -1642,8 +1642,17 @@ impl LibLock {
                         let dead_certain = pid > 0 && !pid_alive(pid);
                         let unknown_and_aged = pid == 0 && aged;
                         if dead_certain || unknown_and_aged {
-                            let _ = std::fs::remove_file(&path);
-                            continue;
+                            // 删掉只是**尝试**回收。删不掉（锁文件属于别人、
+                            // 目录只读、权限不足）时必须往下走，让 deadline
+                            // 检查和 sleep 照常生效。
+                            //
+                            // 原来这里 `let _ = remove_file(..); continue;`——
+                            // 失败也 continue，于是这个循环既不睡也不看
+                            // deadline，变成单核满转的死循环。用户在只读库
+                            // 或权限异常时看到的不是"等一会儿"，是风扇起飞。
+                            if std::fs::remove_file(&path).is_ok() {
+                                continue;
+                            }
                         }
                     }
                     if std::time::Instant::now() >= deadline {
@@ -1870,11 +1879,31 @@ pub fn rederive_after_body_change(rec: &mut crate::rec::Record, old_body: &str) 
 /// accepted the Chinese aliases 「正式」「候选」 while the one in `cmd_branch` did
 /// not, so `recount --lib 候选` silently fell through to "both" and recounted
 /// the wrong set. One implementation, superset of both.
+/// 单个目标库，`None` 表示"两个库都算"。**`--lib` 的判定只有这一处。**
+///
+/// 之前有七份各写一份的实现，别名集互不相同：只有这一份认「正式」「候选」，
+/// 其余六份只认英文，于是 `audit --lib 候选` 静默按两个库统计——不报错，
+/// 数字全错。
+///
+/// `write` 那份更离谱，用的是 `starts_with('c') && !starts_with("cand")`：
+/// 于是 `--lib 正式` 落到候选库、`--lib CANONICAL` 也落到候选库，用户说
+/// "写正式库"，记录进了候选。这类代码不看代码看不出来，因为两个库都写得进去。
+pub fn lib_from(a: &Args) -> Option<crate::rec::Lib> {
+    // 大小写不敏感：`--lib CANONICAL` 和 `canonical` 是同一个意思，
+    // 没道理因为按了 CapsLock 就报错。`to_ascii_lowercase` 不动汉字，
+    // 所以中文别名照原样匹配。
+    let t = a.get("lib").unwrap_or("both").trim().to_ascii_lowercase();
+    match t.as_str() {
+        "canonical" | "c" | "正式" => Some(crate::rec::Lib::Canonical),
+        "candidate" | "n" | "候选" => Some(crate::rec::Lib::Candidate),
+        _ => None,
+    }
+}
+
 pub fn libs_from(a: &Args) -> Vec<crate::rec::Lib> {
-    match a.get("lib").unwrap_or("both") {
-        "canonical" | "c" | "正式" => vec![crate::rec::Lib::Canonical],
-        "candidate" | "n" | "候选" => vec![crate::rec::Lib::Candidate],
-        _ => vec![crate::rec::Lib::Canonical, crate::rec::Lib::Candidate],
+    match lib_from(a) {
+        Some(l) => vec![l],
+        None => vec![crate::rec::Lib::Canonical, crate::rec::Lib::Candidate],
     }
 }
 
