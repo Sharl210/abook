@@ -1,26 +1,29 @@
-//! Windows 实现：枚举系统句柄表，找出谁持有我们的管道。
+//! Windows 实现：动态加载，不依赖任何非默认导入库。
 //!
-//! Windows 没有 `/proc`，也没有 fd 符号链接。等价做法是问内核要"所有进程的
-//! 所有句柄"，逐个复制到本进程，再用 `CompareObjectHandles` 判断是不是同一个
-//! 管道对象。这是唯一能在不改动其他进程的前提下拿到答案的路径。
+//! ## 为什么全部走 GetProcAddress
 //!
-//! | 要做的事 | Linux | Windows |
-//! |---|---|---|
-//! | stdout 是不是管道 | `readlink("/proc/self/fd/1")` | `GetFileType(GetStdHandle(STD_OUTPUT_HANDLE))` |
-//! | 谁持有这个管道 | 扫 `/proc/*/fd` 找同一 `pipe:[N]` | `NtQuerySystemInformation` 全表 + `CompareObjectHandles` |
-//! | 进程名 | `/proc/<pid>/cmdline` | `QueryFullProcessImageNameW` |
-//! | 改道 | `dup2(2,1)` | `SetStdHandle(STD_OUTPUT_HANDLE, stderr)` |
+//! 第一版把 API 写成 `extern "system"` 声明 + `#[link(name = "ntdll")]`，
+//! 结果 CI 上**三个 Windows 目标全部编译失败**，而本地 `cargo check` 通过——
+//! 因为 `check` 不做链接。
 //!
-//! ## 已知限制（诚实记录，不假装没有）
+//! 根因是 gnullvm 目标的默认链接库只有
+//! `-lmingw32 -lmingwex -lmsvcrt -lkernel32 -luser32`（见 rustc 的
+//! `windows_gnullvm` target spec），**没有 ntdll**。`NtQuerySystemInformation`
+//! 只在 ntdll 里，显式 `#[link]` 时链接器找不到导入库就整体失败。
 //!
-//! **不做链式追踪。** Linux 那边能顺着 `abook | grep x | head -3` 查到第二跳，
-//! 因为持有者自己的 fd 1 是可以读的。Windows 的句柄表只说"某进程持有某对象"，
-//! 不说"这是它的 stdout"，所以拿不到下一跳。Windows 上只能拦住直接写在
-//! 管道后面的那个截断程序。这个差异不影响 `abook | more` 这类常见写法。
+//! 改成运行时取地址之后，编译期只需要 kernel32 的 `LoadLibraryW` /
+//! `GetModuleHandleW` / `GetProcAddress`——这三个都在默认库列表里。同时还有
+//! 两个附带好处：
 //!
-//! **可能被权限拒绝。** 复制别的进程的句柄需要 `PROCESS_DUP_HANDLE`，跨用户或
-//! 受保护进程会被拒。被拒就跳过——宁可漏一个可疑进程，也不能因为查不到就
-//! 胡乱改道。
+//!   1. `CompareObjectHandles` 是 Windows 10 才进 kernel32 的，动态取不到时
+//!      可以优雅降级，而不是让整个二进制在旧系统上加载失败。
+//!   2. 不再有任何 `#[link]`，跨目标编译不会再出现"本地过、CI 挂"的分裂。
+//!
+//! ## 已知限制（诚实记录）
+//!
+//! **不做链式追踪。** 句柄表只说"某进程持有某对象"，不说"这是它的 stdout"，
+//! 所以拿不到下一跳。Linux 那边能追 `abook | grep x | head -3`，Windows 只能
+//! 拦住直接写在管道后面的那一个截断程序。`abook | more` 这类常见写法不受影响。
 
 use crate::guard::{truncator_of, Support};
 use std::ffi::c_void;
@@ -38,10 +41,55 @@ const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 /// 句柄表条目上限，防内核数据异常时死循环。
 const MAX_HANDLES: usize = 1 << 22;
 
-/// `<winternl.h>` / `<ntifs.h>` 里的 `SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX`。
+// 这三个是 kernel32 的，rustc 在 gnullvm 上默认就链 kernel32。
+// 只留它们，不写任何 #[link]。
+extern "system" {
+    fn GetStdHandle(which: u32) -> Handle;
+    fn SetStdHandle(which: u32, h: Handle) -> i32;
+    fn GetFileType(h: Handle) -> u32;
+    fn GetCurrentProcess() -> Handle;
+    fn CloseHandle(h: Handle) -> i32;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
+}
+
+/// 把 `&str` 转成以 NUL 结尾的宽字符串，用于 LoadLibraryW / GetModuleHandleW。
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 取一个导出函数的地址。函数名是 ASCII，按字节查。
+fn sym(module: &str, name: &str) -> Option<*mut c_void> {
+    let w = wide(module);
+    // 优先已加载的模块：kernel32/ntdll 在任何进程里都已经在了。
+    let m = unsafe { GetModuleHandleW(w.as_ptr()) };
+    let m = if m.is_null() {
+        unsafe { LoadLibraryW(w.as_ptr()) }
+    } else {
+        m
+    };
+    if m.is_null() {
+        return None;
+    }
+    let mut n: Vec<u8> = name.bytes().collect();
+    n.push(0);
+    let p = unsafe { GetProcAddress(m, n.as_ptr()) };
+    (!p.is_null()).then_some(p)
+}
+
+macro_rules! api {
+    ($ty:ty, $module:expr, $name:expr) => {{
+        static ONCE: std::sync::OnceLock<Option<$ty>> = std::sync::OnceLock::new();
+        *ONCE.get_or_init(|| sym($module, $name).map(|p| unsafe { std::mem::transmute(p) }))
+    }};
+}
+
+/// `<ntifs.h>` 的 `SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX`。
 ///
-/// 字段用 `usize` 表示指针宽度，Rust 会按目标平台对齐：x64 是 40 字节，
-/// x86 是 28 字节。手写固定偏移会在 32 位目标上错位。
+/// 用 `usize` 表示指针宽度，让 Rust 按目标平台对齐：x64 是 40 字节，x86 是
+/// 28 字节。手写固定偏移会在 32 位目标上错位。目前只用前三个字段，其余字段
+/// 只为把条目尺寸算对（步进靠 `size_of`）。
 #[repr(C)]
 struct HandleEntryEx {
     object: usize,
@@ -54,51 +102,19 @@ struct HandleEntryEx {
     reserved: u32,
 }
 
-// 显式声明链接库，不依赖默认链接集：
-//   - kernel32：GetStdHandle / SetStdHandle / GetFileType / OpenProcess /
-//     DuplicateHandle / CloseHandle / CompareObjectHandles / QueryFullProcessImageNameW
-//   - ntdll：NtQuerySystemInformation（该 API 没有 kernel32 的等价替代）
-//
-// 为什么不能省：`CompareObjectHandles` 是 Windows 10 才进的 kernel32，早期
-// 导入库可能没有；`NtQuerySystemInformation` 从来不在 kernel32 里。若不写明，
-// 本地 check 照样通过，到 CI 链接阶段才报 undefined symbol——那正是"看起来
-// 编过了其实没链上"的典型。
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetStdHandle(which: u32) -> Handle;
-    fn SetStdHandle(which: u32, h: Handle) -> i32;
-    fn GetFileType(h: Handle) -> u32;
-    fn GetCurrentProcess() -> Handle;
-    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
-    fn CloseHandle(h: Handle) -> i32;
-    fn DuplicateHandle(
-        src_proc: Handle,
-        src: Handle,
-        dst_proc: Handle,
-        dst: *mut Handle,
-        access: u32,
-        inherit: i32,
-        options: u32,
-    ) -> i32;
-    fn CompareObjectHandles(a: Handle, b: Handle) -> i32;
-    fn QueryFullProcessImageNameW(h: Handle, flags: u32, buf: *mut u16, size: *mut u32) -> i32;
-}
-
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtQuerySystemInformation(
-        class: u32,
-        info: *mut u8,
-        len: u32,
-        ret: *mut u32,
-    ) -> NtStatus;
-}
-
 pub fn support() -> Support {
+    // 缺关键 API 时如实报告不可用，而不是让防护静默不生效。
+    let ok = sym("kernel32", "GetFileType").is_some()
+        && sym("ntdll", "NtQuerySystemInformation").is_some()
+        && sym("kernel32", "CompareObjectHandles").is_some();
     Support {
         os: "windows",
-        functional: true,
-        detail: "枚举系统句柄表比对管道对象，SetStdHandle 改道（不做链式追踪）",
+        functional: ok,
+        detail: if ok {
+            "枚举系统句柄表比对管道对象，SetStdHandle 改道（不做链式追踪）"
+        } else {
+            "缺少 NtQuerySystemInformation 或 CompareObjectHandles（需 Windows 10 及以上）"
+        },
     }
 }
 
@@ -107,8 +123,7 @@ pub fn stdout_pipe() -> Option<String> {
     if h.is_null() || h as isize == -1 {
         return None;
     }
-    let t = unsafe { GetFileType(h) };
-    (t == FILE_TYPE_PIPE).then(|| format!("{:x}", h as usize))
+    (unsafe { GetFileType(h) } == FILE_TYPE_PIPE).then(|| format!("{:x}", h as usize))
 }
 
 pub fn stderr_is_stdout() -> bool {
@@ -117,7 +132,15 @@ pub fn stderr_is_stdout() -> bool {
     if a.is_null() || b.is_null() {
         return true;
     }
-    unsafe { CompareObjectHandles(a, b) != 0 }
+    match api!(
+        unsafe extern "system" fn(Handle, Handle) -> i32,
+        "kernel32",
+        "CompareObjectHandles"
+    ) {
+        Some(f) => unsafe { f(a, b) != 0 },
+        // 拿不到比较函数时保守当同一路：宁可只警告，也别在不确定时改道。
+        None => true,
+    }
 }
 
 pub fn redirect_stdout_to_stderr() -> bool {
@@ -131,24 +154,27 @@ pub fn redirect_stdout_to_stderr() -> bool {
 }
 
 fn image_name(proc: Handle) -> Option<String> {
+    type F = unsafe extern "system" fn(Handle, u32, *mut u16, *mut u32) -> i32;
+    let f = api!(F, "kernel32", "QueryFullProcessImageNameW")?;
     let mut buf = vec![0u16; 1024];
     let mut size = buf.len() as u32;
-    let ok = unsafe { QueryFullProcessImageNameW(proc, 0, buf.as_mut_ptr(), &mut size) };
-    if ok == 0 || size == 0 {
+    if unsafe { f(proc, 0, buf.as_mut_ptr(), &mut size) } == 0 || size == 0 {
         return None;
     }
     String::from_utf16(&buf[..size as usize]).ok()
 }
 
-/// 取整张句柄表。返回原始字节与条目数。
+/// 取整张句柄表：返回缓冲与条目数。
 fn handle_table() -> Option<(Vec<u8>, usize)> {
-    // 起手 1 MiB，遇到 STATUS_INFO_LENGTH_MISMATCH 就按内核给的尺寸翻倍重试。
+    type F = unsafe extern "system" fn(u32, *mut u8, u32, *mut u32) -> NtStatus;
+    let f = api!(F, "ntdll", "NtQuerySystemInformation")?;
+    // 起手 1 MiB，遇到 STATUS_INFO_LENGTH_MISMATCH 就按内核给的尺寸放大重试。
     let mut want: usize = 1 << 20;
     for _ in 0..8 {
         let mut buf = vec![0u8; want];
         let mut ret: u32 = 0;
         let st = unsafe {
-            NtQuerySystemInformation(
+            f(
                 SYSTEM_EXTENDED_HANDLE_INFORMATION,
                 buf.as_mut_ptr(),
                 want as u32,
@@ -172,6 +198,14 @@ fn handle_table() -> Option<(Vec<u8>, usize)> {
 }
 
 pub fn find_truncator(_pipe: &str, _me: &str) -> Option<String> {
+    type OpenF = unsafe extern "system" fn(u32, i32, u32) -> Handle;
+    type DupF = unsafe extern "system" fn(Handle, Handle, Handle, *mut Handle, u32, i32, u32) -> i32;
+    type CmpF = unsafe extern "system" fn(Handle, Handle) -> i32;
+
+    let open = api!(OpenF, "kernel32", "OpenProcess")?;
+    let dup = api!(DupF, "kernel32", "DuplicateHandle")?;
+    let cmp = api!(CmpF, "kernel32", "CompareObjectHandles")?;
+
     let mine = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     if mine.is_null() {
         return None;
@@ -181,44 +215,42 @@ pub fn find_truncator(_pipe: &str, _me: &str) -> Option<String> {
     let ent = std::mem::size_of::<HandleEntryEx>();
     let cur = unsafe { GetCurrentProcess() };
     let me_pid = std::process::id();
+    let pw = std::mem::size_of::<usize>();
+
+    let read_usize = |o: usize| -> usize {
+        let mut b = [0u8; std::mem::size_of::<usize>()];
+        b.copy_from_slice(&buf[o..o + std::mem::size_of::<usize>()]);
+        usize::from_ne_bytes(b)
+    };
 
     for i in 0..n {
         let off = hdr + i * ent;
         if off + ent > buf.len() {
             break;
         }
-        // 按字段宽度读出条目，避免在未对齐的缓冲上做引用转换。
-        let read_usize = |o: usize| -> usize {
-            let mut b = [0u8; std::mem::size_of::<usize>()];
-            b.copy_from_slice(&buf[o..o + std::mem::size_of::<usize>()]);
-            usize::from_ne_bytes(b)
-        };
-        let pid = read_usize(off + std::mem::size_of::<usize>()) as u32;
+        let pid = read_usize(off + pw) as u32;
         if pid == 0 || pid == me_pid {
             continue;
         }
-        let hval = read_usize(off + std::mem::size_of::<usize>() * 2) as Handle;
+        let hval = read_usize(off + pw * 2) as Handle;
         if hval.is_null() {
             continue;
         }
 
-        let proc = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
+        let proc = unsafe { open(PROCESS_DUP_HANDLE, 0, pid) };
         if proc.is_null() {
             continue;
         }
-        let mut dup: Handle = std::ptr::null_mut();
-        let ok = unsafe {
-            DuplicateHandle(proc, hval, cur, &mut dup, 0, 0, DUPLICATE_SAME_ACCESS)
-        };
-        let same = ok != 0 && unsafe { CompareObjectHandles(dup, mine) != 0 };
-        if !dup.is_null() {
-            unsafe { CloseHandle(dup) };
+        let mut duph: Handle = std::ptr::null_mut();
+        let ok = unsafe { dup(proc, hval, cur, &mut duph, 0, 0, DUPLICATE_SAME_ACCESS) };
+        let same = ok != 0 && unsafe { cmp(duph, mine) != 0 };
+        if !duph.is_null() {
+            unsafe { CloseHandle(duph) };
         }
         if !same {
             unsafe { CloseHandle(proc) };
             continue;
         }
-        // 找到了：拿它的映像名判断是不是截断程序。
         let named = image_name(proc);
         unsafe { CloseHandle(proc) };
         if let Some(name) = named {
