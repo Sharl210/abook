@@ -41,6 +41,8 @@ mod vault;
 mod selfupdate;
 mod out;
 mod guard;
+mod mcp_json;
+mod mcp;
 
 use util::*;
 
@@ -55,11 +57,16 @@ pub(crate) const VERSION: &str = env!("ABOOK_VERSION");
 /// enough that a wedged process does not hang a build script for minutes.
 const LOCK_WAIT_SECS: u64 = 30;
 
+pub(crate) fn help_text_public() -> String {
+    help_text()
+}
+
 fn help_text() -> String {
     format!(
         r#"abook {VERSION} — 记忆库命令行工具（单二进制，零依赖）
 
-用法: abook <命令> [参数...]
+用法: abook [mcp] [stdio]        非交互无参数/显式 mcp 启动 MCP stdio
+      abook cli <命令> [参数...] 强制走 CLI；已有 abook <命令> 保持兼容
 
 ═══ 先看这两条 ═══
   abook detect              我在什么平台、工具装好没有、该用哪个架构包
@@ -734,9 +741,20 @@ fn cmd_install(a: &Args) -> R<i32> {
 }
 
 fn main() {
-    // 第一件事：装上截断防护。必须早于任何输出，否则第一行就已经被截走了。
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // MCP stdio 必须在截断守卫、CLI 帮助和任何普通输出之前分流；stdout
+    // 是协议通道，只允许逐行 JSON-RPC。
+    if crate::mcp::is_requested(&argv) || crate::mcp::should_start_default_stdio(&argv) {
+        let args = if argv.first().map(|x| x == "mcp").unwrap_or(false) { &argv[1..] } else { &argv[..] };
+        if args.first().map(|x| x == "stdio").unwrap_or(false) || args.is_empty() {
+            std::process::exit(crate::mcp::run_stdio());
+        }
+    }
+    if argv.first().map(|x| x == "cli").unwrap_or(false) {
+        argv.remove(0);
+    }
+    // 第一件事：装上截断防护。必须早于任何 CLI 输出，否则第一行就已经被截走了。
     crate::guard::install();
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let parsed = Args::parse(&argv);
     // root is resolved the same way every command resolves it, so the write
     // report can print repo-relative names
