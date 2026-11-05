@@ -44,6 +44,8 @@ mod guard;
 mod mcp_json;
 mod mcp;
 
+use std::io::IsTerminal;
+
 use util::*;
 
 // Comes from build.rs, which derives it from the release tag (`v1.6.1` ->
@@ -755,6 +757,9 @@ fn main() {
     }
     // 第一件事：装上截断防护。必须早于任何 CLI 输出，否则第一行就已经被截走了。
     crate::guard::install();
+    if argv.is_empty() && std::io::stdin().is_terminal() {
+        std::process::exit(cmd_help(&Args::empty()).map(|c| c).unwrap_or(2));
+    }
     let parsed = Args::parse(&argv);
     // root is resolved the same way every command resolves it, so the write
     // report can print repo-relative names

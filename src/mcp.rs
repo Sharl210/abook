@@ -159,15 +159,6 @@ fn tools_list(_legacy: bool) -> Value {
         tools.push(tool(&format!("abook_{name}"), &format!("调用 abook CLI 命令 `{name}`；参数使用结构化 argv 数组，不经过 shell。")));
     }
     for (name, desc) in [
-        ("memory_context", "读取记忆平面入口和相关上下文。"),
-        ("memory_write", "写入一条结构化记忆，body 支持完整多行文本。"),
-        ("memory_read", "读取一条记忆记录。"),
-        ("memory_search", "搜索分层记忆。"),
-        ("memory_recall", "按查询召回相关记忆。"),
-        ("memory_batch_preview", "预览批量记忆维护，不修改磁盘。"),
-        ("memory_batch_apply", "应用已确认的批量记忆维护事务。"),
-        ("memory_batch_rollback", "回滚一个已提交的批量事务。"),
-        ("memory_batch_status", "读取批量事务状态。"),
         ("memory_help", "读取 abook 的机器可读帮助和命令描述。"),
         ("spec_list", "列出内置规范主题。"),
         ("spec_get", "读取一份内置规范全文。"),
@@ -298,18 +289,20 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
 
 fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<String>), String> {
     let a = args.cloned().unwrap_or_else(|| obj(vec![]));
-    let mut body = None;
+    if name == "memory_context" { return Ok((vec!["index".into(), "--json".into()], None)); }
     if name == "memory_write" {
         let title = a.str("title").ok_or("memory_write 缺少 title")?;
         let read_when = a.str("read_when").unwrap_or("");
-        let b = a.str("body").ok_or("memory_write 缺少 body")?;
-        let mut v = vec!["write".into(), "--title".into(), title.into(), "--read-when".into(), read_when.into(), "--lib".into(), "candidate".into(), "--json".into()];
-        body = Some(b.to_string());
-        return Ok((v, body));
+        let body = a.str("body").ok_or("memory_write 缺少 body")?.to_string();
+        let plane = a.str("plane").unwrap_or("episodic");
+        return Ok((vec!["write".into(), "--title".into(), title.into(), "--read-when".into(), read_when.into(), "--lib".into(), plane.into(), "--json".into()], Some(body)));
     }
     if name == "memory_read" { return Ok((vec!["show".into(), a.str("id").ok_or("memory_read 缺少 id")?.into(), "--json".into()], None)); }
     if name == "memory_search" { return Ok((vec!["search".into(), a.str("query").ok_or("memory_search 缺少 query")?.into(), "--json".into()], None)); }
     if name == "memory_recall" { return Ok((vec!["recall".into(), a.str("query").ok_or("memory_recall 缺少 query")?.into(), "--json".into()], None)); }
+    if name == "memory_batch_preview" || name == "memory_batch_apply" || name == "memory_batch_rollback" || name == "memory_batch_status" {
+        return Err(format!("工具尚未实现事务内核: {name}"));
+    }
     if name == "memory_help" { return Ok((vec!["help".into()], None)); }
     if name == "spec_list" { return Ok((vec!["spec".into(), "--json".into()], None)); }
     if name == "spec_get" { return Ok((vec!["spec".into(), a.str("name").ok_or("spec_get 缺少 name")?.into(), "--json".into()], None)); }
@@ -317,6 +310,7 @@ fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<St
     if name == "skill_read" { return Ok((vec!["skill".into(), "read".into(), a.str("name").ok_or("skill_read 缺少 name")?.into(), "--json".into()], None)); }
     if name == "system_update" { return Ok((vec!["upgrade".into(), "--json".into()], None)); }
     let command = name.strip_prefix("abook_").ok_or_else(|| format!("未知工具: {name}"))?;
+    if !crate::known_commands().contains(&command) { return Err(format!("未知工具: {name}")); }
     let mut out = vec![command.to_string()];
     if let Some(argv) = a.array("argv") {
         for item in argv { out.push(match item { Value::String(s) => s.clone(), _ => return Err("argv 只能包含字符串".into()) }); }
