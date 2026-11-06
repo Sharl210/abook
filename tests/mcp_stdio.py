@@ -236,7 +236,7 @@ def test_memory_tools():
         assert marker_recall.returncode == 0, marker_recall.stderr
         marker_recall_value = json.loads(marker_recall.stdout)
         assert marker_recall_value["total"] >= 1 and marker_recall_value["items"], marker_recall_value
-        alias_write = subprocess.run([BIN, "add", "--root", root, "--title", "alias body", "--read-when", "alias parser", "--body", "alias line one\nalias line two 😀", "--json"], text=True, encoding="utf-8", capture_output=True)
+        alias_write = subprocess.run([BIN, "add", "--root", root, "--plane", "explicit", "--title", "alias body", "--read-when", "alias parser", "--body", "alias line one\nalias line two 😀", "--json"], text=True, encoding="utf-8", capture_output=True)
         assert alias_write.returncode == 0, alias_write.stderr
         alias_record = json.loads(alias_write.stdout)
         assert alias_record["content"] == "alias line one\nalias line two 😀", alias_record
