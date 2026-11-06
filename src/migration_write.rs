@@ -31,6 +31,7 @@ const MANIFEST_JSONL: &str = "manifest.jsonl";
 const MANIFEST_TSV: &str = "manifest.tsv";
 const ALIASES_JSONL: &str = "legacy_aliases.jsonl";
 const ALIASES_TSV: &str = "legacy_aliases.tsv";
+const REPORT_TXT: &str = "migration-report.txt";
 const RELATION_JSONL: &str = "relation_edges.jsonl";
 const RELATION_TSV: &str = "relation_edges.tsv";
 const ARCHIVE_KINDS: [&str; 3] = ["vault", "commits", "review"];
