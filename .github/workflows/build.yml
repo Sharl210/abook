@@ -219,6 +219,7 @@ jobs:
                   )
                   assert json.loads(read.stdout)["value"] == body
           PY
+      - name: 内置自检
         run: |
           set -euo pipefail
           ROOT="$(mktemp -d)"
