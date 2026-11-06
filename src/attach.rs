@@ -300,11 +300,18 @@ pub fn orphans(root: &Path, lib: Lib) -> Vec<(String, u64, usize)> {
 
 // ---------------------------------------------------------------- commands
 
-fn need_record(a: &Args) -> R<(PathBuf, Record)> {
+fn need_record(a: &Args) -> R<(PathBuf, Record)> {fn need_record(a: &Args) -> R<(PathBuf, Record)> {
     let root = resolve_root(a);
     let sel = a.need_pos(1, "记录选择器（路径 / 文件名 / ID）")?;
-    let (path, lib) = crate::rec::resolve_record(&root, &sel)?;
-    let rec = Record::parse(&path, lib)?;
+    let (path, lib) = match crate::rec::resolve_record(&root, &sel) {
+        Ok(pair) => pair,
+        Err(_) => (crate::memory_plane::resolve_attachment_record_path(&root, &sel)?, Lib::Canonical),
+    };
+    let rec = if matches!(path.extension().and_then(|s| s.to_str()), Some("md" | "json")) {
+        crate::memory_plane::attachment_record(&path)?
+    } else {
+        Record::parse(&path, lib)?
+    };
     Ok((path, rec))
 }
 
@@ -1168,12 +1175,9 @@ pub fn refs_in(body: &str) -> Vec<Ref> {
 pub fn sync_manifest(rec_path: &Path) -> (bool, String) {
     let f = scan(rec_path);
     let want = render_list(&f.items);
-    let cur = match crate::rec::Record::parse(rec_path, crate::rec::Lib::Candidate)
-        .or_else(|_| crate::rec::Record::parse(rec_path, crate::rec::Lib::Canonical))
-    {
-        Ok(r) => r.attach.unwrap_or_default(),
-        Err(_) => String::new(),
-    };
+    let cur = crate::memory_plane::attachment_record(rec_path)
+        .map(|r| r.attach.unwrap_or_default())
+        .unwrap_or_default();
     (
         normalize(&cur) != normalize(&want),
         want,
@@ -1197,6 +1201,9 @@ pub fn commit_manifest(rec_path: &Path) -> R<bool> {
     if !changed {
         return Ok(false);
     }
+    if rec_path.extension().and_then(|s| s.to_str()) == Some("json") {
+        return crate::memory_plane::commit_attachment_manifest(rec_path, &want);
+    }
     let (root, lib) = root_and_lib(rec_path)?;
     let mut rec = crate::rec::Record::parse(rec_path, lib)?;
     rec.attach = if want.trim().is_empty() { None } else { Some(want) };
@@ -1214,30 +1221,22 @@ pub fn commit_manifest(rec_path: &Path) -> R<bool> {
 /// 再往上一级拿根。推不出来就报清楚，而不是猜一个默认根去写——猜错的根会让
 /// 这次写入落到另一个库上。
 fn root_and_lib(rec_path: &Path) -> R<(PathBuf, Lib)> {
-    let lib = rec_path
+    let parent_name = rec_path
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().to_string());
-    let (lib, _) = match lib.as_deref() {
-        Some("canonical") => (Lib::Canonical, ()),
-        Some("candidate") => (Lib::Candidate, ()),
-        other => {
-            return Err(EE::Usage(format!(
-                "记录不在 <根>/<库>/records/ 下（实际: {}）。\
-                 附件清单只能回写到标准布局的库里",
-                other.unwrap_or("?")
-            )))
-        }
-    };
-    // <root>/<lib>/records/x.md → root
-    let root = rec_path
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| EE::Usage("推不出记忆根".into()))?;
-    Ok((root, lib))
+    if matches!(parent_name.as_deref(), Some("canonical" | "candidate")) {
+        let lib = if parent_name.as_deref() == Some("candidate") { Lib::Candidate } else { Lib::Canonical };
+        let root = rec_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.to_path_buf()).ok_or_else(|| EE::Usage("推不出记忆根".into()))?;
+        return Ok((root, lib));
+    }
+    let plane = parent_name.ok_or_else(|| EE::Usage("推不出六平面记录目录".into()))?;
+    if crate::memory_plane::PLANES.contains(&plane.as_str()) {
+        let root = rec_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.to_path_buf()).ok_or_else(|| EE::Usage("推不出六平面记忆根".into()))?;
+        return Ok((root, Lib::Canonical));
+    }
+    Err(EE::Usage(format!("记录不在标准记忆布局中（实际父目录: {plane}）")))
 }
 
 /// 校验一份记录与它的附件目录是否一致。

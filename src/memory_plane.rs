@@ -243,7 +243,54 @@ fn record_path(root: &Path, plane: &str, id: &str) -> R<PathBuf> {
 }
 
 
-#[cfg(test)]
+pub fn resolve_attachment_record_path(root: &Path, selector: &str) -> R<PathBuf> {
+    let direct = Path::new(selector);
+    let path = if direct.is_absolute() { direct.to_path_buf() } else { root.join(direct) };
+    if path.exists() {
+        let canonical = fs::canonicalize(&path).map_err(|e| err(format!("附件记录路径无法解析: {e}")))?;
+        if !canonical.starts_with(root) { return Err(err("附件记录路径越出库根")); }
+        if !matches!(canonical.extension().and_then(|s| s.to_str()), Some("md" | "json")) { return Err(err("附件记录文件后缀只支持 md/json")); }
+        return Ok(canonical);
+    }
+    if !valid_id(selector) { return Err(err("附件记录 selector 不是合法 ID 或相对路径")); }
+    if let Some(located) = locate_record(root, selector)? { return Ok(located.path); }
+    crate::util::notfound::<PathBuf>(format!("没有找到附件记录: {selector}"))
+}
+
+pub fn commit_attachment_manifest(path: &Path, manifest: &str) -> R<bool> {
+    if path.extension().and_then(|s| s.to_str()) == Some("md") {
+        let mut record = crate::rec::Record::parse(path, crate::rec::Lib::Canonical)?;
+        record.attach = if manifest.trim().is_empty() { None } else { Some(manifest.to_string()) };
+        let parent = path.parent().ok_or_else(|| err("附件记录缺少父目录"))?;
+        let root = if parent.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) == Some("planes") {
+            parent.parent().and_then(|p| p.parent()).ok_or_else(|| err("无法解析平面库根"))?
+        } else {
+            parent.parent().and_then(|p| p.parent()).ok_or_else(|| err("无法解析旧库根"))?
+        };
+        let args = crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::from([("root".to_string(), vec![root.to_string_lossy().to_string()])]) };
+        crate::cmd_edit::save(&crate::util::resolve_root(&args), &mut record, &crate::util::Args::empty(), "attach")?;
+        return Ok(true);
+    }
+    let raw = fs::read_to_string(path)?;
+    let mut value = mcp_json::parse(&raw).map_err(|e| err(format!("附件记录 JSON 无效: {e}")))?;
+    let next_revision = text(&value, "revision").and_then(|s| s.parse::<u64>().ok()).unwrap_or(1).saturating_add(1);
+    let map = match &mut value { Value::Object(map) => map, _ => return Err(err("附件记录 JSON 必须为对象")) };
+    map.insert("attachment_manifest".into(), Value::s(manifest));
+    map.insert("revision".into(), Value::n(next_revision.to_string()));
+    map.insert("updated_at".into(), Value::n(now().to_string()));
+    crate::util::write_atomic_cas(path, &mcp_json::stringify(&value), &raw)?;
+    Ok(true)
+}
+
+pub fn attachment_record(path: &Path) -> R<crate::rec::Record> {
+    let raw = fs::read_to_string(path)?;
+    let value = mcp_json::parse(&raw).map_err(|e| err(format!("附件记录 JSON 无效: {e}")))?;
+    let fields = [("ID", "id"), ("TITLE", "title"), ("READ_WHEN", "read_when")].iter().filter_map(|(field, key)| text(&value, key).map(|v| ((*field).to_string(), v))).collect();
+    let attach = text(&value, "attachment_manifest").or_else(|| text(&value, "legacy_attach"));
+    Ok(crate::rec::Record { path: path.to_path_buf(), lib: crate::rec::Lib::Canonical, fields, body: text(&value, "content").unwrap_or_default(), promotion: None, attach, raw, devs: Vec::new(), header_inferred: false, base: None, mtime: fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0) })
+}
+
+
 mod legacy_migration_tests {
     use super::*;
 
