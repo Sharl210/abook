@@ -399,9 +399,12 @@ activation body
             assert missing_relation["result"]["isError"] is True, missing_relation
             assert missing_relation["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", missing_relation
             with open(os.path.join(activation_root, "relation_edges.tsv"), "w", encoding="utf-8") as handle:
-                handle.write("source_rel\\tfield\\tordinal\\tvalue\\tstatus\\ttarget_rel\\tcandidates\\n")
-                handle.write("{}\\t{}\\t{}\\t{}\\t{}\\t{}\\t{}\\n".format(relation_row["source_rel"], relation_row["field"], relation_row["ordinal"], relation_row["value"], relation_row["status"], relation_row["target_rel"], ",".join(relation_row["candidates"])))
-            # Keep the remaining failure probes against the real staged record.
+                handle.write("source_rel\tfield\tordinal\tvalue\tstatus\ttarget_rel\tcandidates\n")
+                handle.write("{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(relation_row["source_rel"], relation_row["field"], relation_row["ordinal"], relation_row["value"], relation_row["status"], relation_row["target_rel"], ",".join(relation_row["candidates"])))
+            restored = send(p, request("mig-verify-rel-restored", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert restored["result"]["isError"] is False, restored
+            assert restored["result"]["structuredContent"]["status"] == "PASS", restored
+            assert restored["result"]["structuredContent"]["relations"] == 1, restored
             targets = []
             for base, _, files in os.walk(os.path.join(activation_root, "planes")):
                 targets.extend(os.path.join(base, name) for name in files if name.endswith(".md"))

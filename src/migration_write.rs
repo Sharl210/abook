@@ -743,8 +743,11 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
     }
 
     let mut seen = BTreeSet::new();
+    let mut seen_sources = BTreeSet::new();
     let mut staged_parsed: Vec<(super::RecordKey, Record)> = Vec::new();
     for record in &staged.records {
+        validate_relative(&record.source_rel, "源记录相对路径")?;
+        if !seen_sources.insert(record.source_rel.clone()) { return Err(integrity_error(format!("源记录相对路径重复: {}", record.source_rel))); }
         validate_relative(&record.target_rel, "目标记录路径")?;
         if !ALL_PLANES.contains(&record.target_plane.as_str()) || !record.target_rel.starts_with(&format!("{PLAN_DIR}/{}/records/", record.target_plane)) {
             return Err(integrity_error(format!("记录平面与目标路径不匹配: {}", record.target_rel)));
@@ -1010,17 +1013,24 @@ fn record_key_from_staged_path(source_rel: &str) -> super::RecordKey {
 }
 
 fn stage_relation_edges(edges: &[super::RelationEdge], records: &[StagedRecord]) -> R<Vec<StagedRelation>> {
-    let by_key: BTreeMap<super::RecordKey, String> = records.iter().map(|r| (record_key_from_staged_path(&r.source_rel), r.target_rel.clone())).collect();
+    let mut by_key = BTreeMap::new();
+    for record in records {
+        let key = record_key_from_staged_path(&record.source_rel);
+        if by_key.insert(key, (record.source_rel.clone(), record.target_rel.clone())).is_some() { return Err(integrity_error(format!("关系边源身份映射重复: {}", record.source_rel))); }
+    }
     let mut out = Vec::new();
     for edge in edges {
+        let source_rel = by_key.get(&edge.source).ok_or_else(|| integrity_error(format!("关系边源记录缺少 staged 映射: {}", edge.value)))?.0.clone();
         let (status, target_rel, candidates) = match &edge.target {
-            super::RelationTarget::Resolved(key) => ("resolved".to_string(), by_key.get(key).cloned(), Vec::new()),
-            super::RelationTarget::Ambiguous(keys) => ("ambiguous".to_string(), None, keys.iter().filter_map(|k| by_key.get(k).cloned()).collect()),
+            super::RelationTarget::Resolved(key) => ("resolved".to_string(), Some(by_key.get(key).ok_or_else(|| integrity_error(format!("关系边目标缺少 staged 记录: {}", edge.value)))?.1.clone()), Vec::new()),
+            super::RelationTarget::Ambiguous(keys) => {
+                let targets = keys.iter().map(|k| by_key.get(k).map(|item| item.1.clone()).ok_or_else(|| integrity_error(format!("关系歧义候选缺少 staged 记录: {}", edge.value)))).collect::<R<Vec<_>>>()?;
+                ("ambiguous".to_string(), None, targets)
+            }
             super::RelationTarget::Unresolved => ("unresolved".to_string(), None, Vec::new()),
             super::RelationTarget::NonIdentity => ("non_identity".to_string(), None, Vec::new()),
         };
-        if status == "resolved" && target_rel.is_none() { return Err(integrity_error(format!("关系边目标缺少 staged 记录: {}", edge.value))); }
-        out.push(StagedRelation { source_rel: edge.source.relative_path(), field: edge.field.to_string(), ordinal: edge.ordinal, value: edge.value.clone(), status, target_rel, candidates });
+        out.push(StagedRelation { source_rel, field: edge.field.to_string(), ordinal: edge.ordinal, value: edge.value.clone(), status, target_rel, candidates });
     }
     Ok(out)
 }

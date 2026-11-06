@@ -2163,7 +2163,13 @@ mod tests {
         assert!(manifest.old_id_map.targets("candidate/records/AB2-N-002.md").len() >= 1);
     }
     #[test]
-    fn promoted_to_header_marks_candidate_promoted() {
+    fn related_ids_keep_unresolved_identity() {
+        let source = mk(Lib::Canonical, "C-20261101T120000-aaaa2222", "ID=C-20261101T120000-aaaa2222\nRELATED_IDS=N-20260928T170212-12569932", "A");
+        let manifest = manifest_from_records(vec![source]);
+        assert!(matches!(manifest.relation_edges[0].target, RelationTarget::Unresolved));
+    }
+
+
         let rec = mk(
             Lib::Candidate,
             &candidate_id(4),
