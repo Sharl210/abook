@@ -779,13 +779,13 @@ fn main() {
     let mut memory_mode = false;
     let parsed = match parsed_raw {
         Ok(a) if a.has("help") => Ok(a),
-        Ok(a) => match a.validate_for(&spec::canonical(&a.cmd)) {
-            Err(error) => Err(error),
-            Ok(()) => match memory_route_args(&a) {
-                Ok(Some(routed)) => { memory_mode = true; Ok(routed) }
-                Ok(None) => Ok(a),
+        Ok(a) => match memory_route_args(&a) {
+            Ok(Some(routed)) => { memory_mode = true; Ok(routed) }
+            Ok(None) => match a.validate_for(&spec::canonical(&a.cmd)) {
+                Ok(()) => Ok(a),
                 Err(error) => Err(error),
             },
+            Err(error) => Err(error),
         },
         Err(error) => Err(error),
     };
@@ -1129,15 +1129,25 @@ fn memory_route_args(a: &Args) -> R<Option<Args>> {
         "export" => "export",
         _ => unreachable!(),
     };
-    let routed = Args { cmd: "memory".to_string(), pos: vec![sub.to_string()], kv: a.kv.clone() };
+    match a.cmd.as_str() {
+        "get" => {
+            if a.get("id").is_some() && !a.pos.is_empty() { return usage("marker 根 get 不能同时使用 --id 与位置参数"); }
+            if a.get("field").is_some() && a.pos.len() > 1 { return usage("marker 根 get 不能同时使用第二位置字段与 --field"); }
+        }
+        "search" | "recall" if a.get("query").is_some() && !a.pos.is_empty() => return usage("marker 根 search/recall 不能同时使用 --query 与位置查询词"),
+        "update" | "edit" | "delete" | "rm" | "restore" if a.get("id").is_some() && !a.pos.is_empty() => return usage("marker 根命令不能同时使用 --id 与位置记录 ID"),
+        _ => {}
+    }
     let allowed_positional_count = match a.cmd.as_str() {
-        "get" => 2,
-        "show" | "cat" | "update" | "edit" | "delete" | "rm" | "restore" => 1,
-        "search" | "recall" => usize::MAX,
+        "get" if a.get("id").is_none() => 2,
+        "get" => 0,
+        "show" | "cat" | "update" | "edit" | "delete" | "rm" | "restore" if a.get("id").is_none() => 1,
+        "show" | "cat" | "update" | "edit" | "delete" | "rm" | "restore" => 0,
+        "search" | "recall" if a.get("query").is_none() => usize::MAX,
         _ => 0,
     };
     if a.pos.len() > allowed_positional_count { return usage(format!("marker 根 `{}` 收到多余位置参数；请按 `abook describe {}` 查看格式", a.cmd, a.cmd)); }
-    let mut routed = routed;
+    let mut routed = Args { cmd: "memory".to_string(), pos: vec![sub.to_string()], kv: a.kv.clone() };
     if matches!(sub, "read" | "update" | "delete" | "restore") && routed.get("id").is_none() {
         if let Some(id) = a.pos.first() { routed.kv.insert("id".into(), vec![id.clone()]); }
     }
