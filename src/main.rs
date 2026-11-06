@@ -45,6 +45,7 @@ mod mcp_json;
 mod mcp;
 mod mcp_registry;
 mod migration;
+mod memory_plane;
 mod txn;
 
 use std::io::IsTerminal;

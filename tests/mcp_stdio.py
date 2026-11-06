@@ -139,6 +139,42 @@ def test_batch_tools():
         p.wait(timeout=5)
         shutil.rmtree(root)
     assert p.returncode == 0, p.stderr.read()
+def test_memory_tools():
+    root = tempfile.mkdtemp(prefix="abook-mcp-memory-")
+    p = start()
+    try:
+        tools = send(p, request("mt", "tools/list"))["result"]["tools"]
+        names = {tool["name"] for tool in tools}
+        assert {"memory_context", "memory_write", "memory_read", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore"} <= names
+        written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
+        assert written["result"]["isError"] is False, written
+        record = written["result"]["structuredContent"]
+        read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
+        assert read["result"]["structuredContent"]["content"] == "第一行\n第二行 😀"
+        search = send(p, request("m3", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "plane": "explicit"}}))
+        assert len(search["result"]["structuredContent"]) == 1
+        context = send(p, request("m4", "tools/call", {"name": "memory_context", "arguments": {"root": root}}))
+        assert context["result"]["structuredContent"]["planes"]["explicit"] == 1
+        revision = str(record["revision"])
+        updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "content": "更新后的正文"}}))
+        assert updated["result"]["isError"] is False, updated
+        assert updated["result"]["structuredContent"]["content"] == "更新后的正文"
+        deleted = send(p, request("m8", "tools/call", {"name": "memory_delete", "arguments": {"root": root, "id": record["id"], "expected_revision": int(updated["result"]["structuredContent"]["revision"])}}))
+        assert deleted["result"]["structuredContent"]["status"] == "deleted"
+        restored = send(p, request("m9", "tools/call", {"name": "memory_restore", "arguments": {"root": root, "id": record["id"], "expected_revision": int(deleted["result"]["structuredContent"]["revision"])}}))
+        assert restored["result"]["structuredContent"]["status"] == "active"
+        stale = send(p, request("m10", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": 1, "content": "冲突"}}))
+        assert stale["result"]["isError"] is True
+        rejected = send(p, request("m11", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "credentials", "title": "x", "content": "y"}}))
+        assert rejected["result"]["isError"] is True
+        unknown = send(p, request("m12", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "unexpected": True}}))
+        assert unknown["result"]["isError"] is True
+
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
 def test_eof_and_stdout_purity():
     p = start()
     p.stdin.write(json.dumps(request("d", "server/discover"), separators=(",", ":")) + "\n")
@@ -155,5 +191,6 @@ if __name__ == "__main__":
     test_modern()
     test_legacy()
     test_batch_tools()
+    test_memory_tools()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 4 suites passed")
+    print("MCP stdio tests: 5 suites passed")
