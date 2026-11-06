@@ -233,6 +233,29 @@ pub fn context(root: &str) -> R<Value> {
     Ok(object(vec![("planes", Value::Object(counts)), ("credentials", Value::s("vault")), ("total", Value::n(records(&root, None)?.len().to_string()))]))
 }
 
+pub fn export(root: &str, plane: Option<&str>) -> R<Value> {
+    if let Some(p) = plane {
+        if !plane_ok(p) { return Err(err(format!("未知记忆平面: {p}"))); }
+    }
+    let root = root_path(root)?;
+    let items = records(&root, plane)?;
+    let mut counts = BTreeMap::new();
+    for p in PLANES {
+        if plane.map(|selected| selected == *p).unwrap_or(true) {
+            counts.insert((*p).to_string(), Value::n(records(&root, Some(p))?.len().to_string()));
+        }
+    }
+    let total = items.len();
+    Ok(object(vec![
+        ("format", Value::s("abook.memory.export.v1")),
+        ("planes", Value::Object(counts)),
+        ("items", Value::Array(items)),
+        ("total", Value::n(total.to_string())),
+        ("credentials", Value::s("vault")),
+    ]))
+}
+
+
 fn record_path(root: &Path, plane: &str, id: &str) -> R<PathBuf> {
     let path = file_for(root, plane, id)?;
     if path.exists() {

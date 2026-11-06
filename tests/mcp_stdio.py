@@ -145,7 +145,7 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_context", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
+        assert {"memory_context", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
@@ -158,8 +158,18 @@ def test_memory_tools():
         assert search["result"]["structuredContent"]["total"] == 1
         context = send(p, request("m4", "tools/call", {"name": "memory_context", "arguments": {"root": root}}))
         assert context["result"]["structuredContent"]["planes"]["explicit"] == 2
+        exported = send(p, request("m4b", "tools/call", {"name": "memory_export", "arguments": {"root": root}}))
+        assert exported["result"]["isError"] is False, exported
+        assert exported["result"]["structuredContent"]["format"] == "abook.memory.export.v1"
+        assert exported["result"]["structuredContent"]["total"] == 2
+        assert exported["result"]["structuredContent"]["credentials"] == "vault"
+        assert len(exported["result"]["structuredContent"]["items"]) == 2
+        explicit_export = send(p, request("m4c", "tools/call", {"name": "memory_export", "arguments": {"root": root, "plane": "explicit"}}))
+        assert explicit_export["result"]["structuredContent"]["planes"]["explicit"] == 2
+        assert explicit_export["result"]["structuredContent"]["total"] == 2
         revision = str(record["revision"])
         updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "body": "更新后的正文"}}))
+
         assert updated["result"]["isError"] is False, updated
         assert updated["result"]["structuredContent"]["content"] == "更新后的正文"
         deleted = send(p, request("m8", "tools/call", {"name": "memory_delete", "arguments": {"root": root, "id": record["id"], "expected_revision": int(updated["result"]["structuredContent"]["revision"])}}))
