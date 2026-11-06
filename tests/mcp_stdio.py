@@ -149,12 +149,15 @@ def test_memory_tools():
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
+        extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
+        assert extra["result"]["isError"] is False, extra
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
         assert read["result"]["structuredContent"]["content"] == "第一行\n第二行 😀"
         search = send(p, request("m3", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "plane": "explicit"}}))
-        assert len(search["result"]["structuredContent"]) == 1
+        assert len(search["result"]["structuredContent"]["items"]) == 1
+        assert search["result"]["structuredContent"]["total"] == 1
         context = send(p, request("m4", "tools/call", {"name": "memory_context", "arguments": {"root": root}}))
-        assert context["result"]["structuredContent"]["planes"]["explicit"] == 1
+        assert context["result"]["structuredContent"]["planes"]["explicit"] == 2
         revision = str(record["revision"])
         updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "content": "更新后的正文"}}))
         assert updated["result"]["isError"] is False, updated
@@ -170,7 +173,7 @@ def test_memory_tools():
         unknown = send(p, request("m12", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "unexpected": True}}))
         assert unknown["result"]["isError"] is True
         listed = send(p, request("m13", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit", "limit": 10, "offset": 0}}))
-        assert listed["result"]["structuredContent"]["total"] == 1
+        assert listed["result"]["structuredContent"]["total"] == 2
 
     finally:
         p.stdin.close()

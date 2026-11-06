@@ -112,9 +112,13 @@ pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<V
     let mut hits = Vec::new();
     for item in records(&root, plane)? {
         let hay = [text(&item, "title"), text(&item, "content"), text(&item, "read_when")].into_iter().flatten().collect::<Vec<_>>().join("\n").to_lowercase();
-        if needle.is_empty() || hay.contains(&needle) { hits.push(item); if hits.len() >= limit.max(1) { break; } }
+        if hay.contains(&needle) { hits.push(item); }
     }
-    Ok(Value::Array(hits))
+    hits.sort_by_key(|v| text(v, "id").unwrap_or_default());
+    let total = hits.len();
+    let size = limit.clamp(1, 500);
+    hits.truncate(size);
+    Ok(object(vec![("items", Value::Array(hits)), ("total", Value::n(total.to_string())), ("limit", Value::n(size.to_string()))]))
 }
 
 pub fn list(root: &str, plane: &str, limit: usize, offset: usize) -> R<Value> {
