@@ -6,6 +6,7 @@
 //! The destination must not already exist and must not overlap the source root.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -275,32 +276,71 @@ fn verify_hash(path: &Path, expected: &str, label: &str) -> R<()> {
     Ok(())
 }
 
+fn tree_component_bytes(name: &OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        name.as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        name.encode_wide().flat_map(|unit| unit.to_be_bytes()).collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        name.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
+fn tree_path_key(root: &Path, path: &Path) -> R<Vec<u8>> {
+    let relative = path.strip_prefix(root).map_err(|_| integrity_error("目录摘要相对路径计算失败"))?;
+    let mut key = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(integrity_error("目录摘要路径含非法组件"));
+        };
+        let bytes = tree_component_bytes(name);
+        key.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        key.extend_from_slice(&bytes);
+    }
+    Ok(key)
+}
+
 fn tree_digest(root: &Path) -> R<String> {
     let root = canonical_dir(root, "迁移目录")?;
-    let mut entries = Vec::new();
-    fn visit(root: &Path, dir: &Path, entries: &mut Vec<String>) -> R<()> {
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    fn visit(root: &Path, dir: &Path, entries: &mut Vec<Vec<u8>>) -> R<()> {
         let mut children = fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
         children.sort_by_key(|entry| entry.file_name());
         for entry in children {
             let path = entry.path();
-            let rel = path.strip_prefix(root).map_err(|_| integrity_error("目录摘要相对路径计算失败"))?.to_string_lossy().replace('\\', "/");
             let meta = fs::symlink_metadata(&path)?;
-            if meta.file_type().is_symlink() { return Err(integrity_error(format!("目录摘要发现符号链接: {rel}"))); }
-            if meta.is_dir() {
-                entries.push(format!("D|{rel}\n"));
-                visit(root, &path, entries)?;
-            } else if meta.is_file() {
+            if meta.file_type().is_symlink() { return Err(integrity_error(format!("目录摘要发现符号链接: {}", path.display()))); }
+            let key = tree_path_key(root, &path)?;
+            let mut item = Vec::with_capacity(1 + 8 + key.len() + 72);
+            item.push(if meta.is_dir() { b'D' } else if meta.is_file() { b'F' } else { return Err(integrity_error(format!("目录摘要发现未知文件类型: {}", path.display()))); });
+            item.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            item.extend_from_slice(&key);
+            if meta.is_file() {
                 let bytes = fs::read(&path)?;
-                entries.push(format!("F|{rel}|{}\n", sha256::digest_hex(&bytes)));
-            } else {
-                return Err(integrity_error(format!("目录摘要发现未知文件类型: {rel}")));
+                let digest = sha256::digest_hex(&bytes);
+                item.extend_from_slice(&(digest.len() as u64).to_be_bytes());
+                item.extend_from_slice(digest.as_bytes());
             }
+            entries.push(item);
+            if meta.is_dir() { visit(root, &path, entries)?; }
         }
         Ok(())
     }
     visit(&root, &root, &mut entries)?;
     entries.sort();
-    Ok(sha256::digest_hex(entries.concat().as_bytes()))
+    let mut material = Vec::new();
+    for entry in entries {
+        material.extend_from_slice(&(entry.len() as u64).to_be_bytes());
+        material.extend_from_slice(&entry);
+    }
+    Ok(sha256::digest_hex(&material))
 }
 fn verify_source_baseline(staged: &StagedManifest, source: &Path) -> R<()> {
     for record in &staged.records {
@@ -1418,8 +1458,20 @@ mod tests {
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(backup);
     }
+    #[cfg(unix)]
     #[test]
-    fn failed_build_does_not_create_requested_root_or_touch_source() {
+    fn tree_digest_distinguishes_backslash_and_nested_path() {
+        let flat = temp_dir("digest-flat");
+        let nested = temp_dir("digest-nested");
+        fs::write(flat.join("a\\b"), "same").unwrap();
+        fs::create_dir_all(nested.join("a")).unwrap();
+        fs::write(nested.join("a/b"), "same").unwrap();
+        assert_ne!(tree_digest(&flat).unwrap(), tree_digest(&nested).unwrap());
+        let _ = fs::remove_dir_all(flat);
+        let _ = fs::remove_dir_all(nested);
+    }
+
+
         let root = temp_dir("boundary");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
