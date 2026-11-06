@@ -214,15 +214,15 @@ def test_memory_tools():
         source = os.path.join(root, "attachment-source.txt")
         with open(source, "w", encoding="utf-8") as handle:
             handle.write("attachment bytes")
-        add = send(p, request("m14", "tools/call", {"name": "abook_attach_add", "arguments": {"command": "attach add", "record": record["id"], "file": source, "name": "proof.txt", "root": root, "force": True}}))
+        add = send(p, request("m14", "tools/call", {"name": "abook_attach_add", "arguments": {"record": record["id"], "file": source, "name": "proof.txt", "root": root, "force": True}}))
         assert add["result"]["isError"] is False, add
-        attach_list = send(p, request("m15", "tools/call", {"name": "abook_attach_list", "arguments": {"command": "attach list", "record": record["id"], "root": root}}))
+        attach_list = send(p, request("m15", "tools/call", {"name": "abook_attach_list", "arguments": {"record": record["id"], "root": root}}))
         assert attach_list["result"]["isError"] is False, attach_list
         assert attach_list["result"]["structuredContent"]["count"] == 1
-        attach_get = send(p, request("m16", "tools/call", {"name": "abook_attach_get", "arguments": {"command": "attach get", "record": record["id"], "attachment_name": "proof.txt", "root": root}}))
+        attach_get = send(p, request("m16", "tools/call", {"name": "abook_attach_get", "arguments": {"record": record["id"], "attachment_name": "proof.txt", "root": root}}))
         assert attach_get["result"]["isError"] is False, attach_get
         assert attach_get["result"]["structuredContent"]["stdout"].splitlines()[0].endswith("-refs/proof.txt")
-        attach_rm = send(p, request("m17", "tools/call", {"name": "abook_attach_rm", "arguments": {"command": "attach rm", "record": record["id"], "attachment_name": "proof.txt", "root": root}}))
+        attach_rm = send(p, request("m17", "tools/call", {"name": "abook_attach_rm", "arguments": {"record": record["id"], "attachment_name": "proof.txt", "root": root}}))
         assert attach_rm["result"]["isError"] is False, attach_rm
 
     finally:
