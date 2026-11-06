@@ -742,6 +742,7 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
         return Err(integrity_error(format!("记录目录与 manifest 不一致: extra={extra:?} missing={missing:?}")));
     }
 
+    let mut seen = BTreeSet::new();
     let mut staged_parsed: Vec<(super::RecordKey, Record)> = Vec::new();
     for record in &staged.records {
         validate_relative(&record.target_rel, "目标记录路径")?;
