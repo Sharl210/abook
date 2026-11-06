@@ -1915,8 +1915,7 @@ pub(crate) fn relation_edges_from_records(records: &[(RecordKey, &Record)]) -> V
     edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.ordinal.cmp(&b.ordinal)).then(a.value.cmp(&b.value)));
     edges
 }
-
-
+fn is_ref_shaped(value: &str) -> bool {
     let value = value.trim();
     if value.is_empty()
         || value.contains('/')
