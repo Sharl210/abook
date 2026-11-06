@@ -159,7 +159,7 @@ def test_memory_tools():
         context = send(p, request("m4", "tools/call", {"name": "memory_context", "arguments": {"root": root}}))
         assert context["result"]["structuredContent"]["planes"]["explicit"] == 2
         revision = str(record["revision"])
-        updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "content": "更新后的正文"}}))
+        updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "body": "更新后的正文"}}))
         assert updated["result"]["isError"] is False, updated
         assert updated["result"]["structuredContent"]["content"] == "更新后的正文"
         deleted = send(p, request("m8", "tools/call", {"name": "memory_delete", "arguments": {"root": root, "id": record["id"], "expected_revision": int(updated["result"]["structuredContent"]["revision"])}}))

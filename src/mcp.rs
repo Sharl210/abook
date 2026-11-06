@@ -198,7 +198,9 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_read" => &["root", "id"][..],
             "memory_list" => &["root", "plane", "limit", "offset"][..],
             "memory_search" | "memory_recall" => &["root", "query", "plane", "limit"][..],
-            "memory_update" => &["root", "id", "expected_revision", "title", "read_when", "content"][..],
+            "memory_update" => &[
+                "root", "id", "expected_revision", "title", "read_when", "content", "body",
+            ][..],
             "memory_delete" | "memory_restore" => &["root", "id", "expected_revision"][..],
             _ => return Err(format!("未知 memory 工具: {name}")),
         };
@@ -229,7 +231,8 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_update" => {
                 let id = scalar_text(args, "id").ok_or("memory_update 缺少 id")?;
                 let revision = scalar_text(args, "expected_revision").ok_or("memory_update 缺少 expected_revision")?;
-                crate::memory_plane::update(&root, &id, &revision, scalar_text(args, "title").as_deref(), scalar_text(args, "read_when").as_deref(), scalar_text(args, "content").as_deref()).map_err(|e| e.msg().to_string())
+                let content = scalar_text(args, "content").or_else(|| scalar_text(args, "body"));
+                crate::memory_plane::update(&root, &id, &revision, scalar_text(args, "title").as_deref(), scalar_text(args, "read_when").as_deref(), content.as_deref()).map_err(|e| e.msg().to_string())
             }
             "memory_delete" | "memory_restore" => {
                 let id = scalar_text(args, "id").ok_or("memory 工具缺少 id")?;
