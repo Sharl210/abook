@@ -1416,8 +1416,8 @@ mod tests {
         let _ = fs::remove_dir_all(&receipt.backup_root);
         let _ = fs::remove_dir_all(&staging);
     }
-
-
+    #[test]
+    fn activation_verifies_switch_and_rollback_keeps_both_trees_recoverable() {
         let root = temp_dir("activation");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
