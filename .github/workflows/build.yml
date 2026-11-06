@@ -112,8 +112,21 @@ jobs:
           if [ -n "$ONLY" ]; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "any=true" >> "$GITHUB_OUTPUT"; fi
 
   # ---------------------------------------------------------------- Linux
-  linux:
+  tests:
     needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust 单元测试
+        run: cargo test --release
+      - name: 构建 smoke 二进制
+        run: cargo build --release
+      - name: MCP stdio smoke
+        run: python3 tests/mcp_stdio.py target/release/abook
+      - name: 内置自检
+        run: ./target/release/abook selftest --json
+
     if: ${{ needs.plan.outputs.linux != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
