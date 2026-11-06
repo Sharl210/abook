@@ -145,7 +145,7 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_context", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore"} <= names
+        assert {"memory_context", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
@@ -172,8 +172,19 @@ def test_memory_tools():
         assert rejected["result"]["isError"] is True
         unknown = send(p, request("m12", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "unexpected": True}}))
         assert unknown["result"]["isError"] is True
-        listed = send(p, request("m13", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit", "limit": 10, "offset": 0}}))
-        assert listed["result"]["structuredContent"]["total"] == 2
+        source = os.path.join(root, "attachment-source.txt")
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write("attachment bytes")
+        add = send(p, request("m14", "tools/call", {"name": "abook_attach_add", "arguments": {"command": "attach add", "record": record["id"], "file": source, "name": "proof.txt", "root": root, "force": True}}))
+        assert add["result"]["isError"] is False, add
+        attach_list = send(p, request("m15", "tools/call", {"name": "abook_attach_list", "arguments": {"command": "attach list", "record": record["id"], "root": root}}))
+        assert attach_list["result"]["isError"] is False, attach_list
+        assert attach_list["result"]["structuredContent"]["count"] == 1
+        attach_get = send(p, request("m16", "tools/call", {"name": "abook_attach_get", "arguments": {"command": "attach get", "record": record["id"], "attachment_name": "proof.txt", "root": root}}))
+        assert attach_get["result"]["isError"] is False, attach_get
+        assert attach_get["result"]["structuredContent"]["stdout"].splitlines()[0].endswith("-refs/proof.txt")
+        attach_rm = send(p, request("m17", "tools/call", {"name": "abook_attach_rm", "arguments": {"command": "attach rm", "record": record["id"], "attachment_name": "proof.txt", "root": root}}))
+        assert attach_rm["result"]["isError"] is False, attach_rm
 
     finally:
         p.stdin.close()

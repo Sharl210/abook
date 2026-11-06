@@ -569,6 +569,25 @@ mod tests {
     }
 
     #[test]
+    fn nested_attach_builds_cli_argv_without_shifting_record_and_file() {
+        let args = Value::obj([
+            ("command", Value::s("attach add")),
+            ("record", Value::s("M-debug-abc123")),
+            ("file", Value::s("/tmp/source.txt")),
+            ("name", Value::s("proof.txt")),
+            ("root", Value::s("/tmp/library")),
+            ("force", Value::b(true)),
+        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        assert_eq!(
+            build_argv("abook_attach_add", &args).unwrap(),
+            vec![
+                "attach", "add", "--name", "proof.txt", "--root", "/tmp/library", "--force",
+                "M-debug-abc123", "/tmp/source.txt",
+            ],
+        );
+    }
+
+    #[test]
     fn every_non_option_route_has_exactly_one_top_level_descriptor() {
         let tools = all_tools();
         let routes: Vec<&str> = crate::known_commands().iter().copied().collect();

@@ -455,8 +455,8 @@ fn legacy_readonly_command(name: &str) -> bool {
 }
 
 fn tool_is_registered(name: &str) -> bool {
+    if crate::mcp_registry::public_tools().iter().any(|tool| tool.name == name && tool.is_public()) { return true; }
     matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
-        || name.strip_prefix("abook_").map(|n| crate::known_commands().contains(&n) && legacy_readonly_command(n)).unwrap_or(false)
 }
 
 fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<String>), String> {
@@ -477,9 +477,9 @@ fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<St
 }
 
 fn run_cli_text(argv: &[String], body: Option<&str>) -> (String, String, i32) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return (String::new(), format!("无法定位 abook 可执行文件：{e}"), 6),
+    let exe = match crate::util::self_path() {
+        Some(p) if p.is_file() => p,
+        _ => return (String::new(), "无法定位 abook 可执行文件".into(), 6),
     };
     let mut actual = argv.to_vec();
     let temp = if let Some(text) = body {
