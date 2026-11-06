@@ -341,6 +341,15 @@ const TXN_COMMANDS: &[NestedCommand] = &[
     NestedCommand { group: "txn", subcommand: "rollback", aliases: &[], summary: "回滚批次事务", positionals: "", params: "preview-token", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
     NestedCommand { group: "txn", subcommand: "status", aliases: &[], summary: "读取批次事务恢复状态", positionals: "", params: "", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
 ];
+
+const MIGRATE_COMMANDS: &[NestedCommand] = &[
+    NestedCommand { group: "migrate", subcommand: "scan", aliases: &[], summary: "扫描旧库并返回迁移报告", positionals: "", params: "format", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "migrate", subcommand: "stage", aliases: &[], summary: "构建隔离的六平面迁移暂存树", positionals: "", params: "staging-root", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "migrate", subcommand: "activate", aliases: &[], summary: "构建并激活六平面迁移暂存树", positionals: "", params: "staging-root", flags: "activate,json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "migrate", subcommand: "recover", aliases: &[], summary: "恢复中断的迁移激活", positionals: "", params: "", flags: "recover,json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "migrate", subcommand: "rollback", aliases: &[], summary: "回滚迁移并恢复备份库", positionals: "", params: "backup-root", flags: "rollback,json", extra_value_args: &[], extra_bool_args: &[] },
+];
+
 const BRANCH_COMMANDS: &[NestedCommand] = &[
     NestedCommand { group: "branch", subcommand: "list", aliases: &["ls"], summary: "列出地图分支", positionals: "", params: "keys,read-when,page,per-page", flags: "json,dry-run,force", extra_value_args: &["lib"], extra_bool_args: &[] },
     NestedCommand { group: "branch", subcommand: "add", aliases: &["new"], summary: "新增地图分支", positionals: "<分支名>", params: "keys,read-when", flags: "json,dry-run,force", extra_value_args: &["lib"], extra_bool_args: &[] },
@@ -351,7 +360,7 @@ const BRANCH_COMMANDS: &[NestedCommand] = &[
 ];
 
 fn add_nested_tools(out: &mut Vec<ToolDefinition>) {
-    for command in ATTACH_COMMANDS.iter().chain(VAULT_COMMANDS).chain(SKILL_COMMANDS).chain(BRANCH_COMMANDS).chain(TXN_COMMANDS) {
+    for command in ATTACH_COMMANDS.iter().chain(VAULT_COMMANDS).chain(SKILL_COMMANDS).chain(BRANCH_COMMANDS).chain(TXN_COMMANDS).chain(MIGRATE_COMMANDS) {
         let mut spellings = Vec::with_capacity(command.aliases.len() + 1);
         spellings.push(command.subcommand);
         spellings.extend_from_slice(command.aliases);
@@ -362,10 +371,10 @@ fn add_nested_tools(out: &mut Vec<ToolDefinition>) {
 }
 
 fn nested_tool(spec: &NestedCommand, spelling: &str) -> ToolDefinition {
-    let command = format!("{} {}", spec.group, spelling);
+    let command = if spec.group == "migrate" { spec.group.to_string() } else { format!("{} {}", spec.group, spelling) };
     let route = spec.group.to_string();
     let name = format!("abook_{}_{}", spec.group, normalize_tool_segment(spelling));
-    let (schema, argument_map, legacy_flag_suppression) = build_schema(
+    let (mut schema, argument_map, legacy_flag_suppression) = build_schema(
         &command,
         spec.positionals,
         spec.params,
@@ -373,6 +382,17 @@ fn nested_tool(spec: &NestedCommand, spelling: &str) -> ToolDefinition {
         &spec.extra_value_args.iter().map(|x| (*x, false)).chain(spec.extra_bool_args.iter().map(|x| (*x, true))).collect::<Vec<_>>(),
         true,
     );
+    if spec.group == "migrate" {
+        if let Value::Object(ref mut fields) = schema {
+            if let Some(Value::Array(required)) = fields.get_mut("required") {
+                match spec.subcommand {
+                    "stage" | "activate" => required.push(Value::s("staging_root")),
+                    "rollback" => required.push(Value::s("backup_root")),
+                    _ => {}
+                }
+            }
+        }
+    }
     let alias_of = if spelling == spec.subcommand { None } else {
         Some(format!("abook_{}_{}", spec.group, normalize_tool_segment(spec.subcommand)))
     };
@@ -612,13 +632,14 @@ mod tests {
     #[test]
     fn nested_subcommands_and_aliases_are_all_registered() {
         let tools = all_tools();
-        for group in ["attach", "vault", "skill", "branch", "txn"] {
+        for group in ["attach", "vault", "skill", "branch", "txn", "migrate"] {
             let expected = match group {
                 "attach" => ATTACH_COMMANDS,
                 "vault" => VAULT_COMMANDS,
                 "skill" => SKILL_COMMANDS,
                 "branch" => BRANCH_COMMANDS,
-                _ => TXN_COMMANDS,
+                "txn" => TXN_COMMANDS,
+                _ => MIGRATE_COMMANDS,
             };
             for item in expected {
                 for spelling in std::iter::once(item.subcommand).chain(item.aliases.iter().copied()) {
@@ -632,6 +653,7 @@ mod tests {
         assert_eq!(SKILL_COMMANDS.len(), 10);
         assert_eq!(BRANCH_COMMANDS.len(), 6);
         assert_eq!(TXN_COMMANDS.len(), 4);
+        assert_eq!(MIGRATE_COMMANDS.len(), 5);
     }
 
     #[test]

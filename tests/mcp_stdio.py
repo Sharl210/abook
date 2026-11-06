@@ -74,6 +74,11 @@ def test_modern():
         assert "abook_txn_apply" in names
         assert "abook_txn_rollback" in names
         assert "abook_txn_status" in names
+        assert "abook_migrate_scan" in names
+        assert "abook_migrate_stage" in names
+        assert "abook_migrate_activate" in names
+        assert "abook_migrate_recover" in names
+        assert "abook_migrate_rollback" in names
         helper = {x["name"]: x["inputSchema"] for x in tools["tools"] if x["name"] in {"memory_help", "spec_list", "spec_get", "skill_list", "skill_read", "system_update"}}
         assert "argv" not in helper["memory_help"]["properties"]
         assert helper["memory_help"]["additionalProperties"] is False
@@ -258,6 +263,39 @@ def test_memory_tools():
         p.wait(timeout=5)
         shutil.rmtree(root)
     assert p.returncode == 0, p.stderr.read()
+def test_migrate_tools():
+    root = tempfile.mkdtemp(prefix="abook-mcp-migrate-")
+    p = start()
+    try:
+        os.makedirs(os.path.join(root, "canonical", "records"), exist_ok=True)
+        os.makedirs(os.path.join(root, "candidate", "records"), exist_ok=True)
+        fixture = os.path.join(root, "canonical", "records", "C-20261106T000010-aaaaaaaa.md")
+        with open(fixture, "w", encoding="utf-8") as handle:
+            handle.write("""[CANONICAL_MEMORY]
+ID=C-20261106T000010-aaaaaaaa
+TITLE=Migration fixture
+KIND=DECISION
+READ_WHEN=CI migration
+[/CANONICAL_MEMORY]
+[MEMORY_BODY]
+migration body
+[/MEMORY_BODY]
+""")
+        scan = send(p, request("mig-scan", "tools/call", {"name": "abook_migrate_scan", "arguments": {"root": root}}))
+        assert "result" in scan, scan
+        staging = os.path.join(os.path.dirname(root), "abook-mcp-stage-" + os.path.basename(root))
+        staged = send(p, request("mig-stage", "tools/call", {"name": "abook_migrate_stage", "arguments": {"root": root, "staging_root": staging}}))
+        assert "result" in staged, staged
+        assert staged["result"]["isError"] is False, staged
+        assert os.path.isdir(staging)
+        shutil.rmtree(staging)
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
+
+
 def test_default_stdio_and_cli_prefix():
     p = start([])
     try:
@@ -298,6 +336,7 @@ if __name__ == "__main__":
     test_legacy()
     test_batch_tools()
     test_memory_tools()
+    test_migrate_tools()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 7 suites passed")
+    print("MCP stdio tests: 8 suites passed")
