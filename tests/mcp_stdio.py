@@ -68,6 +68,7 @@ def test_modern():
         names = [x["name"] for x in tools["tools"]]
         assert names == sorted(names)
         assert len(names) == len(set(names))
+        assert "memory_index" in names
         assert "abook_route_--help" not in names
         assert "abook_route_-h" not in names
         assert "abook_txn_preview" in names
@@ -289,6 +290,47 @@ migration body
         assert staged["result"]["isError"] is False, staged
         assert os.path.isdir(staging)
         shutil.rmtree(staging)
+
+        activation_root = tempfile.mkdtemp(prefix="abook-mcp-activate-")
+        activation_stage = os.path.join(os.path.dirname(activation_root), "abook-mcp-activate-stage-" + os.path.basename(activation_root))
+        backup_root = None
+        abandoned_root = None
+        try:
+            os.makedirs(os.path.join(activation_root, "canonical", "records"), exist_ok=True)
+            os.makedirs(os.path.join(activation_root, "candidate", "records"), exist_ok=True)
+            legacy_record = os.path.join(activation_root, "canonical", "records", "C-20261106T000011-bbbbbbbb.md")
+            with open(legacy_record, "w", encoding="utf-8") as handle:
+                handle.write("""[CANONICAL_MEMORY]
+ID=C-20261106T000011-bbbbbbbb
+TITLE=Activate fixture
+KIND=DECISION
+READ_WHEN=CI activation
+[/CANONICAL_MEMORY]
+[MEMORY_BODY]
+activation body
+[/MEMORY_BODY]
+""")
+            activated = send(p, request("mig-activate", "tools/call", {"name": "abook_migrate_activate", "arguments": {"root": activation_root, "staging_root": activation_stage, "activate": True}}))
+            assert "result" in activated, activated
+            assert activated["result"]["isError"] is False, activated
+            backup_root = activated["result"]["structuredContent"]["backup_root"]
+            recovered = send(p, request("mig-recover", "tools/call", {"name": "abook_migrate_recover", "arguments": {"root": activation_root, "recover": True}}))
+            assert "result" in recovered, recovered
+            assert recovered["result"]["isError"] is False, recovered
+            assert recovered["result"]["structuredContent"]["phase"] == "RECOVERED_COMMITTED"
+            rolled_back = send(p, request("mig-rollback", "tools/call", {"name": "abook_migrate_rollback", "arguments": {"root": activation_root, "backup_root": backup_root, "rollback": True}}))
+            assert "result" in rolled_back, rolled_back
+            assert rolled_back["result"]["isError"] is False, rolled_back
+            abandoned_root = rolled_back["result"]["structuredContent"]["abandoned_root"]
+            assert os.path.isfile(legacy_record)
+        finally:
+            shutil.rmtree(activation_root)
+            if os.path.isdir(activation_stage):
+                shutil.rmtree(activation_stage)
+            if backup_root and os.path.isdir(backup_root):
+                shutil.rmtree(backup_root)
+            if abandoned_root and os.path.isdir(abandoned_root):
+                shutil.rmtree(abandoned_root)
     finally:
         p.stdin.close()
         p.wait(timeout=5)

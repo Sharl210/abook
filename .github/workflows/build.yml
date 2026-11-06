@@ -139,6 +139,25 @@ jobs:
           print(value["id"])
           PY
           ./target/release/abook memory context --root "$ROOT" --json
+          INDEX="$(./target/release/abook memory index --root "$ROOT" --plane all --json)"
+          python3 - "$INDEX" <<'PY'
+          import json, sys
+          value = json.loads(sys.argv[1])
+          assert value["format"] == "abook.memory.index.v1"
+          assert value["total"] == 1
+          assert len(value["planes"]) == 6
+          assert value["items"][0]["id"]
+          assert value["items"][0]["preview_truncated"] is False
+          PY
+          test -f "$ROOT/abook.memory.layout.v1"
+          LEGACY="$(mktemp -d)"
+          mkdir -p "$LEGACY/candidate/records"
+          if ./target/release/abook memory init --root "$LEGACY" --json; then
+            echo "legacy root must reject six-plane initialization" >&2
+            exit 1
+          fi
+          test ! -f "$LEGACY/abook.memory.layout.v1"
+          rm -rf "$LEGACY"
           ./target/release/abook memory export --root "$ROOT" --plane explicit --json
       - name: 内置自检
         run: |
@@ -159,6 +178,7 @@ jobs:
           STAGE="$RUNNER_TEMP/abook-stage"
           STAGE2="${ROOT}-stage-activate"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE" --json
+          test -f "$STAGE/abook.memory.layout.v1"
           ACTIVATED_FILE="$RUNNER_TEMP/activated.json"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE2" --activate --json > "$ACTIVATED_FILE"
           cat "$ACTIVATED_FILE"

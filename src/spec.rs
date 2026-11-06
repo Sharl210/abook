@@ -51,7 +51,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("stats", "lib", "json", "统计", ""),
     ("skill", "root,title,body,body-file,reason", "approve,force,dry-run,json", "Skill 约定与候选管理；子命令见 skill guide", "guide"),
     ("spec", "root", "json", "取回被抽离的规范全文；不带名字列目录", "plan"),
-    ("memory", "root,plane,id,title,content,body,read-when,query,expect-revision,per-page,page", "json", "六个普通记忆平面的结构化读写、检索、导出和版本更新", "write --root PATH --plane explicit --title T --content TEXT"),
+    ("memory", "root,plane,id,title,content,body,body-file,read-when,query,expect-revision,limit,offset,per-page,page", "json,stdin", "六个普通记忆平面的结构化读写、索引、检索、导出和版本更新", "<子命令> --root PATH"),
      ("state", "", "json", "库状态", ""),
     ("paths", "", "json", "各目录绝对路径", ""),
     ("budget", "", "json", "读取量估算", ""),
@@ -120,6 +120,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
 /// does take a new name as a second positional, `update` and `patch` really do
 /// take the record first.
 pub const POSITIONALS: &[(&str, &str)] = &[
+    ("memory", "<子命令> [参数]"),
     ("describe", "<命令>"),
     ("cat", "<记录>"),
     ("search", "<词> [更多词]"),

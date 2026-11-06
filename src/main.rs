@@ -128,7 +128,7 @@ fn help_text() -> String {
   staging resolve <名> --decision 结论 [--ref 记录ID]
                             结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
-  memory <子命令>           新平面主链：context/export/write/read/list/search/update/delete/restore
+  memory <子命令>           显式六平面库：init/index/context/export/write/read/list/search/update/delete/restore
       --plane soul|rules|profile|explicit|long_term|episodic
       --root PATH --id ID --title T --content TEXT --read-when W --query Q
 

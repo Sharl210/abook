@@ -7,18 +7,56 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PLANES: &[&str] = &["soul", "rules", "profile", "explicit", "long_term", "episodic"];
+pub const LAYOUT_MARKER: &str = "abook.memory.layout.v1";
 
 fn err(message: impl Into<String>) -> EE { match crate::util::integrity::<()>(message) { Err(e) => e, Ok(()) => unreachable!() } }
 fn plane_ok(plane: &str) -> bool { PLANES.contains(&plane) }
+
+pub fn verify_layout(root: &Path) -> R<()> {
+    let marker = root.join(LAYOUT_MARKER);
+    let meta = fs::symlink_metadata(&marker).map_err(|_| err(format!("六平面布局缺少 marker: {}", marker.display())))?;
+    if meta.file_type().is_symlink() || !meta.is_file() { return Err(err("六平面布局 marker 必须是普通文件")); }
+    let value = fs::read_to_string(&marker)?;
+    if value.trim_end() != LAYOUT_MARKER { return Err(err("六平面布局 marker 版本无效")); }
+    for legacy in ["canonical", "candidate", "Global.md", "Index.md", "Atlas.md", ".numbers"] {
+        let path = root.join(legacy);
+        if path.exists() { return Err(err(format!("六平面布局混入旧模型标记: {}", path.display()))); }
+    }
+    Ok(())
+}
+
+fn ensure_layout(root: &Path) -> R<()> {
+    fs::create_dir_all(root)?;
+    let marker = root.join(LAYOUT_MARKER);
+    if marker.exists() { return verify_layout(root); }
+    for legacy in ["canonical", "candidate", "Global.md", "Index.md", "Atlas.md", ".numbers"] {
+        let path = root.join(legacy);
+        if path.exists() { return Err(err(format!("旧记忆库不能直接作为六平面 memory 根: {}", path.display()))); }
+    }
+    write_atomic(&marker, &format!("{LAYOUT_MARKER}\n"))?;
+    verify_layout(root)
+}
+
+pub fn initialize_layout(root: &str) -> R<()> {
+    let root = root_path(root)?;
+    ensure_layout(&root)
+}
+
+pub fn layout_marker_path(root: &Path) -> PathBuf { root.join(LAYOUT_MARKER) }
+
 fn root_path(root: &str) -> R<PathBuf> {
     if root.is_empty() { return Err(err("memory 工具需要 root")); }
     let args = crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::from([("root".to_string(), vec![root.to_string()])]) };
     let resolved = crate::util::resolve_root(&args);
     if resolved.exists() {
         let meta = fs::symlink_metadata(&resolved)?;
-        if meta.file_type().is_symlink() || !meta.is_dir() { return Err(err("memory root 必须是普通目录")); }
-        Ok(fs::canonicalize(resolved)?)
-    } else { Ok(resolved) }
+        let canonical = fs::canonicalize(resolved)?;
+        ensure_layout(&canonical)?;
+        Ok(canonical)
+    } else {
+        ensure_layout(&resolved)?;
+        Ok(resolved)
+    }
 }
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
 fn text(value: &Value, key: &str) -> Option<String> { value.get(key).and_then(|v| match v { Value::String(s) => Some(s.clone()), Value::Number(n) => Some(n.clone()), _ => None }) }
@@ -115,7 +153,7 @@ fn resolve_legacy_alias(root: &Path, alias: &str) -> R<Option<Value>> {
     };
     Ok(Some(value))
 }
-fn records(root: &Path, plane: Option<&str>) -> R<Vec<Value>> {
+fn records_with_status(root: &Path, plane: Option<&str>, include_deleted: bool) -> R<Vec<Value>> {
     let planes: Vec<&str> = match plane { Some(p) => vec![p], None => PLANES.to_vec() };
     let mut out = Vec::new();
     for p in planes {
@@ -135,10 +173,74 @@ fn records(root: &Path, plane: Option<&str>) -> R<Vec<Value>> {
                 Some("md") => legacy_value(&path, p, &raw)?,
                 _ => continue,
             };
-            if text(&value, "status").as_deref() != Some("deleted") { out.push(value); }
+            if include_deleted || text(&value, "status").as_deref() != Some("deleted") { out.push(value); }
         }
     }
     Ok(out)
+}
+
+fn records(root: &Path, plane: Option<&str>) -> R<Vec<Value>> { records_with_status(root, plane, false) }
+
+fn preview(content: &str, max_chars: usize) -> (String, usize, bool) {
+    let total_chars = content.chars().count();
+    let value: String = content.chars().take(max_chars).collect();
+    (value, total_chars, total_chars > max_chars)
+}
+
+pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<Value> {
+    let root = root_path(root)?;
+    let selected: Vec<&str> = match plane {
+        Some("all") | None => PLANES.to_vec(),
+        Some(p) if plane_ok(p) => vec![p],
+        Some(p) => return Err(err(format!("未知记忆平面: {p}"))),
+    };
+    let all = records_with_status(&root, plane.filter(|p| *p != "all"), true)?;
+    let mut counts = BTreeMap::new();
+    for p in &selected {
+        let mut total = 0usize;
+        let mut active = 0usize;
+        let mut deleted = 0usize;
+        for value in &all {
+            if text(value, "plane").as_deref() == Some(*p) {
+                total += 1;
+                if text(value, "status").as_deref() == Some("deleted") { deleted += 1; } else { active += 1; }
+            }
+        }
+        counts.insert((*p).to_string(), object(vec![
+            ("total", Value::n(total.to_string())),
+            ("active", Value::n(active.to_string())),
+            ("deleted", Value::n(deleted.to_string())),
+        ]));
+    }
+    let mut items: Vec<Value> = all.iter().filter(|v| selected.contains(&text(v, "plane").as_deref().unwrap_or(""))).map(|v| {
+        let (text_preview, chars, truncated) = preview(&text(v, "content").unwrap_or_default(), 160);
+        object(vec![
+            ("id", Value::s(text(v, "id").unwrap_or_default())),
+            ("plane", Value::s(text(v, "plane").unwrap_or_default())),
+            ("title", Value::s(text(v, "title").unwrap_or_default())),
+            ("read_when", Value::s(text(v, "read_when").unwrap_or_default())),
+            ("updated_at", Value::s(text(v, "updated_at").unwrap_or_default())),
+            ("revision", Value::s(text(v, "revision").unwrap_or_else(|| "1".into()))),
+            ("status", Value::s(text(v, "status").unwrap_or_else(|| "active".into()))),
+            ("preview", Value::s(text_preview)),
+            ("preview_chars", Value::n(chars.to_string())),
+            ("preview_truncated", Value::b(truncated)),
+        ])
+    }).collect();
+    items.sort_by(|a,b| text(a,"plane").cmp(&text(b,"plane")).then_with(|| text(a,"id").cmp(&text(b,"id"))));
+    let total = items.len();
+    let limit = limit.clamp(1, 500);
+    let page: Vec<Value> = items.into_iter().skip(offset).take(limit).collect();
+    Ok(object(vec![
+        ("format", Value::s("abook.memory.index.v1")),
+        ("planes", Value::arr(selected.iter().map(|p| Value::s(*p)).collect())),
+        ("counts", Value::Object(counts)),
+        ("items", Value::Array(page)),
+        ("total", Value::n(total.to_string())),
+        ("offset", Value::n(offset.to_string())),
+        ("limit", Value::n(limit.to_string())),
+        ("credentials", Value::s("vault")),
+    ]))
 }
 
 pub fn write(root: &str, plane: &str, title: &str, read_when: &str, content: &str) -> R<Value> {
@@ -331,8 +433,14 @@ mod legacy_migration_tests {
         let record_dir = root.join("planes/explicit/records");
         fs::create_dir_all(&record_dir).unwrap();
         let record = crate::memory_plane::write(root.to_string_lossy().as_ref(), "explicit", "附件测试", "查附件", "正文").unwrap();
+        let indexed = index(root.to_string_lossy().as_ref(), Some("explicit"), 10, 0).unwrap();
+        assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
+        assert_eq!(text(&indexed, "total").as_deref(), Some("1"));
+        assert!(root.join(LAYOUT_MARKER).is_file());
+        assert!(!root.join("canonical").exists());
         let record_path = record_dir.join(format!("{}.json", text(&record, "id").unwrap()));
         let attachment_dir = crate::attach::dir_for(&record_path);
+
         fs::create_dir_all(&attachment_dir).unwrap();
         fs::write(attachment_dir.join("proof.txt"), "evidence").unwrap();
         let inventory = crate::attach::scan(&record_path);
@@ -369,8 +477,39 @@ mod legacy_migration_tests {
         assert_eq!(text(&restored, "status").as_deref(), Some("active"));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn layout_marker_and_index_report_six_planes_and_tombstones() {
+        let root = temp_root();
+        let first = write(root.to_string_lossy().as_ref(), "explicit", "First", "index test", "x".repeat(200).as_str()).unwrap();
+        let second = write(root.to_string_lossy().as_ref(), "profile", "Second", "index test", "body").unwrap();
+        delete(root.to_string_lossy().as_ref(), &text(&first, "id").unwrap(), "1").unwrap();
+        assert!(root.join(LAYOUT_MARKER).is_file());
+        let index = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
+        assert_eq!(text(&index, "format").as_deref(), Some("abook.memory.index.v1"));
+        assert_eq!(text(&index, "total").as_deref(), Some("2"));
+        assert_eq!(index.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
+        let items = index.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(text(&items[0], "preview_chars").as_deref(), Some("200"));
+        assert_eq!(items[0].get("preview_truncated"), Some(&Value::b(true)));
+        let profile = index(root.to_string_lossy().as_ref(), Some("profile"), 10, 0).unwrap();
+        assert_eq!(text(&profile, "total").as_deref(), Some("1"));
+        assert!(index(root.to_string_lossy().as_ref(), Some("bogus"), 10, 0).is_err());
+        assert_eq!(text(&second, "plane").as_deref(), Some("profile"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn refuses_to_initialize_memory_layout_on_legacy_root() {
+        let root = temp_root();
+        fs::create_dir_all(root.join("candidate/records")).unwrap();
+        assert!(initialize_layout(root.to_string_lossy().as_ref()).is_err());
+        assert!(!root.join(LAYOUT_MARKER).exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }
-fn version_of(value: &Value) -> String { text(value, "revision").unwrap_or_else(|| "1".to_string()) }
+
 
 pub fn update(root: &str, id: &str, expected_revision: &str, title: Option<&str>, read_when: Option<&str>, content: Option<&str>) -> R<Value> {
     let root = root_path(root)?; let _lock = LibLock::acquire(&root, 30)?;

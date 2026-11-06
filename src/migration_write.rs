@@ -135,6 +135,7 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
         for plane in ALL_PLANES {
             fs::create_dir_all(partial.join(PLAN_DIR).join(plane).join("records"))?;
         }
+        write_new_file(&partial.join(crate::memory_plane::LAYOUT_MARKER), &format!("{}\n", crate::memory_plane::LAYOUT_MARKER))?;
         for category in ARCHIVE_KINDS { fs::create_dir_all(partial.join(ARCHIVE_DIR).join(category))?; }
         copy_archives(&source_root, &partial, &archives)?;
         copy_attachments(&source_root, &partial, &attachments)?;
@@ -616,6 +617,7 @@ pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
 /// Verify an already-built staged tree without modifying it.
 pub fn verify_staged(staged: &StagedManifest) -> R<()> {
     let root = canonical_dir(&staged.staging_root, "staging 根目录")?;
+    crate::memory_plane::verify_layout(&root)?;
     let source = canonical_dir(&staged.source_root, "源库根目录")?;
     if paths_overlap(&source, &root) {
         return Err(integrity_error(format!(
