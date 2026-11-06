@@ -1364,8 +1364,8 @@ mod tests {
         assert!(root.join("planes/long_term/records/old.md").is_file());
         let _ = fs::remove_dir_all(root);
     }
-
-
+    #[test]
+    fn recovery_accepts_only_matching_committed_tree_pair() {
         let root = temp_dir("recovery-committed");
         let parent = root.parent().unwrap().to_path_buf();
         let backup = parent.join(".abook-test-recovery-committed-backup");
