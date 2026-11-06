@@ -475,7 +475,8 @@ fn append_token_field(out: &mut Vec<u8>, field: &[u8]) {
 }
 
 fn absolute_root(root: &Path) -> R<PathBuf> {
-    if root.is_absolute() { Ok(root.to_path_buf()) } else { std::env::current_dir().map(|cwd| cwd.join(root)).map_err(EE::from) }
+    let path = if root.is_absolute() { root.to_path_buf() } else { std::env::current_dir().map_err(EE::from)?.join(root) };
+    if path.exists() { fs::canonicalize(&path).map_err(EE::from) } else { Ok(path) }
 }
 
 fn checked_internal_path(root: &Path, path: &Path) -> R<PathBuf> {

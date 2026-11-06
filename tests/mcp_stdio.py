@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Wire-level tests for the single-binary abook MCP stdio transport."""
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "./target/release/abook"
 MODERN = "2026-07-28"
@@ -111,6 +114,31 @@ def test_legacy():
     assert p.returncode == 0, p.stderr.read()
 
 
+def test_batch_tools():
+    root = tempfile.mkdtemp(prefix="abook-mcp-batch-")
+    p = start()
+    try:
+        preview = send(p, request("b1", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "planes/explicit/records/demo.md", "body": "标题\n正文 😀\n"}}))
+        result = preview["result"]
+        assert result["isError"] is False, result
+        token = result["structuredContent"]["token"]
+        assert result["structuredContent"]["revision"] == 0
+        status = send(p, request("b2", "tools/call", {"name": "memory_batch_status", "arguments": {"root": root}}))
+        assert status["result"]["structuredContent"]["pending_transactions"] == 0
+        applied = send(p, request("b3", "tools/call", {"name": "memory_batch_apply", "arguments": {"root": root, "token": token, "expected_revision": 0}}))
+        assert applied["result"]["isError"] is False, applied
+        with open(os.path.join(root, "planes/explicit/records/demo.md"), encoding="utf-8") as handle:
+            assert handle.read() == "标题\n正文 😀\n"
+        rolled = send(p, request("b4", "tools/call", {"name": "memory_batch_rollback", "arguments": {"root": root, "token": token}}))
+        assert rolled["result"]["isError"] is False, rolled
+        assert not os.path.exists(os.path.join(root, "planes/explicit/records/demo.md"))
+        rejected = send(p, request("b5", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "x", "body": "ok", "extra": "reject"}}))
+        assert rejected["result"]["isError"] is True
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
 def test_eof_and_stdout_purity():
     p = start()
     p.stdin.write(json.dumps(request("d", "server/discover"), separators=(",", ":")) + "\n")
@@ -126,5 +154,6 @@ def test_eof_and_stdout_purity():
 if __name__ == "__main__":
     test_modern()
     test_legacy()
+    test_batch_tools()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 3 suites passed")
+    print("MCP stdio tests: 4 suites passed")

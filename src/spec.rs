@@ -98,7 +98,7 @@ pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
     ("install", "url,dir,dry-run,token", "dry-run,json", "自安装到库根", "--dry-run"),
     ("upgrade", "url,dir", "check,force,dry-run,json", "自更新到最新版", "--check"),
     ("selftest", "only", "all,json,verbose", "内置用例；--only N 只跑第 N 条", "selftest --only 1"),
-    ("migrate", "format", "json", "只读扫描旧库并输出迁移 manifest", "--format entries"),
+    ("migrate", "format,staging-root", "json", "扫描旧库并可生成隔离的六平面 staged 迁移树", "--staging-root PATH"),
     ("txn", "path,body-file,preview-token,expect-revision", "json,apply,dry-run", "批次事务 preview/apply/rollback/status", "preview --path file --body-file @file"),
     ("recover", "", "json,apply,dry-run", "检查或应用未完成事务恢复", "--dry-run"),
 

@@ -35,6 +35,9 @@
 
 #![allow(dead_code)]
 
+#[path = "migration_write.rs"]
+pub mod migration_write;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};

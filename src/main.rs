@@ -178,7 +178,7 @@ fn help_text() -> String {
   （别名：list/ledger/names/reconcile）
 
 ═══ 迁移与事务 ═══
-  migrate [--format entries]  只读扫描旧库，输出迁移 manifest
+  migrate [--format entries] [--staging-root PATH]  扫描旧库；指定输出路径时生成隔离迁移树
   txn preview|apply|rollback|status  批次事务操作
   recover [--dry-run|--apply]  未完成事务恢复
 
@@ -1466,6 +1466,17 @@ fn cmd_normalize(a: &Args) -> R<i32> {
 fn cmd_migrate(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     let manifest = migration::scan(&root)?;
+    if let Some(staging) = a.get("staging-root") {
+        let staged = migration::migration_write::build_staged(&manifest, std::path::Path::new(staging))?;
+        if a.has("json") {
+            crate::say_line!("{{\"staging_root\":{},\"records\":{},\"aliases\":{},\"archives\":{}}}", jstr(&staged.staging_root.display().to_string()), staged.records.len(), staged.aliases.len(), staged.archives.values().map(Vec::len).sum::<usize>());
+        } else {
+            crate::say_line!("staged root: {}", staged.staging_root.display());
+            crate::say_line!("records: {} aliases: {} archive entries: {}", staged.records.len(), staged.aliases.len(), staged.archives.values().map(Vec::len).sum::<usize>());
+        }
+        return Ok(0);
+    }
+    if a.has("stage") { return usage("migrate --stage 需要显式 --staging-root PATH"); }
     if a.has("json") {
         let report = manifest.render_report();
         crate::say_line!("{{\"report\":{},\"entries\":{}}}", jstr(&report), manifest.entries.len());

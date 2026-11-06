@@ -156,14 +156,6 @@ fn tools_list(_legacy: bool) -> Value {
     let mut tools: Vec<Value> = crate::mcp_registry::public_tools().iter().map(|t| t.to_mcp_value()).collect();
     for (name, desc) in [
         ("memory_context", "读取记忆平面入口和相关上下文。"),
-        ("memory_write", "写入一条结构化记忆；当前要求 plane、title、read_when、body。"),
-        ("memory_read", "读取一条记忆记录。"),
-        ("memory_search", "搜索分层记忆。"),
-        ("memory_recall", "按查询召回相关记忆。"),
-        ("memory_batch_preview", "预览批量记忆维护，不修改磁盘。"),
-        ("memory_batch_apply", "应用已确认的批量记忆维护事务。"),
-        ("memory_batch_rollback", "回滚一个已提交的批量事务。"),
-        ("memory_batch_status", "读取批量事务状态。"),
         ("memory_help", "读取 abook 的机器可读帮助和命令描述。"),
         ("spec_list", "列出内置规范主题。"),
         ("spec_get", "读取一份内置规范全文。"),
@@ -171,8 +163,86 @@ fn tools_list(_legacy: bool) -> Value {
         ("skill_read", "读取 Skill。"),
         ("system_update", "一次调用完成更新检查、下载、校验、替换和自检。"),
     ] { tools.push(tool(name, desc)); }
+    tools.extend(batch_tools());
     tools.sort_by(|a, b| a.str("name").cmp(&b.str("name")));
     complete(obj(vec![("tools", Value::arr(tools)), ("ttlMs", Value::n("300000")), ("cacheScope", Value::s("private"))]))
+}
+
+fn batch_tool(name: &str, desc: &str, properties: Vec<(&str, Value)>, required: Vec<Value>) -> Value {
+    obj(vec![
+        ("name", Value::s(name)),
+        ("description", Value::s(desc)),
+        ("inputSchema", obj(vec![("type", Value::s("object")), ("properties", obj(properties)), ("required", Value::arr(required)), ("additionalProperties", Value::b(false))])),
+    ])
+}
+
+fn batch_tools() -> Vec<Value> {
+    vec![
+        batch_tool("memory_batch_preview", "预览单批次文件变更并写入 durable preview journal，不修改目标文件。", vec![("root", obj(vec![("type", Value::s("string"))])), ("path", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("path"), Value::s("body")]),
+        batch_tool("memory_batch_apply", "按 preview token 和 expected revision 原子应用暂存变更。", vec![("root", obj(vec![("type", Value::s("string"))])), ("token", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("root"), Value::s("token"), Value::s("expected_revision")]),
+        batch_tool("memory_batch_rollback", "回滚已提交事务并推进新的库 revision。", vec![("root", obj(vec![("type", Value::s("string"))])), ("token", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("token")]),
+        batch_tool("memory_batch_status", "读取未完成事务的恢复状态，不改目标文件。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
+    ]
+}
+
+fn scalar_text(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(|value| match value {
+        Value::String(s) | Value::Number(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn validate_batch_args(args: &Value, allowed: &[&str]) -> Result<(), String> {
+    let Value::Object(map) = args else { return Err("批量工具 arguments 必须是对象".to_string()); };
+    for key in map.keys() {
+        if !allowed.iter().any(|candidate| candidate == key) { return Err(format!("批量工具不接受参数: {key}")); }
+    }
+    Ok(())
+}
+
+fn direct_batch_call(name: &str, args: &Value) -> Value {
+    let result = (|| -> Result<Value, String> {
+        let allowed = match name {
+            "memory_batch_preview" => &["root", "path", "body"][..],
+            "memory_batch_apply" => &["root", "token", "expected_revision"][..],
+            "memory_batch_rollback" => &["root", "token"][..],
+            "memory_batch_status" => &["root"][..],
+            _ => return Err(format!("未知批量工具: {name}")),
+        };
+        validate_batch_args(args, allowed)?;
+        let root = scalar_text(args, "root").ok_or("批量工具缺少 root")?;
+        match name {
+            "memory_batch_preview" => {
+                let path = scalar_text(args, "path").ok_or("preview 缺少 path")?;
+                let body = scalar_text(args, "body").ok_or("preview 缺少 body")?;
+                let mut tx = crate::txn::Transaction::prepare(&root).map_err(|e| e.msg().to_string())?;
+                tx.stage_file(crate::txn::Selector::new(path), &body).map_err(|e| e.msg().to_string())?;
+                Ok(obj(vec![("token", Value::s(tx.token().to_string())), ("revision", Value::n(tx.revision.to_string()))]))
+            }
+            "memory_batch_apply" => {
+                let token = scalar_text(args, "token").ok_or("apply 缺少 token")?;
+                let expected = scalar_text(args, "expected_revision").ok_or("apply 缺少 expected_revision")?.parse::<u64>().map_err(|_| "expected_revision 必须是非负整数".to_string())?;
+                let actual = crate::txn::read_library_revision(&root).map_err(|e| e.msg().to_string())?;
+                if expected != actual { return Err(format!("revision 冲突：expected={expected} actual={actual}")); }
+                let revision = crate::txn::apply_token(&root, &token).map_err(|e| e.msg().to_string())?;
+                Ok(obj(vec![("revision", Value::n(revision.to_string()))]))
+            }
+            "memory_batch_rollback" => {
+                let token = scalar_text(args, "token").ok_or("rollback 缺少 token")?;
+                let report = crate::txn::rollback(&root, &token).map_err(|e| e.msg().to_string())?;
+                Ok(obj(vec![("transaction", Value::s(report.transaction)), ("restored", Value::n(report.restored.len().to_string())), ("already_before", Value::n(report.already_before.len().to_string()))]))
+            }
+            "memory_batch_status" => {
+                let reports = crate::txn::recover_dry_run(&root).map_err(|e| e.msg().to_string())?;
+                Ok(obj(vec![("pending_transactions", Value::n(reports.len().to_string()))]))
+            }
+            _ => unreachable!(),
+        }
+    })();
+    match result {
+        Ok(data) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(mcp_json::stringify(&data)))])])), ("structuredContent", data), ("isError", Value::b(false))])),
+        Err(message) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(message))])])), ("isError", Value::b(true))])),
+    }
 }
 
 fn tool(name: &str, description: &str) -> Value {
@@ -287,6 +357,9 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         return error_value(-32602, &format!("未知工具: {name}"), None);
     }
     let args = params.and_then(|p| p.get("arguments"));
+    if matches!(name, "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status") {
+        return direct_batch_call(name, args.unwrap_or(&obj(vec![])));
+    }
     let (argv, body) = match tool_argv(name, args) {
         Ok(v) => v,
         Err(e) => return error_value(-32602, &e, None),
