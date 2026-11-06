@@ -183,6 +183,7 @@ fn help_text() -> String {
 
 ═══ 迁移与事务 ═══
   migrate [--format entries] [--staging-root PATH] [--activate]  扫描旧库；可生成并激活隔离六平面迁移树
+                             --verify [--staging-root PATH] [--source-root PATH] 只读核验迁移树
                              --recover 处理迁移 receipt 的崩溃恢复
                              --rollback --backup-root PATH 回滚到迁移前库
   txn preview|apply|rollback|status  批次事务操作
