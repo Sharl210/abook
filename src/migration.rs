@@ -2168,8 +2168,8 @@ mod tests {
         let manifest = manifest_from_records(vec![source]);
         assert!(matches!(manifest.relation_edges[0].target, RelationTarget::Unresolved));
     }
-
-
+    #[test]
+    fn promoted_to_header_marks_candidate_promoted() {
         let rec = mk(
             Lib::Candidate,
             &candidate_id(4),
