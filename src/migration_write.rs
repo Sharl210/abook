@@ -214,7 +214,7 @@ fn activation_marker(parent: &Path, id: &str) -> PathBuf {
 }
 
 fn receipt_path_encode(path: &Path) -> String {
-    let bytes = {
+    let bytes: Vec<u8> = {
         #[cfg(unix)]
         { use std::os::unix::ffi::OsStrExt; path.as_os_str().as_bytes().to_vec() }
         #[cfg(windows)]
