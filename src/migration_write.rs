@@ -336,6 +336,14 @@ pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
         return Err(integrity_error(format!("staging 切换失败且自动回滚失败，需要 migrate --recover: {error}")));
     }
     sync_parent(&live)?;
+    let _new_live_lock = match LibLock::acquire(&live, 30) {
+        Ok(lock) => lock,
+        Err(error) => {
+            receipt.phase = "RECOVERY_REQUIRED".into();
+            let _ = write_receipt(&marker, &receipt);
+            return Err(integrity_error(format!("新 live 根获取库锁失败，需要 migrate --recover: {error}")));
+        }
+    };
     receipt.phase = "LIVE_MOVED".into(); write_receipt(&marker, &receipt)?;
     if let Err(error) = verify_activated_root(&live, staged) {
         receipt.phase = "ROLLING_BACK".into(); let _ = write_receipt(&marker, &receipt);
@@ -363,6 +371,11 @@ pub fn rollback_activation(live_root: &Path, backup_root: &Path) -> R<PathBuf> {
         return Err(integrity_error(format!("rollback 切换失败，已保留原 live: {error}")));
     }
     sync_parent(&live)?;
+    drop(_lock);
+    let _restored_live_lock = match LibLock::acquire(&live, 30) {
+        Ok(lock) => lock,
+        Err(error) => return Err(integrity_error(format!("rollback 已恢复旧库但获取库锁失败: {error}"))),
+    };
     Ok(abandoned)
 }
 

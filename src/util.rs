@@ -1634,10 +1634,15 @@ impl LibLock {
     }
 
     pub fn acquire(root: &std::path::Path, wait_secs: u64) -> R<LibLock> {
-        let path = root.join(".abook.lock");
-        if let Some(d) = path.parent() {
-            let _ = fs::create_dir_all(d);
-        }
+        // Keep the exclusive lock beside (not inside) the library directory.
+        // Directory-level migrations rename the live root; an in-root lock would
+        // move into the backup and leave the new live tree unlocked mid-switch.
+        let absolute = if root.is_absolute() { root.to_path_buf() } else { std::env::current_dir()?.join(root) };
+        let normalized = fs::canonicalize(&absolute).unwrap_or(absolute);
+        let parent = normalized.parent().ok_or_else(|| EE::Usage("无法解析库根的父目录以获取锁".into()))?;
+        fs::create_dir_all(parent)?;
+        let digest = crate::sha256::digest_hex(normalized.to_string_lossy().as_bytes());
+        let path = parent.join(format!(".abook-{}.lock", &digest[..16]));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
         loop {
             match std::fs::OpenOptions::new()
