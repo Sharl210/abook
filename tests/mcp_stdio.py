@@ -75,6 +75,9 @@ def test_modern():
         assert helper["spec_get"]["required"] == ["name"]
         assert helper["skill_read"]["required"] == ["name"]
         assert "root" in helper["skill_read"]["properties"]
+        registry = next(tool for tool in tools["tools"] if tool["name"] == "abook_attach_add")
+        assert "command" not in registry["inputSchema"]["properties"]
+        assert registry["inputSchema"]["additionalProperties"] is False
 
         resources = send(p, request("r", "resources/list"))["result"]
         assert resources["resultType"] == "complete"

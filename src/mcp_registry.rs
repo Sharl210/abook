@@ -186,7 +186,14 @@ pub fn build_argv(tool_name: &str, args: &Value) -> Result<Vec<String>, String> 
     let Value::Object(values) = args else { return Err("tools/call arguments 必须是对象".into()); };
     let Value::Object(schema) = &tool.input_schema else { return Err("工具 schema 不是对象".into()); };
     let allowed = schema.get("properties").and_then(|v| match v { Value::Object(m) => Some(m), _ => None }).ok_or("工具 schema 缺少 properties")?;
-    for key in values.keys() { if !allowed.contains_key(key) { return Err(format!("工具参数未声明: {key}")); } }
+    if schema.get("additionalProperties").and_then(|v| match v { Value::Bool(b) => Some(*b), _ => None }) == Some(false) {
+        for key in values.keys() { if !allowed.contains_key(key) { return Err(format!("工具参数未声明: {key}")); } }
+    }
+    let required = schema.get("required").and_then(|v| match v { Value::Array(items) => Some(items), _ => None }).ok_or("工具 schema 缺少 required")?;
+    for item in required {
+        let Value::String(key) = item else { return Err("工具 schema 的 required 必须是字符串数组".into()); };
+        if !values.contains_key(key) { return Err(format!("工具缺少必填参数: {key}")); }
+    }
     let mut positional: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut out = tool.command.split_whitespace().map(str::to_string).collect::<Vec<_>>();
     for binding in &tool.argument_map {
@@ -378,28 +385,16 @@ fn build_schema(
     params: &str,
     flags: &str,
     extras: &[(&str, bool)],
-    composite: bool,
+    _composite: bool,
 ) -> (Value, Vec<ArgumentBinding>, LegacyFlagSuppression) {
     let mut properties = BTreeMap::new();
-    let mut required = vec![Value::s("command")];
+    let mut required = Vec::new();
     let mut bindings = Vec::new();
     let mut suppressed = vec!["argv".to_string()];
 
-    properties.insert("command".to_string(), object(vec![
-        ("type", Value::s("string")),
-        ("const", Value::s(command.to_string())),
-        ("description", Value::s("固定 CLI 命令；仅用于明确映射，不接受任意命令字符串。")),
-    ]));
-
-    if composite {
-        let sub = command.split_whitespace().nth(1);
-        if let Some(sub) = sub {
-            properties.insert("subcommand".to_string(), object(vec![
-                ("type", Value::s("string")), ("const", Value::s(sub.to_string())),
-            ]));
-            bindings.push(ArgumentBinding { property: "subcommand".to_string(), target: BindingTarget::Literal(sub.to_string()) });
-        }
-    }
+    // The tool name and registry metadata already fix the CLI command. Do not
+    // expose a second command/subcommand input: requiring it makes valid `{}`
+    // calls fail, while accepting a different const would be misleading.
 
     for (index, (property, is_required, variadic)) in positional_properties(positional_form).into_iter().enumerate() {
         let ty = if variadic { "array" } else { "string" };
@@ -408,7 +403,7 @@ fn build_schema(
         schema.push(("description", Value::s(format!("CLI 位置参数 {}", index + 1))));
         properties.insert(property.clone(), object(schema));
         if is_required { required.push(Value::s(property.clone())); }
-        bindings.push(ArgumentBinding { property, target: BindingTarget::Positional(index + usize::from(composite)) });
+        bindings.push(ArgumentBinding { property, target: BindingTarget::Positional(index) });
     }
 
     let mut value_names = split_names(params);
@@ -571,7 +566,6 @@ mod tests {
     #[test]
     fn nested_attach_builds_cli_argv_without_shifting_record_and_file() {
         let args = Value::obj([
-            ("command", Value::s("attach add")),
             ("record", Value::s("M-debug-abc123")),
             ("file", Value::s("/tmp/source.txt")),
             ("name", Value::s("proof.txt")),
