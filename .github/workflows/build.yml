@@ -133,10 +133,11 @@ jobs:
           mkdir -p "$ROOT/canonical/records" "$ROOT/candidate/records"
           printf '%s\n' '[CANONICAL_MEMORY]' 'ID=C-20261106T000010-aaaaaaaa' 'TITLE=Migration fixture' 'KIND=DECISION' 'READ_WHEN=CI migration' '[/CANONICAL_MEMORY]' '[MEMORY_BODY]' 'migration body' '[/MEMORY_BODY]' > "$ROOT/canonical/records/C-20261106T000010-aaaaaaaa.md"
           STAGE="$RUNNER_TEMP/abook-stage"
-          STAGE2="$RUNNER_TEMP/abook-stage-activate"
+          STAGE2="${ROOT}-stage-activate"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE" --json
-          ACTIVATED="$(ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE2" --activate --json)"
-          BACKUP="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["backup_root"])' "$ACTIVATED")"
+          ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE2" --activate --json > "$ROOT/activated.json"
+          cat "$ROOT/activated.json"
+          BACKUP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup_root"])' "$ROOT/activated.json")"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --rollback --backup-root "$BACKUP" --json
 
   linux:
