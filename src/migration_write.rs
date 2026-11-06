@@ -240,7 +240,7 @@ fn read_receipt(marker: &Path) -> R<ActivationReceipt> {
         let (key, value) = line.split_once('=').ok_or_else(|| integrity_error("迁移 receipt 行格式无效"))?;
         values.insert(key, value.to_string());
     }
-    let version = values.get("version").map(String::as_str).unwrap_or("");
+    let version = values.remove("version").unwrap_or_default();
     if version != "1" && version != "2" {
         return Err(integrity_error("迁移 receipt 版本不支持"));
     }
