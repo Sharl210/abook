@@ -319,6 +319,15 @@ impl Args {
         }
         a.cmd = argv[i].clone();
         i += 1;
+        if a.cmd == "recall" {
+            if let Some(query) = a.get("body").map(str::to_string) {
+                if let Some(values) = a.kv.get_mut("body") {
+                    values.clear();
+                    values.push("true".to_string());
+                }
+                a.pos.insert(0, query);
+            }
+        }
         while i < argv.len() {
             let t = &argv[i];
             if let Some(rest) = t.strip_prefix("--") {
@@ -435,12 +444,15 @@ impl Args {
     /// of truth, so the help screen, `describe` and this check cannot disagree.
     pub fn validate_for(&self, cmd: &str) -> R<()> {
         if self.kv.contains_key("body") {
-            let subcommand = self.pos.first().map(|s| s.as_str());
+            let subcommand = self.pos.iter().find_map(|value| match value.as_str() {
+                "put" | "set" | "add" | "candidate" | "write" | "update" | "edit" | "recall" => Some(value.as_str()),
+                _ => None,
+            });
             let body_allowed = match cmd {
                 "recall" => true,
                 "vault" => matches!(subcommand, Some("put" | "set" | "add")),
                 "skill" => matches!(subcommand, Some("candidate")),
-                "memory" => matches!(subcommand, Some("write" | "add" | "update" | "edit")),
+                "memory" => matches!(subcommand, Some("write" | "add" | "update" | "edit" | "recall")),
                 _ => true,
             };
             if !body_allowed { return usage(format!("{cmd} 子命令不接受 --body")); }
@@ -2050,13 +2062,23 @@ mod args_tests {
         assert_eq!(write.get("body"), Some("多行\n正文"));
         let recall = Args::parse(&["recall", "--body", "GATE"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse recall body");
         assert_eq!(recall.get("body"), Some("true"));
-        assert_eq!(recall.pos, vec!["GATE"]);
-    }
+        let recall_before = Args::parse(&["--body", "GATE", "recall"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse recall body before command");
+        assert_eq!(recall_before.get("body"), Some("true"));
+        assert_eq!(recall_before.pos, vec!["GATE"]);
 
     #[test]
     fn body_value_scope_follows_nested_subcommand() {
-        let append = Args::parse(&["append", "r", "--body", "tail"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse append body");
-        assert_eq!(append.get("body"), Some("tail"));
+        let add = Args::parse(&["add", "--body", "alias body"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse add body");
+        assert_eq!(add.get("body"), Some("alias body"));
+        let vault_before = Args::parse(&["vault", "--body", "secret", "put", "x"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault before subcommand");
+        assert_eq!(vault_before.get("body"), Some("secret"));
+        assert!(vault_before.validate_for("vault").is_ok());
+        let skill_before = Args::parse(&["skill", "--body", "feedback", "candidate", "name"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse skill before subcommand");
+        assert_eq!(skill_before.get("body"), Some("feedback"));
+        assert!(skill_before.validate_for("skill").is_ok());
+        let memory_before = Args::parse(&["memory", "--body", "content", "write"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory before subcommand");
+        assert_eq!(memory_before.get("body"), Some("content"));
+        assert!(memory_before.validate_for("memory").is_ok());
         let vault_put = Args::parse(&["vault", "put", "x", "--body", "secret"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault put");
         assert_eq!(vault_put.get("body"), Some("secret"));
         let vault_list = Args::parse(&["vault", "list", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault list");
@@ -2074,8 +2096,16 @@ mod args_tests {
         let memory_update = Args::parse(&["memory", "update", "--body", "new body"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory update");
         assert_eq!(memory_update.get("body"), Some("new body"));
     }
+
     #[test]
-    fn stdin_is_a_boolean_switch() {
+    fn marker_memory_recall_body_flag_passes_validation() {
+        let args = Args { cmd: "memory".into(), pos: vec!["recall".into()], kv: BTreeMap::from([
+            ("query".into(), vec!["GATE".into()]),
+            ("body".into(), vec!["true".into()]),
+        ]) };
+        assert!(args.validate_for("memory").is_ok());
+    }
+
         let args = Args::parse(&["write", "--stdin"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse stdin");
         assert!(args.has("stdin"));
     }

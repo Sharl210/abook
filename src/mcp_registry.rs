@@ -196,6 +196,7 @@ pub fn build_argv(tool_name: &str, args: &Value) -> Result<Vec<String>, String> 
     }
     let mut positional: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut out = tool.command.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    let mut flag_args = Vec::new();
     for binding in &tool.argument_map {
         let Some(value) = values.get(&binding.property) else { continue; };
         match &binding.target {
@@ -204,18 +205,27 @@ pub fn build_argv(tool_name: &str, args: &Value) -> Result<Vec<String>, String> 
                 Value::Array(items) => for item in items { match item { Value::String(s) => positional.entry(*index).or_default().push(s.clone()), _ => return Err(format!("参数 {} 的数组元素必须是字符串", binding.property)) } },
                 _ => return Err(format!("参数 {} 必须是字符串或字符串数组", binding.property)),
             },
-            BindingTarget::ValueFlag(flag) => match value { Value::String(s) => { out.push(format!("--{flag}")); out.push(s.clone()); }, _ => return Err(format!("参数 {} 必须是字符串", binding.property)) },
-            BindingTarget::BooleanFlag(flag) => match value { Value::Bool(true) => out.push(format!("--{flag}")), Value::Bool(false) => {}, _ => return Err(format!("参数 {} 必须是布尔值", binding.property)) },
-            BindingTarget::Root => match value { Value::String(s) => { out.push("--root".into()); out.push(s.clone()); }, _ => return Err("root 必须是字符串".into()) },
+            BindingTarget::ValueFlag(flag) => match value { Value::String(s) => { flag_args.push(format!("--{flag}")); flag_args.push(s.clone()); }, _ => return Err(format!("参数 {} 必须是字符串", binding.property)) },
+            BindingTarget::BooleanFlag(flag) => match value { Value::Bool(true) => flag_args.push(format!("--{flag}")), Value::Bool(false) => {}, _ => return Err(format!("参数 {} 必须是布尔值", binding.property)) },
+            BindingTarget::Root => match value { Value::String(s) => { flag_args.push("--root".into()); flag_args.push(s.clone()); }, _ => return Err("root 必须是字符串".into()) },
             BindingTarget::Literal(_) => {},
         }
     }
+    let positional_route = if tool.command == "memory" {
+        positional.remove(&0).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !positional.is_empty() {
         let max = positional.keys().copied().max().unwrap_or(0);
         let mut slots = vec![String::new(); max + 1];
         for (i, values) in positional { if values.len() == 1 { slots[i] = values[0].clone(); } else { slots[i] = values.join("\u{0000}"); } }
         for slot in slots { if slot.contains('\u{0000}') { out.extend(slot.split('\u{0000}').map(str::to_string)); } else if !slot.is_empty() { out.push(slot); } }
     }
+    // CLI parsers need the memory subcommand in argv before its flags. Append it
+    // ahead of options; then values/booleans cannot be confused with the route.
+    if !positional_route.is_empty() { out.extend(positional_route); }
+    out.extend(flag_args);
     if tool.legacy_flag_suppression.inject_json { out.push("--json".into()); }
     Ok(out)
 }
@@ -607,8 +617,24 @@ mod tests {
         );
     }
 
+
     #[test]
-    fn every_non_option_route_has_exactly_one_top_level_descriptor() {
+    fn memory_route_subcommand_is_emitted_before_flags() {
+        let args = object(vec![
+            ("subcommand", Value::s("write")),
+            ("root", Value::s("/tmp/memory")),
+            ("plane", Value::s("explicit")),
+            ("title", Value::s("T")),
+            ("content", Value::s("body")),
+        ]);
+        let argv = build_argv("abook_memory", &args).expect("build memory route");
+        assert_eq!(argv.first().map(String::as_str), Some("memory"));
+        assert_eq!(argv.get(1).map(String::as_str), Some("write"));
+        let parsed = crate::util::Args::parse(&argv).expect("parse routed memory argv");
+        assert_eq!(parsed.pos, vec!["write"]);
+        assert_eq!(parsed.get("content"), Some("body"));
+    }
+
         let tools = all_tools();
         let routes: Vec<&str> = crate::known_commands().iter().copied().filter(|route| !route.starts_with('-')).collect();
         for route in &routes {

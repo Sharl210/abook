@@ -1157,6 +1157,10 @@ fn memory_route_args(a: &Args) -> R<Option<Args>> {
     if matches!(sub, "search" | "recall") && routed.get("query").is_none() && !a.pos.is_empty() {
         routed.kv.insert("query".into(), vec![a.pos.join(" ")]);
     }
+    if sub == "recall" && routed.has("body") {
+        // recall 的 body 是旧入口的正文展示开关，不是 memory 写入字段。
+        routed.kv.insert("body".into(), vec!["true".into()]);
+    }
     routed.validate_for("memory")?;
     Ok(Some(routed))
 }
