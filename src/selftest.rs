@@ -3402,6 +3402,10 @@ STATUS=ACTIVE\n\
             msgs.push("FAIL  no-op 探针的沙箱退化成了真库，已跳过".into());
         } else {
             let first = first_candidate_arg(&root);
+            if first == "none" {
+                skip += 1;
+                msgs.push("SKIP  隔离库没有 candidate 记录，跳过需要候选写入权限的同值编辑探针".into());
+            } else {
             let run = |args: &[&str]| -> (String, i32) {
                 match std::process::Command::new(&exe)
                     .args(args)
@@ -3444,6 +3448,7 @@ STATUS=ACTIVE\n\
                 msgs.push(format!(
                     "FAIL  同值写入: 变更记录不变={quiet} 告知未写入={honest} 真改动记变更={commits_moved}"
                 ));
+            }
             }
         }
     }
