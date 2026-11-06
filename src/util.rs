@@ -2064,10 +2064,12 @@ mod args_tests {
         assert_eq!(vault_list.pos, vec!["list", "next"]);
         assert!(vault_list.validate_for("vault").is_err());
         let skill_show = Args::parse(&["skill", "show", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse skill show");
-        assert_eq!(skill_show.get("body"), Some("next"));
+        assert_eq!(skill_show.get("body"), Some("true"));
+        assert_eq!(skill_show.pos, vec!["show", "next"]);
         assert!(skill_show.validate_for("skill").is_err());
         let memory_context = Args::parse(&["memory", "context", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory context");
-        assert_eq!(memory_context.get("body"), Some("next"));
+        assert_eq!(memory_context.get("body"), Some("true"));
+        assert_eq!(memory_context.pos, vec!["context", "next"]);
         assert!(memory_context.validate_for("memory").is_err());
         let memory_update = Args::parse(&["memory", "update", "--body", "new body"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory update");
         assert_eq!(memory_update.get("body"), Some("new body"));
