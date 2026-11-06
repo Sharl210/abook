@@ -114,6 +114,7 @@ jobs:
   # ---------------------------------------------------------------- Linux
   tests:
     needs: plan
+    if: ${{ needs.plan.outputs.any == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,6 +128,8 @@ jobs:
       - name: 内置自检
         run: ./target/release/abook selftest --json
 
+  linux:
+    needs: plan
     if: ${{ needs.plan.outputs.linux != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
