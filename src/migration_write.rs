@@ -742,7 +742,7 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
         return Err(integrity_error(format!("记录目录与 manifest 不一致: extra={extra:?} missing={missing:?}")));
     }
 
-    let mut seen = BTreeSet::new();
+    let mut staged_parsed: Vec<(super::RecordKey, Record)> = Vec::new();
     for record in &staged.records {
         validate_relative(&record.target_rel, "目标记录路径")?;
         if !ALL_PLANES.contains(&record.target_plane.as_str()) || !record.target_rel.starts_with(&format!("{PLAN_DIR}/{}/records/", record.target_plane)) {
@@ -761,7 +761,12 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
         let body_lines = parsed.body.lines().filter(|line| !line.trim().is_empty()).count();
         if body_lines != record.body_lines { return Err(integrity_error(format!("记录正文行数不匹配: {}", record.target_rel))); }
         if unknown_fields(&parsed) != record.unknown_fields { return Err(integrity_error(format!("未知字段清单不匹配: {}", record.target_rel))); }
+        staged_parsed.push((record_key_from_staged_path(&record.source_rel), parsed));
     }
+    let relation_input: Vec<(super::RecordKey, &Record)> = staged_parsed.iter().map(|(key, record)| (key.clone(), record)).collect();
+    let expected_edges = super::relation_edges_from_records(&relation_input);
+    let expected_relations = stage_relation_edges(&expected_edges, &staged.records)?;
+    if expected_relations != staged.relations { return Err(integrity_error("关系边清单与 staged 记录重算结果不一致")); }
     check_text(&root.join(MANIFEST_JSONL), &render_manifest_jsonl(&staged.records))?;
     check_text(&root.join(MANIFEST_TSV), &render_manifest_tsv(&staged.records))?;
     check_text(&root.join(ALIASES_JSONL), &render_aliases_jsonl(&staged.aliases))?;
@@ -784,6 +789,7 @@ struct PreparedRecord {
     source: PathBuf,
     staged: StagedRecord,
     raw: Vec<u8>,
+    parsed: Record,
 }
 
 fn prepare_records(manifest: &Manifest, source_root: &Path) -> R<Vec<PreparedRecord>> {
@@ -849,7 +855,7 @@ fn prepare_records(manifest: &Manifest, source_root: &Path) -> R<Vec<PreparedRec
             unknown_fields: unknown_fields(&parsed),
             conflict: entry_has_conflict(manifest, entry),
         };
-        out.push(PreparedRecord { source, staged, raw });
+        out.push(PreparedRecord { source, staged, raw, parsed });
     }
     Ok(out)
 }
@@ -996,22 +1002,35 @@ fn inventory_archive(source_root: &Path, category: &str, dir: &Path, out: &mut V
     Ok(())
 }
 
-fn prepare_relations(manifest: &Manifest, prepared: &[PreparedRecord]) -> R<Vec<StagedRelation>> {
-    let mut by_key = BTreeMap::new();
-    for item in prepared { by_key.insert(record_key_from_staged(item), item.staged.target_rel.clone()); }
+fn record_key_from_staged_path(source_rel: &str) -> super::RecordKey {
+    let lib = if source_rel.starts_with("candidate/") { Lib::Candidate } else { Lib::Canonical };
+    let stem = Path::new(source_rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    super::RecordKey { lib, stem }
+}
+
+fn stage_relation_edges(edges: &[super::RelationEdge], records: &[StagedRecord]) -> R<Vec<StagedRelation>> {
+    let by_key: BTreeMap<super::RecordKey, String> = records.iter().map(|r| (record_key_from_staged_path(&r.source_rel), r.target_rel.clone())).collect();
     let mut out = Vec::new();
-    for edge in &manifest.relation_edges {
+    for edge in edges {
         let (status, target_rel, candidates) = match &edge.target {
-            crate::migration::RelationTarget::Resolved(key) => ("resolved".to_string(), by_key.get(key).cloned(), Vec::new()),
-            crate::migration::RelationTarget::Ambiguous(keys) => ("ambiguous".to_string(), None, keys.iter().filter_map(|k| by_key.get(k).cloned()).collect()),
-            crate::migration::RelationTarget::Unresolved => ("unresolved".to_string(), None, Vec::new()),
-            crate::migration::RelationTarget::NonIdentity => ("non_identity".to_string(), None, Vec::new()),
+            super::RelationTarget::Resolved(key) => ("resolved".to_string(), by_key.get(key).cloned(), Vec::new()),
+            super::RelationTarget::Ambiguous(keys) => ("ambiguous".to_string(), None, keys.iter().filter_map(|k| by_key.get(k).cloned()).collect()),
+            super::RelationTarget::Unresolved => ("unresolved".to_string(), None, Vec::new()),
+            super::RelationTarget::NonIdentity => ("non_identity".to_string(), None, Vec::new()),
         };
-        if status == "resolved" && target_rel.is_none() { return Err(integrity_error(format!("关系边指向未生成记录: {}", edge.value))); }
+        if status == "resolved" && target_rel.is_none() { return Err(integrity_error(format!("关系边目标缺少 staged 记录: {}", edge.value))); }
         out.push(StagedRelation { source_rel: edge.source.relative_path(), field: edge.field.to_string(), ordinal: edge.ordinal, value: edge.value.clone(), status, target_rel, candidates });
     }
     Ok(out)
 }
+fn prepare_relations(manifest: &Manifest, prepared: &[PreparedRecord]) -> R<Vec<StagedRelation>> {
+    let inputs: Vec<(super::RecordKey, &Record)> = prepared.iter().map(|p| (record_key_from_staged(p), &p.parsed)).collect();
+    let edges = super::relation_edges_from_records(&inputs);
+    if edges != manifest.relation_edges { return Err(integrity_error("扫描关系边与源记录重新解析结果不一致")); }
+    let records: Vec<StagedRecord> = prepared.iter().map(|p| p.staged.clone()).collect();
+    stage_relation_edges(&edges, &records)
+}
+
 fn write_reports(manifest: &Manifest, staged: &StagedManifest) -> R<()> {
     let root = &staged.staging_root;
     write_new_file(&root.join(MANIFEST_JSONL), render_manifest_jsonl(&staged.records).as_bytes())?;

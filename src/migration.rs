@@ -733,7 +733,14 @@ impl Manifest {
         self.entries.iter().find(|e| &e.key == key)
     }
 
-    /// 逐条清单：路径、源分类、目标平面、目标依据、正文 SHA、被几条正式记录回指。
+    pub fn relation_status_counts(&self) -> (usize, usize, usize, usize) {
+        let mut counts = (0, 0, 0, 0);
+        for edge in &self.relation_edges {
+            match edge.target { RelationTarget::Resolved(_) => counts.0 += 1, RelationTarget::Ambiguous(_) => counts.1 += 1, RelationTarget::Unresolved => counts.2 += 1, RelationTarget::NonIdentity => counts.3 += 1 }
+        }
+        counts
+    }
+
     ///
     /// 这是给未来 `migrate scan` 的 `--tsv` / 人工核对用的；不写文件。
     pub fn render_entries(&self) -> String {
@@ -791,6 +798,8 @@ impl Manifest {
             self.old_id_map.target_count(),
             self.conflicts.ambiguous_aliases.len()
         );
+        let relation_counts = self.relation_status_counts();
+        let _ = writeln!(out, "relations: edges={} resolved={} ambiguous={} unresolved={} non-identity={}", self.relation_edges.len(), relation_counts.0, relation_counts.1, relation_counts.2, relation_counts.3);
         let _ = writeln!(
             out,
             "promotion edges: {}; duplicate PROMOTED_FROM groups: {} (body-conflict {}, unique lines {})",
