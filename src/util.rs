@@ -1289,6 +1289,10 @@ pub fn write_atomic(p: &Path, data: &str) -> R<()> {
     if back != data.as_bytes() {
         return integrity(format!("写入复读不一致: {}", p.display()));
     }
+    // Persist the temporary file before publishing its directory entry. This
+    // closes the crash window where rename reaches the directory but receipt
+    // contents are still only in the page cache.
+    fs::File::open(&tmp)?.sync_all()?;
     match fs::rename(&tmp, p) {
         // 成功：临时文件已经变成目标，别让 guard 去删它。
         Ok(_) => {
