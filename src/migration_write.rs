@@ -701,7 +701,7 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
             let path = entry.path();
             let meta = fs::symlink_metadata(&path)?;
             if meta.file_type().is_symlink() || !meta.is_file() { return Err(integrity_error(format!("记录目录含非普通文件项: {}", path.display()))); }
-            let relative = rel(&root, &path).to_string_lossy().replace('\\', "/");
+            let relative = path.strip_prefix(&root).map_err(|_| integrity_error("迁移记录路径越界"))?.to_string_lossy().replace('\\', "/");
             if !actual_records.insert(relative.clone()) { return Err(integrity_error(format!("重复记录路径: {relative}"))); }
         }
     }
