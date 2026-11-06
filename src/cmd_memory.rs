@@ -57,6 +57,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         }
         "index" => { let (limit, offset) = page_args(a); emit(memory_plane::index(&root, a.get("plane"), limit, offset)?) },
         "context" => emit(memory_plane::context(&root)?),
+        "paths" => emit(memory_plane::paths(&root)?),
         "export" => emit(memory_plane::export(&root, a.get("plane"))?),
         "write" | "add" => {
             let plane = required(a, "plane")?;
@@ -83,6 +84,6 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         }
         "delete" | "rm" => emit(memory_plane::delete(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "restore" => emit(memory_plane::restore(&root, required(a, "id")?, required(a, "expect-revision")?)?),
-        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 index/context/export/write/read/list/search/update/delete/restore")),
+        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/update/delete/restore")),
     }
 }

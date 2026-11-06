@@ -401,7 +401,7 @@ def test_default_stdio_and_cli_prefix():
             old_body = os.path.join(old_root, "legacy-body.txt")
             with open(old_body, "w", encoding="utf-8") as handle:
                 handle.write("legacy body")
-            old = subprocess.run([BIN, "write", "--root", old_root, "--title", "Legacy", "--body-file", old_body, "--json"], text=True, encoding="utf-8", capture_output=True)
+            old = subprocess.run([BIN, "write", "--root", old_root, "--title", "Legacy", "--read-when", "legacy smoke", "--body-file", old_body, "--json"], text=True, encoding="utf-8", capture_output=True)
             assert old.returncode == 0, f"stdout={old.stdout}\nstderr={old.stderr}"
             assert os.path.isdir(os.path.join(old_root, "candidate", "records"))
             os.makedirs(os.path.join(mixed_root, "planes"), exist_ok=True)

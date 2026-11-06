@@ -159,6 +159,43 @@ jobs:
           test ! -f "$LEGACY/abook.memory.layout.v1"
           rm -rf "$LEGACY"
           ./target/release/abook memory export --root "$ROOT" --plane explicit --json
+          PATHS="$(./target/release/abook paths --root "$ROOT" --json)"
+          python3 - "$PATHS" <<'PY'
+          import json, sys
+          value = json.loads(sys.argv[1])
+          assert value["format"] == "abook.memory.paths.v1"
+          assert value["marker"]["exists"] is True
+          assert set(value["planes"]) == {"soul", "rules", "profile", "explicit", "long_term", "episodic"}
+          assert all(row["exists"] for row in value["planes"].values())
+          assert "canonical" not in value["planes"]
+          assert "candidate" not in value["planes"]
+          assert value["credentials"] == "vault"
+          PY
+          LEGACY_PATHS="$(mktemp -d)"
+          mkdir -p "$LEGACY_PATHS/canonical/records" "$LEGACY_PATHS/candidate/records"
+          OLD_PATHS="$(./target/release/abook paths --root "$LEGACY_PATHS" --json)"
+          python3 - "$OLD_PATHS" <<'PY'
+          import json, sys
+          value = json.loads(sys.argv[1])
+          assert "Global.md" in value and "Index.md" in value
+          assert "canonical" in value and "candidate" in value
+          PY
+          rm -rf "$LEGACY_PATHS"
+          MIXED="$(mktemp -d)"
+          ./target/release/abook memory init --root "$MIXED" --json
+          mkdir "$MIXED/canonical"
+          if ./target/release/abook paths --root "$MIXED" --json; then
+            echo "marker + legacy mixed root must fail closed" >&2
+            exit 1
+          fi
+          rm -rf "$MIXED"
+          UNMARKED="$(mktemp -d)"
+          mkdir "$UNMARKED/planes"
+          if ./target/release/abook paths --root "$UNMARKED" --json; then
+            echo "unmarked planes root must fail closed" >&2
+            exit 1
+          fi
+          rm -rf "$UNMARKED"
       - name: 内置自检
         run: |
           set -euo pipefail

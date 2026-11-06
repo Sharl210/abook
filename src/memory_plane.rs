@@ -372,6 +372,31 @@ pub fn context(root: &str) -> R<Value> {
     Ok(object(vec![("planes", Value::Object(counts)), ("credentials", Value::s("vault")), ("total", Value::n(records(&root, None)?.len().to_string()))]))
 }
 
+pub fn paths(root: &str) -> R<Value> {
+    let root = root_path(root)?;
+    let marker = root.join(LAYOUT_MARKER);
+    let mut planes = BTreeMap::new();
+    for plane in PLANES {
+        let path = root.join("planes").join(plane).join("records");
+        planes.insert((*plane).to_string(), object(vec![
+            ("path", Value::s(path.display().to_string())),
+            ("exists", Value::b(path.is_dir())),
+        ]));
+    }
+    let aliases = root.join("legacy_aliases.jsonl");
+    let tombstones = root.join("planes/tombstones/records");
+    let vault = root.join("vault");
+    Ok(object(vec![
+        ("format", Value::s("abook.memory.paths.v1")),
+        ("root", Value::s(root.display().to_string())),
+        ("marker", object(vec![("path", Value::s(marker.display().to_string())), ("exists", Value::b(marker.is_file()))])),
+        ("planes", Value::Object(planes)),
+        ("aliases", object(vec![("path", Value::s(aliases.display().to_string())), ("exists", Value::b(aliases.is_file()))])),
+        ("tombstones", object(vec![("path", Value::s(tombstones.display().to_string())), ("exists", Value::b(tombstones.is_dir()))])),
+        ("vault", object(vec![("path", Value::s(vault.display().to_string())), ("exists", Value::b(vault.is_dir()))])),
+        ("credentials", Value::s("vault")),
+    ]))
+}
 pub fn export(root: &str, plane: Option<&str>) -> R<Value> {
     let selected = match plane {
         Some("all") | None => None,
@@ -540,7 +565,25 @@ mod legacy_migration_tests {
     }
 
     #[test]
-    fn refuses_to_initialize_memory_layout_on_legacy_root() {
+    fn paths_reports_marker_and_all_six_plane_dirs() {
+        let root = temp_root();
+        initialize_layout(root.to_string_lossy().as_ref()).unwrap();
+        let value = paths(root.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(text(&value, "format").as_deref(), Some("abook.memory.paths.v1"));
+        assert_eq!(text(&value, "credentials").as_deref(), Some("vault"));
+        let planes = value.get("planes").and_then(|v| match v { Value::Object(map) => Some(map), _ => None }).unwrap();
+        assert_eq!(planes.len(), PLANES.len());
+        for plane in PLANES {
+            let row = planes.get(*plane).unwrap();
+            assert_eq!(row.get("exists"), Some(&Value::Bool(true)));
+            assert!(text(row, "path").unwrap().ends_with(&format!("planes/{plane}/records")));
+        }
+        assert!(!root.join("canonical").exists());
+        assert!(!root.join("candidate").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+
         let root = temp_root();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
         assert!(initialize_layout(root.to_string_lossy().as_ref()).is_err());

@@ -128,8 +128,8 @@ fn help_text() -> String {
   staging resolve <名> --decision 结论 [--ref 记录ID]
                             结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
-  memory <子命令>           显式六平面库：init/index/context/export/write/read/list/search/update/delete/restore
-  marker 根兼容入口         marker 根上的 index/list/show/search/export/state/write/update/delete/restore 自动走六平面；旧根保持兼容
+  memory <子命令>           显式六平面库：init/index/context/paths/export/write/read/list/search/update/delete/restore
+  marker 根兼容入口         marker 根上的 paths/index/list/show/search/export/state/write/update/delete/restore 自动走六平面；旧根保持兼容
       --plane soul|rules|profile|explicit|long_term|episodic
       --root PATH --id ID --title T --content TEXT --read-when W --query Q
 
@@ -1110,12 +1110,13 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 fn memory_route_args(a: &Args) -> R<Option<Args>> {
-    let supported = ["index", "list", "show", "get", "cat", "search", "recall", "export", "state", "stats", "write", "add", "update", "edit", "delete", "rm", "restore"];
+    let supported = ["paths", "index", "list", "show", "get", "cat", "search", "recall", "export", "state", "stats", "write", "add", "update", "edit", "delete", "rm", "restore"];
     if !supported.contains(&a.cmd.as_str()) { return Ok(None); }
     let root = crate::util::resolve_root(a);
     if !crate::memory_plane::detect_layout(&root)? { return Ok(None); }
     if a.get("lib").is_some() || a.has("approve") { return usage("六平面布局不接受旧 candidate/canonical 的 --lib/--approve；请使用显式 memory 平面"); }
     let sub = match a.cmd.as_str() {
+        "paths" => "paths",
         "index" => "index",
         "list" => "list",
         "show" | "get" | "cat" => "read",
