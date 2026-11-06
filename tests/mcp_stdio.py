@@ -247,11 +247,11 @@ def test_memory_tools():
         indexed = send(p, request("m1-index", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "all", "limit": 1, "offset": 0}}))
         assert indexed["result"]["isError"] is False, indexed
         assert indexed["result"]["structuredContent"]["format"] == "abook.memory.index.v1"
-        assert indexed["result"]["structuredContent"]["total"] == 2
+        assert indexed["result"]["structuredContent"]["total"] == 4
         assert len(indexed["result"]["structuredContent"]["planes"]) == 6
         listed_all = send(p, request("m1-list-all", "tools/call", {"name": "memory_list", "arguments": {"root": root, "limit": 10, "offset": 0}}))
         assert listed_all["result"]["isError"] is False, listed_all
-        assert listed_all["result"]["structuredContent"]["total"] == 2
+        assert listed_all["result"]["structuredContent"]["total"] == 4
         bad_index_plane = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
         assert bad_index_plane["result"]["isError"] is True, bad_index_plane
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
@@ -260,16 +260,16 @@ def test_memory_tools():
         assert len(search["result"]["structuredContent"]["items"]) == 1
         assert search["result"]["structuredContent"]["total"] == 1
         context = send(p, request("m4", "tools/call", {"name": "memory_context", "arguments": {"root": root}}))
-        assert context["result"]["structuredContent"]["planes"]["explicit"] == 2
+        assert context["result"]["structuredContent"]["planes"]["explicit"] == 4
         exported = send(p, request("m4b", "tools/call", {"name": "memory_export", "arguments": {"root": root}}))
         assert exported["result"]["isError"] is False, exported
         assert exported["result"]["structuredContent"]["format"] == "abook.memory.export.v1"
-        assert exported["result"]["structuredContent"]["total"] == 2
+        assert exported["result"]["structuredContent"]["total"] == 4
         assert exported["result"]["structuredContent"]["credentials"] == "vault"
-        assert len(exported["result"]["structuredContent"]["items"]) == 2
+        assert len(exported["result"]["structuredContent"]["items"]) == 4
         explicit_export = send(p, request("m4c", "tools/call", {"name": "memory_export", "arguments": {"root": root, "plane": "explicit"}}))
-        assert explicit_export["result"]["structuredContent"]["planes"]["explicit"] == 2
-        assert explicit_export["result"]["structuredContent"]["total"] == 2
+        assert explicit_export["result"]["structuredContent"]["planes"]["explicit"] == 4
+        assert explicit_export["result"]["structuredContent"]["total"] == 4
         revision = str(record["revision"])
         updated = send(p, request("m7", "tools/call", {"name": "memory_update", "arguments": {"root": root, "id": record["id"], "expected_revision": int(revision), "body": "更新后的正文"}}))
 
