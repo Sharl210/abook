@@ -398,7 +398,7 @@ def test_default_stdio_and_cli_prefix():
         absent_root = tempfile.mkdtemp(prefix="abook-memory-absent-no-side-effect-")
         shutil.rmtree(absent_root)
         try:
-            old = subprocess.run([BIN, "write", "--root", old_root, "--title", "Legacy", "--content", "legacy body", "--json"], text=True, encoding="utf-8", capture_output=True)
+            old = subprocess.run([BIN, "write", "--root", old_root, "--title", "Legacy", "--body", "legacy body", "--json"], text=True, encoding="utf-8", capture_output=True)
             assert old.returncode == 0, old.stderr
             assert os.path.isdir(os.path.join(old_root, "candidate", "records"))
             os.makedirs(os.path.join(mixed_root, "planes"), exist_ok=True)
