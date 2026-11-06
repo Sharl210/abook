@@ -59,7 +59,7 @@ fn records(root: &Path, plane: Option<&str>) -> R<Vec<Value>> {
             if !meta.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
             let raw = fs::read_to_string(&path)?;
             let value = mcp_json::parse(&raw).map_err(|e| err(format!("解析记忆记录失败 {}: {e}", path.display())))?;
-            out.push(value);
+            if text(&value, "status").as_deref() != Some("deleted") { out.push(value); }
         }
     }
     Ok(out)
@@ -117,6 +117,17 @@ pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<V
     Ok(Value::Array(hits))
 }
 
+pub fn list(root: &str, plane: &str, limit: usize, offset: usize) -> R<Value> {
+    if !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
+    let root = root_path(root)?;
+    let mut items = records(&root, Some(plane))?;
+    items.sort_by_key(|v| text(v, "id").unwrap_or_default());
+    let total = items.len();
+    let start = offset.min(total);
+    let size = limit.clamp(1, 500);
+    let page = items.into_iter().skip(start).take(size).collect();
+    Ok(object(vec![("items", Value::Array(page)), ("total", Value::n(total.to_string())), ("offset", Value::n(start.to_string())), ("limit", Value::n(size.to_string()))]))
+}
 pub fn context(root: &str) -> R<Value> {
     let root = root_path(root)?;
     let mut counts = BTreeMap::new();

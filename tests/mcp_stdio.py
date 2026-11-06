@@ -145,7 +145,7 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_context", "memory_write", "memory_read", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore"} <= names
+        assert {"memory_context", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore"} <= names
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
@@ -169,6 +169,8 @@ def test_memory_tools():
         assert rejected["result"]["isError"] is True
         unknown = send(p, request("m12", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "unexpected": True}}))
         assert unknown["result"]["isError"] is True
+        listed = send(p, request("m13", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit", "limit": 10, "offset": 0}}))
+        assert listed["result"]["structuredContent"]["total"] == 1
 
     finally:
         p.stdin.close()

@@ -181,6 +181,7 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_context", "读取六个普通记忆平面的计数与凭据域边界。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
         batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("id")]),
+        batch_tool("memory_list", "分页列出指定普通记忆平面的活动记录。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("root"), Value::s("plane")]),
         batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("query")]),
         batch_tool("memory_recall", "memory_search 的历史事实召回入口。", vec![("root", obj(vec![("type", Value::s("string"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("query")]),
         batch_tool("memory_update", "按 expected_revision 更新一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("id"), Value::s("expected_revision")]),
@@ -195,6 +196,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_context" => &["root"][..],
             "memory_write" => &["root", "plane", "title", "read_when", "content"][..],
             "memory_read" => &["root", "id"][..],
+            "memory_list" => &["root", "plane", "limit", "offset"][..],
             "memory_search" | "memory_recall" => &["root", "query", "plane", "limit"][..],
             "memory_update" => &["root", "id", "expected_revision", "title", "read_when", "content"][..],
             "memory_delete" | "memory_restore" => &["root", "id", "expected_revision"][..],
@@ -212,6 +214,12 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                 crate::memory_plane::write(&root, &plane, &title, &read_when, &content).map_err(|e| e.msg().to_string())
             }
             "memory_read" => crate::memory_plane::read(&root, &scalar_text(args, "id").ok_or("memory_read 缺少 id")?).map_err(|e| e.msg().to_string()),
+            "memory_list" => {
+                let plane = scalar_text(args, "plane").ok_or("memory_list 缺少 plane")?;
+                let limit = scalar_text(args, "limit").and_then(|s| s.parse().ok()).unwrap_or(100);
+                let offset = scalar_text(args, "offset").and_then(|s| s.parse().ok()).unwrap_or(0);
+                crate::memory_plane::list(&root, &plane, limit, offset).map_err(|e| e.msg().to_string())
+            }
             "memory_search" | "memory_recall" => {
                 let query = scalar_text(args, "query").ok_or("memory_search 缺少 query")?;
                 let plane = scalar_text(args, "plane");
@@ -418,7 +426,7 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         return error_value(-32602, &format!("未知工具: {name}"), None);
     }
     let args = params.and_then(|p| p.get("arguments"));
-    if matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore") {
+    if matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore") {
         return direct_memory_call(name, args.unwrap_or(&obj(vec![])));
     }
     if matches!(name, "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status") {
@@ -444,7 +452,7 @@ fn legacy_readonly_command(name: &str) -> bool {
 }
 
 fn tool_is_registered(name: &str) -> bool {
-    matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
+    matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
         || name.strip_prefix("abook_").map(|n| crate::known_commands().contains(&n) && legacy_readonly_command(n)).unwrap_or(false)
 }
 
