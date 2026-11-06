@@ -368,7 +368,11 @@ activation body
             verified = send(p, request("mig-verify", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
             assert verified["result"]["isError"] is False, verified
             assert verified["result"]["structuredContent"]["status"] == "PASS", verified
-            target = os.path.join(activation_root, "planes", "long_term", "records", "C-20261106T000011-bbbbbbbb.md")
+            targets = []
+            for base, _, files in os.walk(os.path.join(activation_root, "planes")):
+                targets.extend(os.path.join(base, name) for name in files if name.endswith(".md"))
+            assert targets, activation_root
+            target = targets[0]
             with open(target, "a", encoding="utf-8") as handle:
                 handle.write("drift")
             drift = send(p, request("mig-verify-drift", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
@@ -376,6 +380,14 @@ activation body
             assert drift["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", drift
             with open(target, "rb+") as handle:
                 handle.truncate(os.path.getsize(target) - len(b"drift"))
+            rogue = os.path.join(os.path.dirname(target), "not-in-manifest.md")
+            with open(rogue, "w", encoding="utf-8") as handle:
+                handle.write("extra record")
+            extra = send(p, request("mig-verify-extra", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert extra["result"]["isError"] is True, extra
+            assert extra["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", extra
+            os.unlink(rogue)
+            recovered = send(p, request("mig-recover", "tools/call", {"name": "abook_migrate_recover", "arguments": {"root": activation_root, "recover": True}}))
 
             assert "result" in recovered, recovered
             assert recovered["result"]["isError"] is True, recovered

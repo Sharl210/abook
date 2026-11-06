@@ -690,10 +690,27 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
     verify_archive_copies(&root, &staged.archives)?;
     verify_attachments(&root, &staged.attachments)?;
 
+    let expected_records: BTreeSet<String> = staged.records.iter().map(|r| r.target_rel.clone()).collect();
+    let mut actual_records = BTreeSet::new();
     for plane in ALL_PLANES {
         let dir = root.join(PLAN_DIR).join(plane).join("records");
-        if !dir.is_dir() || fs::symlink_metadata(&dir)?.file_type().is_symlink() { return Err(integrity_error(format!("缺少 staging 记录目录: {}", dir.display()))); }
+        let meta = fs::symlink_metadata(&dir).map_err(|_| integrity_error(format!("缺少 staging 记录目录: {}", dir.display())))?;
+        if !meta.is_dir() || meta.file_type().is_symlink() { return Err(integrity_error(format!("记录目录类型无效: {}", dir.display()))); }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() || !meta.is_file() { return Err(integrity_error(format!("记录目录含非普通文件项: {}", path.display()))); }
+            let relative = rel(&root, &path).to_string_lossy().replace('\\', "/");
+            if !actual_records.insert(relative.clone()) { return Err(integrity_error(format!("重复记录路径: {relative}"))); }
+        }
     }
+    if actual_records != expected_records {
+        let extra = actual_records.difference(&expected_records).next().cloned();
+        let missing = expected_records.difference(&actual_records).next().cloned();
+        return Err(integrity_error(format!("记录目录与 manifest 不一致: extra={extra:?} missing={missing:?}")));
+    }
+
     let mut seen = BTreeSet::new();
     for record in &staged.records {
         validate_relative(&record.target_rel, "目标记录路径")?;
