@@ -371,7 +371,7 @@ fn add_nested_tools(out: &mut Vec<ToolDefinition>) {
 }
 
 fn nested_tool(spec: &NestedCommand, spelling: &str) -> ToolDefinition {
-    let command = if spec.group == "migrate" { spec.group.to_string() } else { format!("{} {}", spec.group, spelling) };
+    let command = format!("{} {}", spec.group, spelling);
     let route = spec.group.to_string();
     let name = format!("abook_{}_{}", spec.group, normalize_tool_segment(spelling));
     let (mut schema, argument_map, legacy_flag_suppression) = build_schema(
