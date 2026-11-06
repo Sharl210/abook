@@ -177,8 +177,9 @@ jobs:
           python3 - "$OLD_PATHS" <<'PY'
           import json, sys
           value = json.loads(sys.argv[1])
-          assert "Global.md" in value and "Index.md" in value
-          assert "canonical" in value and "candidate" in value
+          assert "Global.md" in value["paths"]["global"]
+          assert "Index.md" in value["paths"]["index"]
+          assert "canonical" in value["paths"] and "candidate" in value["paths"]
           PY
           rm -rf "$LEGACY_PATHS"
           MIXED="$(mktemp -d)"
