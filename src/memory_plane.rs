@@ -303,6 +303,25 @@ mod legacy_migration_tests {
     }
 
     #[test]
+    fn six_plane_attachment_manifest_scan_and_cas_roundtrip() {
+        let root = temp_root();
+        let record_dir = root.join("planes/explicit/records");
+        fs::create_dir_all(&record_dir).unwrap();
+        let record = crate::memory_plane::write(root.to_string_lossy().as_ref(), "explicit", "附件测试", "查附件", "正文").unwrap();
+        let record_path = record_dir.join(format!("{}.json", text(&record, "id").unwrap()));
+        let attachment_dir = crate::attach::dir_for(&record_path);
+        fs::create_dir_all(&attachment_dir).unwrap();
+        fs::write(attachment_dir.join("proof.txt"), "evidence").unwrap();
+        let inventory = crate::attach::scan(&record_path);
+        assert_eq!(inventory.items.len(), 1);
+        let manifest = crate::attach::render_list(&inventory.items);
+        commit_attachment_manifest(&record_path, &manifest).unwrap();
+        let readback = attachment_record(&record_path).unwrap();
+        assert_eq!(readback.attach.as_deref(), Some(manifest.as_str()));
+        assert_eq!(crate::attach::verify(&record_path), crate::attach::Mismatch { missing: Vec::new(), extra: Vec::new(), resized: Vec::new(), edited: Vec::new() });
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn staged_markdown_record_and_alias_can_be_read_updated_deleted_and_restored() {
         let root = temp_root();
         let dir = root.join("planes/long_term/records");

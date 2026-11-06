@@ -1244,6 +1244,7 @@ fn root_and_lib(rec_path: &Path) -> R<(PathBuf, Lib)> {
 /// 这是"容忍模型违规操作"的那一半：模型完全可以绕过工具直接 `rm` 掉某个
 /// 附件文件，清单就会指向不存在的东西。校验不阻止它（阻止不了），但能**发现**
 /// 并在下一次接触这条记录时说清楚差在哪。
+#[derive(Debug, PartialEq, Eq)]
 pub struct Mismatch {
     /// 清单里有、磁盘上没有
     pub missing: Vec<String>,
