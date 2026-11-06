@@ -1548,8 +1548,8 @@ mod tests {
         assert_eq!(staged[2].status, "unresolved");
         assert_eq!(staged[3].status, "non_identity");
     }
-
-
+    #[test]
+    fn activation_verifies_switch_and_rollback_keeps_both_trees_recoverable() {
         let root = temp_dir("activation");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
