@@ -485,11 +485,11 @@ mod legacy_migration_tests {
         let second = write(root.to_string_lossy().as_ref(), "profile", "Second", "index test", "body").unwrap();
         delete(root.to_string_lossy().as_ref(), &text(&first, "id").unwrap(), "1").unwrap();
         assert!(root.join(LAYOUT_MARKER).is_file());
-        let index = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
-        assert_eq!(text(&index, "format").as_deref(), Some("abook.memory.index.v1"));
-        assert_eq!(text(&index, "total").as_deref(), Some("2"));
-        assert_eq!(index.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
-        let items = index.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
+        let indexed = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
+        assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
+        assert_eq!(text(&indexed, "total").as_deref(), Some("2"));
+        assert_eq!(indexed.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
+        let items = indexed.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(text(&items[0], "preview_chars").as_deref(), Some("200"));
         assert_eq!(items[0].get("preview_truncated"), Some(&Value::b(true)));
@@ -510,6 +510,8 @@ mod legacy_migration_tests {
     }
 }
 
+
+fn version_of(value: &Value) -> String { text(value, "revision").unwrap_or_else(|| "1".to_string()) }
 
 pub fn update(root: &str, id: &str, expected_revision: &str, title: Option<&str>, read_when: Option<&str>, content: Option<&str>) -> R<Value> {
     let root = root_path(root)?; let _lock = LibLock::acquire(&root, 30)?;

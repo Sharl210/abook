@@ -135,7 +135,7 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
         for plane in ALL_PLANES {
             fs::create_dir_all(partial.join(PLAN_DIR).join(plane).join("records"))?;
         }
-        write_new_file(&partial.join(crate::memory_plane::LAYOUT_MARKER), &format!("{}\n", crate::memory_plane::LAYOUT_MARKER))?;
+        write_new_file(&partial.join(crate::memory_plane::LAYOUT_MARKER), format!("{}\n", crate::memory_plane::LAYOUT_MARKER).as_bytes())?;
         for category in ARCHIVE_KINDS { fs::create_dir_all(partial.join(ARCHIVE_DIR).join(category))?; }
         copy_archives(&source_root, &partial, &archives)?;
         copy_attachments(&source_root, &partial, &attachments)?;
