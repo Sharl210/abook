@@ -1531,14 +1531,14 @@ mod tests {
             StagedRecord { source_rel: "candidate/records/N-one.md".to_string(), target_rel: "planes/episodic/records/N-one.md".to_string(), target_plane: "episodic".to_string(), source_class: "candidate".to_string(), classification_basis: "default".to_string(), body_sha256: String::new(), raw_sha256: String::new(), body_bytes: 0, body_lines: 0, unknown_fields: Vec::new(), conflict: false },
             StagedRecord { source_rel: "candidate/records/N-two.md".to_string(), target_rel: "planes/episodic/records/N-two.md".to_string(), target_plane: "episodic".to_string(), source_class: "candidate".to_string(), classification_basis: "default".to_string(), body_sha256: String::new(), raw_sha256: String::new(), body_bytes: 0, body_lines: 0, unknown_fields: Vec::new(), conflict: false },
         ];
-        let source = super::RecordKey { lib: Lib::Canonical, stem: "C-source".to_string() };
-        let one = super::RecordKey { lib: Lib::Candidate, stem: "N-one".to_string() };
-        let two = super::RecordKey { lib: Lib::Candidate, stem: "N-two".to_string() };
+        let source = migration::RecordKey { lib: Lib::Canonical, stem: "C-source".to_string() };
+        let one = migration::RecordKey { lib: Lib::Candidate, stem: "N-one".to_string() };
+        let two = migration::RecordKey { lib: Lib::Candidate, stem: "N-two".to_string() };
         let edges = vec![
-            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 0, value: "N-one".to_string(), target: super::RelationTarget::Resolved(one.clone()) },
-            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 1, value: "N-same".to_string(), target: super::RelationTarget::Ambiguous(vec![one, two]) },
-            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 2, value: "N-missing".to_string(), target: super::RelationTarget::Unresolved },
-            super::RelationEdge { source, field: "RELATED_IDS", ordinal: 3, value: "records/N-one.md".to_string(), target: super::RelationTarget::NonIdentity },
+            migration::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 0, value: "N-one".to_string(), target: migration::RelationTarget::Resolved(one.clone()) },
+            migration::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 1, value: "N-same".to_string(), target: migration::RelationTarget::Ambiguous(vec![one, two]) },
+            migration::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 2, value: "N-missing".to_string(), target: migration::RelationTarget::Unresolved },
+            migration::RelationEdge { source, field: "RELATED_IDS", ordinal: 3, value: "records/N-one.md".to_string(), target: migration::RelationTarget::NonIdentity },
         ];
         let staged = stage_relation_edges(&edges, &records).unwrap();
         assert_eq!(staged.len(), 4);
