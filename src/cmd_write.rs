@@ -1098,11 +1098,12 @@ pub fn cmd_update(a: &Args) -> R<i32> {
         rec.body = text.trim_end().to_string();
         changed.push("BODY".into());
     } else if let Some(b) = a.get("body") {
-        let text: String = if b == "-" {
-            crate::cmd_edit::read_stdin_all()?
-        } else {
-            b.to_string()
-        };
+        let text = if b == "-" { crate::cmd_edit::read_stdin_all()? } else { b.to_string() };
+        rec.body = text.trim_end().to_string();
+        changed.push("BODY".into());
+    } else if a.has("stdin") {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
         rec.body = text.trim_end().to_string();
         changed.push("BODY".into());
     }

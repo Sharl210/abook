@@ -12,12 +12,12 @@
 /// `params` are the ones that consume the next token; `flags` are the bare
 /// switches. Both are validated by the parser before the command runs.
 pub const SPEC: &[(&str, &str, &str, &str, &str)] = &[
-    ("write", "title,read-when,not-for,body-file,stdin,lib,approve,dry-run,force,body,summary,brief", "approve,dry-run,force,stdin,json", "新建记录，带格式校验；正文可用 body、body-file - 或 stdin", "--title 示例 --read-when 条件 --stdin --lib candidate"),
-    ("update", "if-version,title,body,body-file,approve,dry-run", "approve,dry-run,json", "改已有记录的头部或正文", "@any --title 示例"),
+    ("write", "title,read-when,not-for,body-file,lib,approve,dry-run,force,body,summary,brief", "approve,dry-run,force,stdin,json", "新建记录，带格式校验；正文可用 body、body-file - 或 stdin", "--title 示例 --read-when 条件 --stdin --lib candidate"),
+    ("update", "if-version,title,body,body-file,approve,dry-run", "approve,dry-run,stdin,json", "改已有记录的头部或正文；stdin 可作为正文输入", "@any --body-file -"),
     ("set", "if-version,value,dry-run,approve", "dry-run,json", "改单个字段", "@any TITLE \"新标题\" --approve"),
-    ("unset", "if-version,text,file,body,approve,dry-run", "dry-run,json", "删正文里的一段", "@any --text x"),
-    ("append", "if-version,text,file,dry-run,approve,body", "dry-run,json", "正文末尾追加", "@any --text x"),
-    ("prepend", "if-version,text,dry-run,approve,body,file", "dry-run,json", "正文开头插入", "@any --text x"),
+    ("unset", "if-version,text,file,approve,dry-run", "dry-run,json", "删正文里的一段", "@any --text x"),
+    ("append", "if-version,text,file,dry-run,approve,body", "dry-run,stdin,json", "正文末尾追加", "@any --text x"),
+    ("prepend", "if-version,text,dry-run,approve,body,file", "dry-run,stdin,json", "正文开头插入", "@any --text x"),
     ("patch", "if-version,old,new,field,in,all,dry-run,approve", "all,dry-run,json", "按文本替换，可限定字段", "@any --old x --new y"),
     ("rename", "if-version,title,dry-run,approve", "dry-run,json", "改标题", "@any --title 新标题"),
     ("move", "if-version,dry-run,approve", "dry-run,json", "换分支", "@any"),

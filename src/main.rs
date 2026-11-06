@@ -1157,6 +1157,7 @@ fn memory_route_args(a: &Args) -> R<Option<Args>> {
     if matches!(sub, "search" | "recall") && routed.get("query").is_none() && !a.pos.is_empty() {
         routed.kv.insert("query".into(), vec![a.pos.join(" ")]);
     }
+    routed.validate_for("memory")?;
     Ok(Some(routed))
 }
 

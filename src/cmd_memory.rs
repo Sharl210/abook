@@ -23,12 +23,15 @@ fn body(a: &Args) -> R<String> {
         }
         return read_str(&expand_tilde(path));
     }
+    if let Some(content) = a.get("content").or_else(|| a.get("body")) {
+        return Ok(content.to_string());
+    }
     if a.has("stdin") {
         let mut value = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut value)?;
         return Ok(value);
     }
-    a.get("content").or_else(|| a.get("body")).map(str::to_string).ok_or_else(|| match usage::<()>("memory write 缺少 --content / --body-file / --stdin") { Err(e) => e, Ok(()) => unreachable!() })
+    Err(match usage::<()>("memory write 缺少 --content / --body-file / --stdin") { Err(e) => e, Ok(()) => unreachable!() })
 }
 
 fn page_args(a: &Args) -> (usize, usize) {
@@ -79,8 +82,12 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         }
         "search" | "recall" => emit(memory_plane::search(&root, required(a, "query")?, a.get("plane"), a.num("per-page").unwrap_or(20) as usize)?),
         "update" | "edit" => {
-            let content = a.get("content").or_else(|| a.get("body"));
-            emit(memory_plane::update(&root, required(a, "id")?, required(a, "expect-revision")?, a.get("title"), a.get("read-when"), content)?)
+            let content = if a.get("body-file").is_some() || a.has("stdin") {
+                Some(body(a)?)
+            } else {
+                a.get("content").or_else(|| a.get("body")).map(str::to_string)
+            };
+            emit(memory_plane::update(&root, required(a, "id")?, required(a, "expect-revision")?, a.get("title"), a.get("read-when"), content.as_deref())?)
         }
         "delete" | "rm" => emit(memory_plane::delete(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "restore" => emit(memory_plane::restore(&root, required(a, "id")?, required(a, "expect-revision")?)?),

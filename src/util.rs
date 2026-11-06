@@ -173,11 +173,9 @@ const BOOLS: &[&str] = &[
     "no-expand", "no-index", "no-atlas", "no-commit",
     "summary-only", "purpose-only", "deviations", "fields",
     "remove-sources", "rebuild", "fix", "verify", "prune",
-    // 只改输出选择、不带动词的开关。漏在这里的后果不是"开关无效"，
-    // 而是它**吃掉后面那个词**：`recall --body GATE` 会把查询词 GATE
-    // 当成 --body 的值，于是报"需要查询词"；`upgrade --check` 同理。
-    // 两者都是 `a.has(...)` 语义（纯开关），所以必须在这里。
-    "body", "check", "stdin",
+    // Output-only switches are contextual. `--body` is intentionally not global here:
+    // recall handles it separately, while mutation commands parse it as a value.
+     "check", "stdin",
     // search modes
     "regex", "re", "fuzzy", "approx", "literal", "exact",
     "semantic", "sem", "ask", "case", "deep", "expand", "raw-lines", "lines", "whole-line",
@@ -329,15 +327,15 @@ impl Args {
                     None => (rest.to_string(), None),
                 };
                 let k = Self::alias(&raw_k).to_string();
-                // `--body` is a value on mutating/document commands, but remains
-                // a flag for read/recall output selection. Keep parsing contextual
-                // so `write --body TEXT` cannot be swallowed as a boolean while
-                // `recall --body QUERY` keeps its legacy meaning.
-                let body_value = k == "body" && matches!(
-                    a.cmd.as_str(),
-                    "write" | "update" | "edit" | "commit" | "skill" | "vault" | "memory"
-                );
-                if BOOLS.contains(&k.as_str()) && !body_value {
+                let body_value = k == "body" && match a.cmd.as_str() {
+                    "write" | "update" | "edit" | "commit" | "append" | "prepend" => true,
+                    "vault" => matches!(a.pos.first().map(|s| s.as_str()), Some("put" | "set" | "add")),
+                    "skill" => matches!(a.pos.first().map(|s| s.as_str()), Some("candidate")),
+                    "memory" => matches!(a.pos.first().map(|s| s.as_str()), Some("write" | "add" | "update" | "edit")),
+                    _ => false,
+                };
+                let body_flag = k == "body" && !body_value;
+                if BOOLS.contains(&k.as_str()) || body_flag {
                     let v = inline.unwrap_or_else(|| "true".to_string());
                     a.store_both(&k, &raw_k, v);
                 } else if let Some(v) = inline {
@@ -436,6 +434,17 @@ impl Args {
     /// text as if it were JSON and got nothing. The table is the single source
     /// of truth, so the help screen, `describe` and this check cannot disagree.
     pub fn validate_for(&self, cmd: &str) -> R<()> {
+        if self.kv.contains_key("body") {
+            let subcommand = self.pos.first().map(|s| s.as_str());
+            let body_allowed = match cmd {
+                "recall" => true,
+                "vault" => matches!(subcommand, Some("put" | "set" | "add")),
+                "skill" => matches!(subcommand, Some("candidate")),
+                "memory" => matches!(subcommand, Some("write" | "add" | "update" | "edit")),
+                _ => true,
+            };
+            if !body_allowed { return usage(format!("{cmd} 子命令不接受 --body")); }
+        }
         let allowed = match crate::spec::params_of(cmd) {
             Some(v) => v,
             // A command absent from the table is not checked rather than
@@ -2044,6 +2053,24 @@ mod args_tests {
         assert_eq!(recall.pos, vec!["GATE"]);
     }
 
+    #[test]
+    fn body_value_scope_follows_nested_subcommand() {
+        let append = Args::parse(&["append", "r", "--body", "tail"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse append body");
+        assert_eq!(append.get("body"), Some("tail"));
+        let vault_put = Args::parse(&["vault", "put", "x", "--body", "secret"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault put");
+        assert_eq!(vault_put.get("body"), Some("secret"));
+        let vault_list = Args::parse(&["vault", "list", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault list");
+        assert_eq!(vault_list.get("body"), Some("next"));
+        assert!(vault_list.validate_for("vault").is_err());
+        let skill_show = Args::parse(&["skill", "show", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse skill show");
+        assert_eq!(skill_show.get("body"), Some("next"));
+        assert!(skill_show.validate_for("skill").is_err());
+        let memory_context = Args::parse(&["memory", "context", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory context");
+        assert_eq!(memory_context.get("body"), Some("next"));
+        assert!(memory_context.validate_for("memory").is_err());
+        let memory_update = Args::parse(&["memory", "update", "--body", "new body"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse memory update");
+        assert_eq!(memory_update.get("body"), Some("new body"));
+    }
     #[test]
     fn stdin_is_a_boolean_switch() {
         let args = Args::parse(&["write", "--stdin"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse stdin");
