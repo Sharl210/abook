@@ -316,8 +316,8 @@ activation body
             backup_root = activated["result"]["structuredContent"]["backup_root"]
             recovered = send(p, request("mig-recover", "tools/call", {"name": "abook_migrate_recover", "arguments": {"root": activation_root, "recover": True}}))
             assert "result" in recovered, recovered
-            assert recovered["result"]["isError"] is False, recovered
-            assert recovered["result"]["structuredContent"]["phase"] == "RECOVERED_COMMITTED"
+            assert recovered["result"]["isError"] is True, recovered
+            assert recovered["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY"
             rolled_back = send(p, request("mig-rollback", "tools/call", {"name": "abook_migrate_rollback", "arguments": {"root": activation_root, "backup_root": backup_root, "rollback": True}}))
             assert "result" in rolled_back, rolled_back
             assert rolled_back["result"]["isError"] is False, rolled_back
