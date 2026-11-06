@@ -208,7 +208,7 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_init", "memory_context", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
+        assert {"memory_init", "memory_context", "memory_paths", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         memory_list_schema = next(tool for tool in tools if tool["name"] == "memory_list")["inputSchema"]
         assert memory_list_schema["required"] == ["root"]
 
@@ -220,6 +220,11 @@ def test_memory_tools():
         assert empty_index["result"]["isError"] is False, empty_index
         assert empty_index["result"]["structuredContent"]["total"] == 0
         assert len(empty_index["result"]["structuredContent"]["planes"]) == 6
+        empty_paths = send(p, request("m0-paths", "tools/call", {"name": "memory_paths", "arguments": {"root": empty_root}}))
+        assert empty_paths["result"]["isError"] is False, empty_paths
+        assert empty_paths["result"]["structuredContent"]["format"] == "abook.memory.paths.v1"
+        assert len(empty_paths["result"]["structuredContent"]["planes"]) == 6
+        shutil.rmtree(empty_root)
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
 

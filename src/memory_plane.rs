@@ -576,14 +576,14 @@ mod legacy_migration_tests {
         for plane in PLANES {
             let row = planes.get(*plane).unwrap();
             assert_eq!(row.get("exists"), Some(&Value::Bool(true)));
-            assert!(text(row, "path").unwrap().ends_with(&format!("planes/{plane}/records")));
+            assert!(Path::new(&text(row, "path").unwrap()).ends_with(Path::new("planes").join(plane).join("records")));
         }
         assert!(!root.join("canonical").exists());
         assert!(!root.join("candidate").exists());
         let _ = fs::remove_dir_all(root);
     }
-
-
+    #[test]
+    fn refuses_to_initialize_memory_layout_on_legacy_root() {
         let root = temp_root();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
         assert!(initialize_layout(root.to_string_lossy().as_ref()).is_err());
