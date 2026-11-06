@@ -69,6 +69,10 @@ def test_modern():
         assert len(names) == len(set(names))
         assert "abook_route_--help" not in names
         assert "abook_route_-h" not in names
+        assert "abook_txn_preview" in names
+        assert "abook_txn_apply" in names
+        assert "abook_txn_rollback" in names
+        assert "abook_txn_status" in names
         helper = {x["name"]: x["inputSchema"] for x in tools["tools"] if x["name"] in {"memory_help", "spec_list", "spec_get", "skill_list", "skill_read", "system_update"}}
         assert "argv" not in helper["memory_help"]["properties"]
         assert helper["memory_help"]["additionalProperties"] is False
@@ -161,6 +165,26 @@ def test_batch_tools():
         rolled = send(p, request("b4", "tools/call", {"name": "memory_batch_rollback", "arguments": {"root": root, "token": token}}))
         assert rolled["result"]["isError"] is False, rolled
         assert not os.path.exists(os.path.join(root, "planes/explicit/records/demo.md"))
+
+        txn_root = os.path.join(root, "txn-library")
+        os.makedirs(txn_root, exist_ok=True)
+        body_file = os.path.join(root, "txn-body.txt")
+        with open(body_file, "w", encoding="utf-8") as handle:
+            handle.write("txn line one\ntxn line two 😀\n")
+        txn_preview = send(p, request("t1", "tools/call", {"name": "abook_txn_preview", "arguments": {"root": txn_root, "path": "planes/explicit/records/txn.md", "body_file": body_file}}))
+        assert "result" in txn_preview, txn_preview
+        txn_data = txn_preview["result"]["structuredContent"]
+        assert "token" in txn_data, txn_preview
+        txn_token = txn_data["token"]
+        txn_apply = send(p, request("t2", "tools/call", {"name": "abook_txn_apply", "arguments": {"root": txn_root, "preview_token": txn_token, "expect_revision": txn_data["revision"]}}))
+        assert txn_apply["result"]["isError"] is False, txn_apply
+        with open(os.path.join(txn_root, "planes/explicit/records/txn.md"), encoding="utf-8") as handle:
+            assert handle.read() == "txn line one\ntxn line two 😀\n"
+        txn_status = send(p, request("t3", "tools/call", {"name": "abook_txn_status", "arguments": {"root": txn_root}}))
+        assert "result" in txn_status, txn_status
+        txn_rollback = send(p, request("t4", "tools/call", {"name": "abook_txn_rollback", "arguments": {"root": txn_root, "preview_token": txn_token}}))
+        assert txn_rollback["result"]["isError"] is False, txn_rollback
+        assert not os.path.exists(os.path.join(txn_root, "planes/explicit/records/txn.md"))
         rejected = send(p, request("b5", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "x", "body": "ok", "extra": "reject"}}))
         assert rejected["result"]["isError"] is True
     finally:

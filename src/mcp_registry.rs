@@ -335,6 +335,12 @@ const SKILL_COMMANDS: &[NestedCommand] = &[
     NestedCommand { group: "skill", subcommand: "lint", aliases: &[], summary: "检查 Skill 自包含与导航", positionals: "<名>", params: "root,max-entry", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
 ];
 
+const TXN_COMMANDS: &[NestedCommand] = &[
+    NestedCommand { group: "txn", subcommand: "preview", aliases: &[], summary: "预览批次事务变更", positionals: "", params: "path,body-file", flags: "json,dry-run", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "txn", subcommand: "apply", aliases: &[], summary: "应用批次事务预览", positionals: "", params: "preview-token,expect-revision", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "txn", subcommand: "rollback", aliases: &[], summary: "回滚批次事务", positionals: "", params: "preview-token", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "txn", subcommand: "status", aliases: &[], summary: "读取批次事务恢复状态", positionals: "", params: "", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
+];
 const BRANCH_COMMANDS: &[NestedCommand] = &[
     NestedCommand { group: "branch", subcommand: "list", aliases: &["ls"], summary: "列出地图分支", positionals: "", params: "keys,read-when,page,per-page", flags: "json,dry-run,force", extra_value_args: &["lib"], extra_bool_args: &[] },
     NestedCommand { group: "branch", subcommand: "add", aliases: &["new"], summary: "新增地图分支", positionals: "<分支名>", params: "keys,read-when", flags: "json,dry-run,force", extra_value_args: &["lib"], extra_bool_args: &[] },
@@ -345,7 +351,7 @@ const BRANCH_COMMANDS: &[NestedCommand] = &[
 ];
 
 fn add_nested_tools(out: &mut Vec<ToolDefinition>) {
-    for command in ATTACH_COMMANDS.iter().chain(VAULT_COMMANDS).chain(SKILL_COMMANDS).chain(BRANCH_COMMANDS) {
+    for command in ATTACH_COMMANDS.iter().chain(VAULT_COMMANDS).chain(SKILL_COMMANDS).chain(BRANCH_COMMANDS).chain(TXN_COMMANDS) {
         let mut spellings = Vec::with_capacity(command.aliases.len() + 1);
         spellings.push(command.subcommand);
         spellings.extend_from_slice(command.aliases);
@@ -606,12 +612,13 @@ mod tests {
     #[test]
     fn nested_subcommands_and_aliases_are_all_registered() {
         let tools = all_tools();
-        for group in ["attach", "vault", "skill", "branch"] {
+        for group in ["attach", "vault", "skill", "branch", "txn"] {
             let expected = match group {
                 "attach" => ATTACH_COMMANDS,
                 "vault" => VAULT_COMMANDS,
                 "skill" => SKILL_COMMANDS,
-                _ => BRANCH_COMMANDS,
+                "branch" => BRANCH_COMMANDS,
+                _ => TXN_COMMANDS,
             };
             for item in expected {
                 for spelling in std::iter::once(item.subcommand).chain(item.aliases.iter().copied()) {
@@ -624,6 +631,7 @@ mod tests {
         assert_eq!(VAULT_COMMANDS.len(), 12);
         assert_eq!(SKILL_COMMANDS.len(), 10);
         assert_eq!(BRANCH_COMMANDS.len(), 6);
+        assert_eq!(TXN_COMMANDS.len(), 4);
     }
 
     #[test]
