@@ -178,6 +178,7 @@ fn batch_tool(name: &str, desc: &str, properties: Vec<(&str, Value)>, required: 
 
 fn memory_tools() -> Vec<Value> {
     vec![
+        batch_tool("memory_context", "读取六个普通记忆平面的计数与凭据域边界。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
         batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))]))], vec![Value::s("root")]),
         batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("root"), Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("id")]),
