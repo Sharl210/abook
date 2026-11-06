@@ -208,12 +208,17 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_context", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
+        assert {"memory_context", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
         extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
-        assert extra["result"]["isError"] is False, extra
+        indexed = send(p, request("m1-index", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "all", "limit": 1, "offset": 0}}))
+        assert indexed["result"]["isError"] is False, indexed
+        assert indexed["result"]["structuredContent"]["format"] == "abook.memory.index.v1"
+        assert indexed["result"]["structuredContent"]["total"] == 2
+        assert len(indexed["result"]["structuredContent"]["planes"]) == 6
+        assert len(indexed["result"]["structuredContent"]["items"]) == 1
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
         assert read["result"]["structuredContent"]["content"] == "第一行\n第二行 😀"
         search = send(p, request("m3", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "plane": "explicit"}}))
