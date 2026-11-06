@@ -212,7 +212,8 @@ jobs:
                       args,
                       input=payload, text=True, encoding="utf-8", capture_output=True, check=True,
                   )
-                  record_id = os.path.basename(result.stdout.strip()).removesuffix(".md")
+                  path_line = next(line.strip() for line in result.stdout.splitlines() if line.strip().endswith(".md"))
+                  record_id = os.path.basename(path_line).removesuffix(".md")
                   read = subprocess.run(
                       [binary, "get", record_id, "BODY", "--root", root, "--json"],
                       text=True, encoding="utf-8", capture_output=True, check=True,
