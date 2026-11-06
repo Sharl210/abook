@@ -501,8 +501,8 @@ pub struct RelationEdge {
     pub value: String,
     pub target: RelationTarget,
 }
-
-
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromotionIssueKind {
     /// 值长得像身份，但全库没有任何记录认领它。
     Unresolved,
     /// 同一值命中多条候选记录；不猜，交给人。
