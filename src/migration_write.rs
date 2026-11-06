@@ -700,7 +700,17 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
             let entry = entry?;
             let path = entry.path();
             let meta = fs::symlink_metadata(&path)?;
-            if meta.file_type().is_symlink() || !meta.is_file() { return Err(integrity_error(format!("记录目录含非普通文件项: {}", path.display()))); }
+            if meta.file_type().is_symlink() { return Err(integrity_error(format!("记录目录含符号链接: {}", path.display()))); }
+            if meta.is_dir() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(stem) = name.strip_suffix("-refs") {
+                    let record_path = path.with_file_name(format!("{stem}.md"));
+                    let relative = record_path.strip_prefix(&root).map_err(|_| integrity_error("附件侧车路径越界"))?.to_string_lossy().replace('\\', "/");
+                    if expected_records.contains(&relative) { continue; }
+                }
+                return Err(integrity_error(format!("记录目录含未登记子目录: {}", path.display())));
+            }
+            if !meta.is_file() { return Err(integrity_error(format!("记录目录含非普通文件项: {}", path.display()))); }
             let relative = path.strip_prefix(&root).map_err(|_| integrity_error("迁移记录路径越界"))?.to_string_lossy().replace('\\', "/");
             if !actual_records.insert(relative.clone()) { return Err(integrity_error(format!("重复记录路径: {relative}"))); }
         }
