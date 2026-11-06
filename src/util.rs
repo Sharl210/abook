@@ -146,7 +146,7 @@ pub fn other<T>(m: impl Into<String>) -> R<T> {
 /// `known()` can binary-search it; a stale entry means a legitimate parameter
 /// gets rejected, so this list is exercised by selftest.
 pub const KNOWN_PARAMS: &[&str] = &[
-    "after", "and", "at", "authority", "body", "body-file", "branch", "by",
+    "after", "and", "at", "authority", "backup-root", "body", "body-file", "branch", "by",
     "card", "concepts", "confidence", "content", "context", "depth", "dest", "dir",
     "distance", "edits", "entities", "evidence", "expect-revision", "field", "file", "for", "format",
     "from", "id", "ids", "in", "into", "json-depth", "kb", "keep",
@@ -165,7 +165,7 @@ const BOOLS: &[&str] = &[
     // positional argument — which is how `--semantic 查询词` used to lose its
     // query entirely.
     // output / behaviour
-    "json", "quiet", "raw", "compact", "verbose", "help",
+    "json", "quiet", "raw", "compact", "verbose", "help", "activate", "recover", "rollback",
     // authorisation and safety
     "approve", "yes", "force", "hard", "dry-run", "apply",
     // scope switches

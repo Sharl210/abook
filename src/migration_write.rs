@@ -9,11 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use super::{Manifest, ManifestEntry, TargetPlane};
 
 use crate::rec::{self, Lib, Record};
 use crate::sha256;
-use crate::util::{EE, R};
+use crate::util::{EE, LibLock, R};
 
 fn integrity_error(message: impl Into<String>) -> EE {
     match crate::util::integrity::<()>(message) { Err(error) => error, Ok(()) => unreachable!() }
@@ -179,18 +180,210 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
 
     let committed = StagedManifest {
         source_root,
-        staging_root: final_root,
+        staging_root: final_root.clone(),
         records: staged.records,
         aliases: staged.aliases,
         archives: staged.archives,
         attachments: staged.attachments,
         readable_report: staged.readable_report,
     };
-    // Re-read the committed tree, not the private partial path, before return.
-    verify_staged(&committed)?;
+    // 目录已从 partial 改名为 final；若提交后复验失败，立即移除这个不可信的
+    // staging 根，避免把“返回错误但产物仍像已提交”的状态留在磁盘。
+    if let Err(error) = verify_staged(&committed) {
+        let _ = fs::remove_dir_all(&final_root);
+        return Err(integrity_error(format!("staging 改名后复验失败，已清理不可信目录: {:?}", error)));
+    }
     Ok(committed)
 }
 
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivationReceipt {
+    pub id: String,
+    pub live_root: PathBuf,
+    pub staging_root: PathBuf,
+    pub backup_root: PathBuf,
+    pub phase: String,
+}
+
+fn activation_marker(parent: &Path, id: &str) -> PathBuf {
+    parent.join(format!(".abook-migration-{id}.receipt"))
+}
+
+fn receipt_text(receipt: &ActivationReceipt) -> String {
+    format!(
+        "version=1\nid={}\nlive_root={}\nstaging_root={}\nbackup_root={}\nphase={}\n",
+        receipt.id,
+        receipt.live_root.display(),
+        receipt.staging_root.display(),
+        receipt.backup_root.display(),
+        receipt.phase,
+    )
+}
+
+fn write_receipt(marker: &Path, receipt: &ActivationReceipt) -> R<()> {
+    crate::util::write_atomic(marker, &receipt_text(receipt))
+}
+
+fn read_receipt(marker: &Path) -> R<ActivationReceipt> {
+    let raw = fs::read_to_string(marker)?;
+    let mut values = BTreeMap::new();
+    for line in raw.lines() {
+        let (key, value) = line.split_once('=').ok_or_else(|| integrity_error("迁移 receipt 行格式无效"))?;
+        values.insert(key, value.to_string());
+    }
+    if values.get("version").map(String::as_str) != Some("1") {
+        return Err(integrity_error("迁移 receipt 版本不支持"));
+    }
+    Ok(ActivationReceipt {
+        id: values.remove("id").ok_or_else(|| integrity_error("迁移 receipt 缺少 id"))?,
+        live_root: PathBuf::from(values.remove("live_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 live_root"))?),
+        staging_root: PathBuf::from(values.remove("staging_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 staging_root"))?),
+        backup_root: PathBuf::from(values.remove("backup_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 backup_root"))?),
+        phase: values.remove("phase").ok_or_else(|| integrity_error("迁移 receipt 缺少 phase"))?,
+    })
+}
+
+fn sync_parent(path: &Path) -> R<()> {
+    let parent = path.parent().ok_or_else(|| integrity_error("目录没有父目录"))?;
+    OpenOptions::new().read(true).open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn verify_hash(path: &Path, expected: &str, label: &str) -> R<()> {
+    let bytes = fs::read(path).map_err(|_| integrity_error(format!("缺少{label}: {}", path.display())))?;
+    let actual = sha256::digest_hex(&bytes);
+    if actual != expected {
+        return Err(integrity_error(format!("{label} hash 不符: {}", path.display())));
+    }
+    Ok(())
+}
+
+fn verify_source_baseline(staged: &StagedManifest, source: &Path) -> R<()> {
+    for record in &staged.records {
+        verify_hash(&source.join(&record.source_rel), &record.raw_sha256, "源记录")?;
+    }
+    for attachment in &staged.attachments {
+        verify_hash(&source.join(&attachment.source_rel), &attachment.sha256, "源附件")?;
+    }
+    for entries in staged.archives.values() {
+        for entry in entries {
+            if let Some(expected) = &entry.sha256 {
+                verify_hash(&source.join(&entry.source_rel), expected, "源归档")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_activated_root(root: &Path, staged: &StagedManifest) -> R<()> {
+    let root = canonical_dir(root, "激活后的库根目录")?;
+    for plane in ALL_PLANES {
+        let dir = root.join(PLAN_DIR).join(plane).join("records");
+        let meta = fs::symlink_metadata(&dir).map_err(|_| integrity_error(format!("激活库缺少平面目录: {}", dir.display())))?;
+        if !meta.is_dir() || meta.file_type().is_symlink() { return Err(integrity_error(format!("激活平面目录类型不符: {}", dir.display()))); }
+    }
+    for record in &staged.records {
+        verify_hash(&root.join(&record.target_rel), &record.raw_sha256, "激活记录")?;
+    }
+    for attachment in &staged.attachments {
+        verify_hash(&root.join(&attachment.target_rel), &attachment.sha256, "激活附件")?;
+    }
+    for (category, entries) in &staged.archives {
+        for entry in entries {
+            if let Some(expected) = &entry.sha256 {
+                verify_hash(&root.join(ARCHIVE_DIR).join(category).join(&entry.source_rel), expected, "激活归档")?;
+            }
+        }
+    }
+    for file in [MANIFEST_JSONL, MANIFEST_TSV, ALIASES_JSONL, ALIASES_TSV, ATTACHMENTS_JSONL, ATTACHMENTS_TSV, REPORT_TXT] {
+        let path = root.join(file);
+        let meta = fs::symlink_metadata(&path).map_err(|_| integrity_error(format!("激活库缺少报告文件: {}", path.display())))?;
+        if !meta.is_file() || meta.file_type().is_symlink() { return Err(integrity_error(format!("激活报告文件类型不符: {}", path.display()))); }
+    }
+    Ok(())
+}
+
+pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
+    let live = canonical_dir(&staged.source_root, "源库根目录")?;
+    let stage = canonical_dir(&staged.staging_root, "staging 根目录")?;
+    if paths_overlap(&live, &stage) || live.parent() != stage.parent() {
+        return Err(integrity_error("激活要求 live 与 staging 为同一父目录下的非重叠目录"));
+    }
+    verify_staged(staged)?;
+    let _lock = LibLock::acquire(&live, 30)?;
+    verify_source_baseline(staged, &live)?;
+    let parent = live.parent().ok_or_else(|| integrity_error("源库根目录没有父目录"))?;
+    let serial = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let id = sha256::digest_hex(format!("{}:{}:{}", live.display(), std::process::id(), serial).as_bytes())[..16].to_string();
+    let backup = parent.join(format!(".{}.abook-migration-backup-{id}", live.file_name().unwrap_or_default().to_string_lossy()));
+    if path_exists_any(&backup) { return Err(integrity_error(format!("迁移 backup 已存在: {}", backup.display()))); }
+    let marker = activation_marker(parent, &id);
+    let mut receipt = ActivationReceipt { id, live_root: live.clone(), staging_root: stage.clone(), backup_root: backup.clone(), phase: "PREPARED".into() };
+    write_receipt(&marker, &receipt)?;
+    fs::rename(&live, &backup)?;
+    sync_parent(&backup)?;
+    receipt.phase = "SOURCE_MOVED".into(); write_receipt(&marker, &receipt)?;
+    if let Err(error) = fs::rename(&stage, &live) {
+        let _ = fs::rename(&backup, &live);
+        let _ = fs::remove_file(&marker);
+        return Err(integrity_error(format!("staging 切换失败，已恢复源库: {error}")));
+    }
+    sync_parent(&live)?;
+    receipt.phase = "LIVE_MOVED".into(); write_receipt(&marker, &receipt)?;
+    if let Err(error) = verify_activated_root(&live, staged) {
+        receipt.phase = "ROLLING_BACK".into(); let _ = write_receipt(&marker, &receipt);
+        let failed = parent.join(format!(".{}.abook-migration-failed-{}", live.file_name().unwrap_or_default().to_string_lossy(), receipt.id));
+        let rollback_result = fs::rename(&live, &failed).and_then(|_| fs::rename(&backup, &live));
+        if rollback_result.is_ok() { let _ = sync_parent(&live); let _ = fs::remove_file(&marker); }
+        return Err(integrity_error(format!("激活后验证失败，{}: {:?}", if rollback_result.is_ok() { "已回滚源库" } else { "需要执行 migrate --recover" }, error)));
+    }
+    receipt.phase = "VERIFIED".into(); write_receipt(&marker, &receipt)?;
+    fs::remove_file(&marker)?;
+    sync_parent(&live)?;
+    Ok(receipt)
+}
+
+pub fn rollback_activation(live_root: &Path, backup_root: &Path) -> R<PathBuf> {
+    let live = canonical_dir(live_root, "当前库根目录")?;
+    let backup = canonical_dir(backup_root, "迁移 backup 根目录")?;
+    if live.parent() != backup.parent() || live == backup { return Err(integrity_error("rollback 要求 live 与 backup 同父目录且不能相同")); }
+    let _lock = LibLock::acquire(&live, 30)?;
+    let id = sha256::digest_hex(format!("{}:{}", live.display(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()).as_bytes())[..16].to_string();
+    let abandoned = live.parent().unwrap().join(format!(".{}.abook-migration-abandoned-{id}", live.file_name().unwrap_or_default().to_string_lossy()));
+    fs::rename(&live, &abandoned)?; sync_parent(&abandoned)?;
+    if let Err(error) = fs::rename(&backup, &live) {
+        let _ = fs::rename(&abandoned, &live);
+        return Err(integrity_error(format!("rollback 切换失败，已保留原 live: {error}")));
+    }
+    sync_parent(&live)?;
+    Ok(abandoned)
+}
+
+pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
+    let live = absolutize(live_root)?;
+    let parent = live.parent().ok_or_else(|| integrity_error("live 根目录没有父目录"))?;
+    let mut found = Vec::new();
+    for entry in fs::read_dir(parent)? {
+        let path = entry?.path();
+        if path.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with(".abook-migration-") && s.ends_with(".receipt")).unwrap_or(false) {
+            let receipt = read_receipt(&path)?;
+            if receipt.live_root == live { found.push((path, receipt)); }
+        }
+    }
+    if found.len() != 1 { return Err(integrity_error(format!("找到 {} 个匹配迁移 receipt，无法安全恢复", found.len()))); }
+    let (marker, mut receipt) = found.remove(0);
+    let backup_exists = path_exists_any(&receipt.backup_root);
+    let live_exists = path_exists_any(&receipt.live_root);
+    if live_exists && backup_exists {
+        receipt.phase = "RECOVERED_COMMITTED".into(); write_receipt(&marker, &receipt)?; fs::remove_file(marker)?; return Ok(receipt);
+    }
+    if !live_exists && backup_exists {
+        fs::rename(&receipt.backup_root, &receipt.live_root)?; sync_parent(&receipt.live_root)?;
+        receipt.phase = "RECOVERED_ROLLED_BACK".into(); write_receipt(&marker, &receipt)?; fs::remove_file(marker)?; return Ok(receipt);
+    }
+    Err(integrity_error("迁移 receipt 的 live/backup 状态无法安全判定，保留现场供人工恢复"))
+}
 /// Verify an already-built staged tree without modifying it.
 pub fn verify_staged(staged: &StagedManifest) -> R<()> {
     let root = canonical_dir(&staged.staging_root, "staging 根目录")?;
@@ -945,7 +1138,51 @@ mod tests {
     }
 
     #[test]
-    fn failed_build_does_not_create_requested_root_or_touch_source() {
+    fn activation_verifies_switch_and_rollback_keeps_both_trees_recoverable() {
+        let root = temp_dir("activation");
+        fs::create_dir_all(root.join("canonical/records")).unwrap();
+        fs::create_dir_all(root.join("candidate/records")).unwrap();
+        let source = root.join("canonical/records/C-20261101T120000-aaaaaaaa.md");
+        fs::write(&source, record(Lib::Canonical, "C-20261101T120000-aaaaaaaa", "X_UNKNOWN=保留", "旧正文")).unwrap();
+        let manifest = migration::scan(&root).unwrap();
+        let staging = root.parent().unwrap().join(format!("{}-activation-stage", root.file_name().unwrap().to_string_lossy()));
+        let staged = build_staged(&manifest, &staging).unwrap();
+        let receipt = activate_staged(&staged).unwrap();
+        assert_eq!(receipt.phase, "VERIFIED");
+        assert!(root.join("planes/long_term/records").is_dir());
+        assert!(receipt.backup_root.is_dir());
+        verify_activated_root(&root, &staged).unwrap();
+        let abandoned = rollback_activation(&root, &receipt.backup_root).unwrap();
+        assert!(abandoned.is_dir());
+        assert!(root.join("canonical/records/C-20261101T120000-aaaaaaaa.md").is_file());
+        assert_eq!(fs::read_to_string(root.join("canonical/records/C-20261101T120000-aaaaaaaa.md")).unwrap(), fs::read_to_string(&source).unwrap());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(abandoned);
+        let _ = fs::remove_dir_all(staging);
+    }
+
+    #[test]
+    fn recovery_receipt_rolls_back_when_live_was_moved_but_stage_not_installed() {
+        let root = temp_dir("recovery");
+        fs::create_dir_all(root.join("canonical/records")).unwrap();
+        fs::create_dir_all(root.join("candidate/records")).unwrap();
+        let source = root.join("canonical/records/C-20261101T120000-aaaaaaaa.md");
+        fs::write(&source, record(Lib::Canonical, "C-20261101T120000-aaaaaaaa", "", "旧正文")).unwrap();
+        let parent = root.parent().unwrap().to_path_buf();
+        let backup = parent.join(".abook-test-recovery-backup");
+        fs::rename(&root, &backup).unwrap();
+        let marker = activation_marker(&parent, "test-recovery");
+        let receipt = ActivationReceipt { id: "test-recovery".into(), live_root: root.clone(), staging_root: parent.join("missing-stage"), backup_root: backup.clone(), phase: "SOURCE_MOVED".into() };
+        write_receipt(&marker, &receipt).unwrap();
+        let recovered = recover_activation(&root).unwrap();
+        assert_eq!(recovered.phase, "RECOVERED_ROLLED_BACK");
+        assert!(root.join("canonical/records/C-20261101T120000-aaaaaaaa.md").is_file());
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(backup);
+    }
+
+
         let root = temp_dir("boundary");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();

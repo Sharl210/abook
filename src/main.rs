@@ -179,7 +179,9 @@ fn help_text() -> String {
   （别名：list/ledger/names/reconcile）
 
 ═══ 迁移与事务 ═══
-  migrate [--format entries] [--staging-root PATH]  扫描旧库；指定输出路径时生成隔离迁移树
+  migrate [--format entries] [--staging-root PATH] [--activate]  扫描旧库；可生成并激活隔离六平面迁移树
+                             --recover 处理迁移 receipt 的崩溃恢复
+                             --rollback --backup-root PATH 回滚到迁移前库
   txn preview|apply|rollback|status  批次事务操作
   recover [--dry-run|--apply]  未完成事务恢复
 
@@ -1466,10 +1468,39 @@ fn cmd_normalize(a: &Args) -> R<i32> {
 
 fn cmd_migrate(a: &Args) -> R<i32> {
     let root = resolve_root(a);
+    if a.has("recover") {
+        let receipt = migration::migration_write::recover_activation(&root)?;
+        if a.has("json") {
+            crate::say_line!("{{\"id\":{},\"phase\":{},\"live_root\":{},\"backup_root\":{}}}", jstr(&receipt.id), jstr(&receipt.phase), jstr(&receipt.live_root.display().to_string()), jstr(&receipt.backup_root.display().to_string()));
+        } else {
+            crate::say_line!("迁移恢复: {} phase={} live={} backup={}", receipt.id, receipt.phase, receipt.live_root.display(), receipt.backup_root.display());
+        }
+        return Ok(0);
+    }
+    if a.has("rollback") {
+        let backup = a.get("backup-root").ok_or_else(|| EE::Usage("migrate --rollback 需要 --backup-root PATH".into()))?;
+        let abandoned = migration::migration_write::rollback_activation(&root, std::path::Path::new(backup))?;
+        if a.has("json") {
+            crate::say_line!("{{\"live_root\":{},\"backup_root\":{},\"abandoned_root\":{}}}", jstr(&root.display().to_string()), jstr(backup), jstr(&abandoned.display().to_string()));
+        } else {
+            crate::say_line!("迁移已回滚: live={} backup={} 原新库保留在 {}", root.display(), backup, abandoned.display());
+        }
+        return Ok(0);
+    }
     let manifest = migration::scan(&root)?;
     if let Some(staging) = a.get("staging-root") {
         let staged = migration::migration_write::build_staged(&manifest, std::path::Path::new(staging))?;
-        if a.has("json") {
+        if a.has("activate") {
+            let receipt = migration::migration_write::activate_staged(&staged)?;
+            if a.has("json") {
+                crate::say_line!("{{\"id\":{},\"phase\":{},\"live_root\":{},\"staging_root\":{},\"backup_root\":{},\"records\":{},\"aliases\":{}}}", jstr(&receipt.id), jstr(&receipt.phase), jstr(&receipt.live_root.display().to_string()), jstr(&receipt.staging_root.display().to_string()), jstr(&receipt.backup_root.display().to_string()), staged.records.len(), staged.aliases.len());
+            } else {
+                crate::say_line!("迁移已激活: {}", receipt.id);
+                crate::say_line!("live: {}", receipt.live_root.display());
+                crate::say_line!("backup: {}", receipt.backup_root.display());
+                crate::say_line!("records: {} aliases: {}", staged.records.len(), staged.aliases.len());
+            }
+        } else if a.has("json") {
             crate::say_line!("{{\"staging_root\":{},\"records\":{},\"aliases\":{},\"archives\":{}}}", jstr(&staged.staging_root.display().to_string()), staged.records.len(), staged.aliases.len(), staged.archives.values().map(Vec::len).sum::<usize>());
         } else {
             crate::say_line!("staged root: {}", staged.staging_root.display());
@@ -1477,6 +1508,7 @@ fn cmd_migrate(a: &Args) -> R<i32> {
         }
         return Ok(0);
     }
+    if a.has("activate") { return usage("migrate --activate 需要显式 --staging-root PATH"); }
     if a.has("stage") { return usage("migrate --stage 需要显式 --staging-root PATH"); }
     if a.has("json") {
         let report = manifest.render_report();
