@@ -635,6 +635,8 @@ mod tests {
         assert_eq!(parsed.get("content"), Some("body"));
     }
 
+    #[test]
+    fn every_non_option_route_has_exactly_one_top_level_descriptor() {
         let tools = all_tools();
         let routes: Vec<&str> = crate::known_commands().iter().copied().filter(|route| !route.starts_with('-')).collect();
         for route in &routes {
