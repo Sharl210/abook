@@ -283,6 +283,9 @@ pub fn commit_attachment_manifest(path: &Path, manifest: &str) -> R<bool> {
 }
 
 pub fn attachment_record(path: &Path) -> R<crate::rec::Record> {
+    if path.extension().and_then(|s| s.to_str()) == Some("md") {
+        return crate::rec::Record::parse(path, crate::rec::Lib::Canonical);
+    }
     let raw = fs::read_to_string(path)?;
     let value = mcp_json::parse(&raw).map_err(|e| err(format!("附件记录 JSON 无效: {e}")))?;
     let fields = [("ID", "id"), ("TITLE", "title"), ("READ_WHEN", "read_when")].iter().filter_map(|(field, key)| text(&value, key).map(|v| ((*field).to_string(), v))).collect();

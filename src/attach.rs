@@ -1337,10 +1337,8 @@ pub fn verify(rec_path: &Path) -> Mismatch {
         resized: Vec::new(),
         edited: Vec::new(),
     };
-    let listed = match crate::rec::Record::parse(rec_path, crate::rec::Lib::Candidate)
-        .or_else(|_| crate::rec::Record::parse(rec_path, crate::rec::Lib::Canonical))
-    {
-        Ok(r) => parse_list(&r.attach.unwrap_or_default()),
+    let listed = match crate::memory_plane::attachment_record(rec_path) {
+        Ok(record) => parse_list(&record.attach.unwrap_or_default()),
         Err(_) => Vec::new(),
     };
     let disk = scan(rec_path);
@@ -1374,10 +1372,8 @@ pub fn verify(rec_path: &Path) -> Mismatch {
 ///
 /// 悬空引用不算错误（正文是历史记录，可能先写了引用再补附件），但要报出来。
 pub fn dangling_refs(rec_path: &Path) -> Vec<String> {
-    let rec = match crate::rec::Record::parse(rec_path, crate::rec::Lib::Candidate)
-        .or_else(|_| crate::rec::Record::parse(rec_path, crate::rec::Lib::Canonical))
-    {
-        Ok(r) => r,
+    let rec = match crate::memory_plane::attachment_record(rec_path) {
+        Ok(record) => record,
         Err(_) => return Vec::new(),
     };
     let n = scan(rec_path).count();
