@@ -210,6 +210,7 @@ def test_memory_tools():
         names = {tool["name"] for tool in tools}
         assert {"memory_init", "memory_context", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         memory_list_schema = next(tool for tool in tools if tool["name"] == "memory_list")["inputSchema"]
+        assert memory_list_schema["required"] == ["root"]
 
         assert "all" in next(tool for tool in tools if tool["name"] == "memory_export")["inputSchema"]["properties"]["plane"]["enum"]
         empty_root = tempfile.mkdtemp(prefix="abook-mcp-empty-")
@@ -219,9 +220,9 @@ def test_memory_tools():
         assert empty_index["result"]["isError"] is False, empty_index
         assert empty_index["result"]["structuredContent"]["total"] == 0
         assert len(empty_index["result"]["structuredContent"]["planes"]) == 6
-        shutil.rmtree(empty_root)
-
+        written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
+
         record = written["result"]["structuredContent"]
         extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
         assert extra["result"]["isError"] is False, extra
