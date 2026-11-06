@@ -2060,7 +2060,8 @@ mod args_tests {
         let vault_put = Args::parse(&["vault", "put", "x", "--body", "secret"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault put");
         assert_eq!(vault_put.get("body"), Some("secret"));
         let vault_list = Args::parse(&["vault", "list", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse vault list");
-        assert_eq!(vault_list.get("body"), Some("next"));
+        assert_eq!(vault_list.get("body"), Some("true"));
+        assert_eq!(vault_list.pos, vec!["list", "next"]);
         assert!(vault_list.validate_for("vault").is_err());
         let skill_show = Args::parse(&["skill", "show", "--body", "next"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse skill show");
         assert_eq!(skill_show.get("body"), Some("next"));
