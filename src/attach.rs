@@ -300,7 +300,7 @@ pub fn orphans(root: &Path, lib: Lib) -> Vec<(String, u64, usize)> {
 
 // ---------------------------------------------------------------- commands
 
-fn need_record(a: &Args) -> R<(PathBuf, Record)> {fn need_record(a: &Args) -> R<(PathBuf, Record)> {
+fn need_record(a: &Args) -> R<(PathBuf, Record)> {
     let root = resolve_root(a);
     let sel = a.need_pos(1, "记录选择器（路径 / 文件名 / ID）")?;
     let (path, lib) = match crate::rec::resolve_record(&root, &sel) {
