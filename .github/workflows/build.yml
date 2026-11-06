@@ -135,9 +135,10 @@ jobs:
           STAGE="$RUNNER_TEMP/abook-stage"
           STAGE2="${ROOT}-stage-activate"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE" --json
-          ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE2" --activate --json > "$ROOT/activated.json"
-          cat "$ROOT/activated.json"
-          BACKUP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup_root"])' "$ROOT/activated.json")"
+          ACTIVATED_FILE="$RUNNER_TEMP/activated.json"
+          ABOOK_ROOT="$ROOT" ./target/release/abook migrate --staging-root "$STAGE2" --activate --json > "$ACTIVATED_FILE"
+          cat "$ACTIVATED_FILE"
+          BACKUP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup_root"])' "$ACTIVATED_FILE")"
           ABOOK_ROOT="$ROOT" ./target/release/abook migrate --rollback --backup-root "$BACKUP" --json
 
   linux:
