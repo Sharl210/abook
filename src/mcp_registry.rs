@@ -643,7 +643,7 @@ mod tests {
             };
             for item in expected {
                 for spelling in std::iter::once(item.subcommand).chain(item.aliases.iter().copied()) {
-                    let command = if group == "migrate" { "migrate".to_string() } else { format!("{group} {spelling}") };
+                    let command = format!("{group} {spelling}");
                     let name = format!("abook_{}_{}", group, normalize_tool_segment(spelling));
                     assert!(tools.iter().any(|tool| tool.command == command && tool.name == name), "missing nested route {group} {spelling}");
                 }
