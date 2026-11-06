@@ -485,8 +485,24 @@ pub struct PromotionEdge {
     pub resolved_candidates: Vec<RecordKey>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromotionIssueKind {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelationTarget {
+    Resolved(RecordKey),
+    Ambiguous(Vec<RecordKey>),
+    Unresolved,
+    NonIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationEdge {
+    pub source: RecordKey,
+    pub field: &'static str,
+    pub ordinal: usize,
+    pub value: String,
+    pub target: RelationTarget,
+}
+
+
     /// 值长得像身份，但全库没有任何记录认领它。
     Unresolved,
     /// 同一值命中多条候选记录；不猜，交给人。
@@ -698,6 +714,7 @@ pub struct Manifest {
     pub record_dirs: RecordDirPresence,
     pub old_id_map: OldIdMap,
     pub promotion_edges: Vec<PromotionEdge>,
+    pub relation_edges: Vec<RelationEdge>,
     pub conflicts: ConflictReport,
     pub atlas: AtlasManifest,
     pub vault: VaultManifest,
@@ -890,6 +907,9 @@ fn build_manifest(input: ScanInput) -> Manifest {
         records_by_key.insert(record_key(rec), rec);
     }
 
+    let relation_input: Vec<(RecordKey, &Record)> = records.iter().map(|rec| (record_key(rec), rec)).collect();
+    let relation_edges = relation_edges_from_records(&relation_input);
+
     // ---- 1. 多值旧 ID 映射：只增别名，不覆盖逻辑 ID
     let mut old_id_map = OldIdMap::default();
     for rec in &records {
@@ -1076,6 +1096,7 @@ fn build_manifest(input: ScanInput) -> Manifest {
         record_dirs: input.record_dirs,
         old_id_map,
         promotion_edges,
+        relation_edges,
         conflicts,
         atlas,
         vault: input.vault,
@@ -1850,9 +1871,52 @@ fn parse_ref_values(raw: &str) -> Vec<String> {
     out
 }
 
-/// 值是否像一条记录身份。旧库允许 `AB2-C-001`，新库允许
-/// `C-20261029T101635-f449f353`，另外短号 `C123` / `N45` 也合法。
-fn is_ref_shaped(value: &str) -> bool {
+fn header_id_tokens(rec: &Record) -> Vec<String> {
+    let raw = rec.get("ID");
+    let mut out = Vec::new();
+    for part in raw.split([';', '；', ',', '，']) {
+        let mut token = part.trim();
+        if let Some(rest) = token.strip_prefix("ID=") { token = rest.trim(); }
+        if !token.is_empty() && !token.contains('=') && !token.chars().any(char::is_whitespace) { push_unique(&mut out, token.to_string()); }
+    }
+    out
+}
+
+struct RelationIdentityIndex { by_token: BTreeMap<String, Vec<RecordKey>> }
+impl RelationIdentityIndex {
+    fn build(records: &[(RecordKey, &Record)]) -> Self {
+        let mut by_token: BTreeMap<String, Vec<RecordKey>> = BTreeMap::new();
+        for (key, rec) in records {
+            let mut tokens = header_id_tokens(rec);
+            tokens.push(key.stem.clone());
+            for token in tokens { by_token.entry(token).or_default().push(key.clone()); }
+        }
+        for targets in by_token.values_mut() { targets.sort(); targets.dedup(); }
+        Self { by_token }
+    }
+    fn resolve(&self, value: &str) -> RelationTarget {
+        if !is_ref_shaped(value) { return RelationTarget::NonIdentity; }
+        match self.by_token.get(value).map(Vec::as_slice).unwrap_or(&[]) {
+            [] => RelationTarget::Unresolved,
+            [one] => RelationTarget::Resolved(one.clone()),
+            many => RelationTarget::Ambiguous(many.to_vec()),
+        }
+    }
+}
+
+pub(crate) fn relation_edges_from_records(records: &[(RecordKey, &Record)]) -> Vec<RelationEdge> {
+    let index = RelationIdentityIndex::build(records);
+    let mut edges = Vec::new();
+    for (key, rec) in records {
+        for (ordinal, value) in parse_ref_values(&rec.get("RELATED_IDS")).into_iter().enumerate() {
+            edges.push(RelationEdge { source: key.clone(), field: "RELATED_IDS", ordinal, value: value.clone(), target: index.resolve(&value) });
+        }
+    }
+    edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.ordinal.cmp(&b.ordinal)).then(a.value.cmp(&b.value)));
+    edges
+}
+
+
     let value = value.trim();
     if value.is_empty()
         || value.contains('/')
@@ -2080,7 +2144,18 @@ mod tests {
     }
 
     #[test]
-    fn promoted_to_header_marks_candidate_promoted() {
+    fn related_ids_keep_resolved_ambiguous_and_non_identity_separate() {
+        let source = mk(Lib::Canonical, "C-20261101T120000-aaaa1111", "ID=C-20261101T120000-aaaa1111\nRELATED_IDS=AB2-N-002,candidate/records/AB2-N-002.md", "A");
+        let target_a = mk(Lib::Candidate, "AB2-N-002", "ID=AB2-N-002", "B");
+        let target_b = mk(Lib::Candidate, "AB2-N-002-copy", "ID=AB2-N-002", "C");
+        let manifest = manifest_from_records(vec![source, target_a, target_b]);
+        assert_eq!(manifest.relation_edges.len(), 2);
+        assert!(matches!(manifest.relation_edges[0].target, RelationTarget::Ambiguous(_)));
+        assert!(matches!(manifest.relation_edges[1].target, RelationTarget::NonIdentity));
+        assert!(manifest.old_id_map.targets("candidate/records/AB2-N-002.md").len() >= 1);
+    }
+
+
         let rec = mk(
             Lib::Candidate,
             &candidate_id(4),

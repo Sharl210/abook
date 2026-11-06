@@ -31,7 +31,8 @@ const MANIFEST_JSONL: &str = "manifest.jsonl";
 const MANIFEST_TSV: &str = "manifest.tsv";
 const ALIASES_JSONL: &str = "legacy_aliases.jsonl";
 const ALIASES_TSV: &str = "legacy_aliases.tsv";
-const REPORT_TXT: &str = "migration-report.txt";
+const RELATION_JSONL: &str = "relation_edges.jsonl";
+const RELATION_TSV: &str = "relation_edges.tsv";
 const ARCHIVE_KINDS: [&str; 3] = ["vault", "commits", "review"];
 const ALL_PLANES: [&str; 7] = [
     "soul",
@@ -78,6 +79,16 @@ pub struct ArchiveEntry {
     pub sha256: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedRelation {
+    pub source_rel: String,
+    pub field: String,
+    pub ordinal: usize,
+    pub value: String,
+    pub status: String,
+    pub target_rel: Option<String>,
+    pub candidates: Vec<String>,
+}
 /// One copied attachment in the staged plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedAttachment {
@@ -94,6 +105,7 @@ pub struct StagedManifest {
     pub staging_root: PathBuf,
     pub records: Vec<StagedRecord>,
     pub aliases: Vec<StagedAlias>,
+    pub relations: Vec<StagedRelation>,
     pub archives: BTreeMap<String, Vec<ArchiveEntry>>,
     pub attachments: Vec<StagedAttachment>,
     pub readable_report: String,
@@ -118,6 +130,7 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
 
     let prepared = prepare_records(manifest, &source_root)?;
     let aliases = prepare_aliases(manifest, &prepared)?;
+    let relations = prepare_relations(manifest, &prepared)?;
     let archives = prepare_archives(&source_root)?;
 
     let attachments = prepare_attachments(&prepared, &source_root)?;
@@ -156,6 +169,7 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
             staging_root: partial.clone(),
             records: prepared.iter().map(|p| p.staged.clone()).collect(),
             aliases: aliases.clone(),
+            relations: relations.clone(),
             archives: archives.clone(),
             attachments: attachments.clone(),
             readable_report,
@@ -185,6 +199,7 @@ pub fn build_staged(manifest: &Manifest, staging_root: &Path) -> R<StagedManifes
         staging_root: final_root.clone(),
         records: staged.records,
         aliases: staged.aliases,
+        relations: staged.relations,
         archives: staged.archives,
         attachments: staged.attachments,
         readable_report: staged.readable_report,
@@ -420,7 +435,7 @@ pub fn verify_activated_root(root: &Path, staged: &StagedManifest) -> R<()> {
             }
         }
     }
-    for file in [MANIFEST_JSONL, MANIFEST_TSV, ALIASES_JSONL, ALIASES_TSV, ATTACHMENTS_JSONL, ATTACHMENTS_TSV, REPORT_TXT] {
+    for file in [MANIFEST_JSONL, MANIFEST_TSV, ALIASES_JSONL, ALIASES_TSV, RELATION_JSONL, RELATION_TSV, ATTACHMENTS_JSONL, ATTACHMENTS_TSV, REPORT_TXT] {
         let path = root.join(file);
         let meta = fs::symlink_metadata(&path).map_err(|_| integrity_error(format!("激活库缺少报告文件: {}", path.display())))?;
         if !meta.is_file() || meta.file_type().is_symlink() { return Err(integrity_error(format!("激活报告文件类型不符: {}", path.display()))); }
@@ -657,16 +672,21 @@ pub fn load_staged_from_disk(root: &Path, source_root: &Path) -> R<StagedManifes
         }).collect::<R<Vec<_>>>()?;
         archives.insert(category.to_string(), entries);
     }
-    Ok(StagedManifest { source_root: source_root.to_path_buf(), staging_root: root.to_path_buf(), records, aliases, archives, attachments, readable_report: fs::read_to_string(checked_file(root, REPORT_TXT)?)? })
+    let relations = json_lines(root, RELATION_JSONL)?.into_iter().map(|v| {
+        let candidates = v.array("candidates").ok_or_else(|| integrity_error("relation candidates 缺失"))?.iter().map(|x| match x { crate::mcp_json::Value::String(s) => Ok(s.clone()), _ => Err(integrity_error("relation candidates 无效")) }).collect::<R<Vec<_>>>()?;
+        Ok(StagedRelation { source_rel: json_string(&v,"source_rel")?, field: json_string(&v,"field")?, ordinal: json_usize(&v,"ordinal")?, value: json_string(&v,"value")?, status: json_string(&v,"status")?, target_rel: match v.get("target_rel") { Some(crate::mcp_json::Value::String(s)) => Some(s.clone()), Some(crate::mcp_json::Value::Null) | None => None, _ => return Err(integrity_error("relation target_rel 无效")) }, candidates })
+    }).collect::<R<Vec<_>>>()?;
+    Ok(StagedManifest { source_root: source_root.to_path_buf(), staging_root: root.to_path_buf(), records, aliases, relations, archives, attachments, readable_report: fs::read_to_string(checked_file(root, REPORT_TXT)?)? })
 }
 
-pub fn verify_tree(root: &Path, source_root: Option<&Path>) -> R<(usize, BTreeMap<String, usize>, usize, usize, usize)> {
+pub fn verify_tree(root: &Path, source_root: Option<&Path>) -> R<(usize, BTreeMap<String, usize>, usize, usize, usize, usize)> {
     let source = source_root.unwrap_or(root);
     let staged = load_staged_from_disk(root, source)?;
     verify_staged_impl(&staged, source_root.is_some())?;
     let mut planes = BTreeMap::new();
     for plane in ALL_PLANES { planes.insert(plane.to_string(), staged.records.iter().filter(|r| r.target_plane == plane).count()); }
-    Ok((staged.records.len(), planes, staged.aliases.len(), staged.attachments.len(), staged.archives.values().map(Vec::len).sum()))
+    let relations = staged.relations.len();
+    Ok((staged.records.len(), planes, staged.aliases.len(), relations, staged.attachments.len(), staged.archives.values().map(Vec::len).sum()))
 }
 /// Verify an already-built staged tree without modifying it.
 pub fn verify_staged(staged: &StagedManifest) -> R<()> {
@@ -750,6 +770,8 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
         check_text(&root.join(ARCHIVE_DIR).join(format!("{category}.jsonl")), &render_archive_jsonl(&entries))?;
         check_text(&root.join(ARCHIVE_DIR).join(format!("{category}.tsv")), &render_archive_tsv(&entries))?;
     }
+    check_text(&root.join(RELATION_JSONL), &render_relations_jsonl(&staged.relations))?;
+    check_text(&root.join(RELATION_TSV), &render_relations_tsv(&staged.relations))?;
     check_text(&root.join(ATTACHMENTS_JSONL), &render_attachments_jsonl(&staged.attachments))?;
     check_text(&root.join(ATTACHMENTS_TSV), &render_attachments_tsv(&staged.attachments))?;
     check_text(&root.join(REPORT_TXT), &staged.readable_report)?;
@@ -973,31 +995,51 @@ fn inventory_archive(source_root: &Path, category: &str, dir: &Path, out: &mut V
     Ok(())
 }
 
+fn prepare_relations(manifest: &Manifest, prepared: &[PreparedRecord]) -> R<Vec<StagedRelation>> {
+    let mut by_key = BTreeMap::new();
+    for item in prepared { by_key.insert(record_key_from_staged(item), item.staged.target_rel.clone()); }
+    let mut out = Vec::new();
+    for edge in &manifest.relation_edges {
+        let (status, target_rel, candidates) = match &edge.target {
+            crate::migration::RelationTarget::Resolved(key) => ("resolved".to_string(), by_key.get(key).cloned(), Vec::new()),
+            crate::migration::RelationTarget::Ambiguous(keys) => ("ambiguous".to_string(), None, keys.iter().filter_map(|k| by_key.get(k).cloned()).collect()),
+            crate::migration::RelationTarget::Unresolved => ("unresolved".to_string(), None, Vec::new()),
+            crate::migration::RelationTarget::NonIdentity => ("non_identity".to_string(), None, Vec::new()),
+        };
+        if status == "resolved" && target_rel.is_none() { return Err(integrity_error(format!("关系边指向未生成记录: {}", edge.value))); }
+        out.push(StagedRelation { source_rel: edge.source.relative_path(), field: edge.field.to_string(), ordinal: edge.ordinal, value: edge.value.clone(), status, target_rel, candidates });
+    }
+    Ok(out)
+}
 fn write_reports(manifest: &Manifest, staged: &StagedManifest) -> R<()> {
     let root = &staged.staging_root;
     write_new_file(&root.join(MANIFEST_JSONL), render_manifest_jsonl(&staged.records).as_bytes())?;
     write_new_file(&root.join(MANIFEST_TSV), render_manifest_tsv(&staged.records).as_bytes())?;
     write_new_file(&root.join(ALIASES_JSONL), render_aliases_jsonl(&staged.aliases).as_bytes())?;
     write_new_file(&root.join(ALIASES_TSV), render_aliases_tsv(&staged.aliases).as_bytes())?;
+    write_new_file(&root.join(RELATION_JSONL), render_relations_jsonl(&staged.relations).as_bytes())?;
+    write_new_file(&root.join(RELATION_TSV), render_relations_tsv(&staged.relations).as_bytes())?;
     write_new_file(&root.join(ATTACHMENTS_JSONL), render_attachments_jsonl(&staged.attachments).as_bytes())?;
     write_new_file(&root.join(ATTACHMENTS_TSV), render_attachments_tsv(&staged.attachments).as_bytes())?;
     for category in ARCHIVE_KINDS {
         let entries = staged.archives.get(category).cloned().unwrap_or_default();
-        write_new_file(
-            &root.join(ARCHIVE_DIR).join(format!("{category}.jsonl")),
-            render_archive_jsonl(&entries).as_bytes(),
-        )?;
-        write_new_file(
-            &root.join(ARCHIVE_DIR).join(format!("{category}.tsv")),
-            render_archive_tsv(&entries).as_bytes(),
-        )?;
+        write_new_file(&root.join(ARCHIVE_DIR).join(format!("{category}.jsonl")), render_archive_jsonl(&entries).as_bytes())?;
+        write_new_file(&root.join(ARCHIVE_DIR).join(format!("{category}.tsv")), render_archive_tsv(&entries).as_bytes())?;
     }
     if !staged.readable_report.starts_with(&manifest.render_report()) { return Err(integrity_error("staged 人类可读报告与 manifest 基线不一致")); }
     write_new_file(&root.join(REPORT_TXT), staged.readable_report.as_bytes())?;
-
     Ok(())
 }
 
+
+fn render_relations_jsonl(items: &[StagedRelation]) -> String {
+    items.iter().map(|r| format!("{{\"source_rel\":{},\"field\":{},\"ordinal\":{},\"value\":{},\"status\":{},\"target_rel\":{},\"candidates\":{}}}", json_str(&r.source_rel), json_str(&r.field), r.ordinal, json_str(&r.value), json_str(&r.status), r.target_rel.as_deref().map(json_str).unwrap_or_else(|| "null".to_string()), json_array(&r.candidates))).collect::<Vec<_>>().join("\n") + if items.is_empty() { "" } else { "\n" }
+}
+fn render_relations_tsv(items: &[StagedRelation]) -> String {
+    let mut out = String::from("source_rel\tfield\tordinal\tvalue\tstatus\ttarget_rel\tcandidates\n");
+    for r in items { out.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\n", tsv(&r.source_rel), tsv(&r.field), r.ordinal, tsv(&r.value), tsv(&r.status), tsv(r.target_rel.as_deref().unwrap_or("")), tsv(&r.candidates.join(",")))); }
+    out
+}
 fn render_attachments_jsonl(items: &[StagedAttachment]) -> String {
     items.iter().map(|item| format!("{{\"source_rel\":{},\"target_rel\":{},\"kind\":{},\"bytes\":{},\"sha256\":{}}}", json_str(&item.source_rel), json_str(&item.target_rel), json_str(&item.kind), item.bytes, json_str(&item.sha256))).collect::<Vec<_>>().join("\n") + if items.is_empty() { "" } else { "\n" }
 }
@@ -1433,7 +1475,7 @@ mod tests {
         let staging = root.parent().unwrap().join(format!("{}-verify-stage", root.file_name().unwrap().to_string_lossy()));
         let staged = build_staged(&manifest, &staging).unwrap();
         let before = tree_digest(&staging).unwrap();
-        let (records, planes, _, attachments, _) = verify_tree(&staging, None).unwrap();
+        let (records, planes, _, _, attachments, _) = verify_tree(&staging, None).unwrap();
         assert_eq!(records, 1);
         assert_eq!(planes.get("long_term"), Some(&1));
         assert_eq!(attachments, 0);

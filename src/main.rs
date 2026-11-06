@@ -1569,12 +1569,12 @@ fn cmd_migrate(a: &Args) -> R<i32> {
     if a.has("verify") {
         let verify_root = a.get("staging-root").map(std::path::PathBuf::from).unwrap_or_else(|| root.clone());
         let source_root = a.get("source-root").map(std::path::PathBuf::from);
-        let (records, planes, aliases, attachments, archives) = migration::migration_write::verify_tree(&verify_root, source_root.as_deref())?;
+        let (records, planes, aliases, relations, attachments, archives) = migration::migration_write::verify_tree(&verify_root, source_root.as_deref())?;
         let plane_json = planes.iter().map(|(k, v)| format!("{}:{}", jstr(k), v)).collect::<Vec<_>>().join(",");
         if a.has("json") {
-            crate::say_line!("{{\"root\":{},\"strict\":{},\"records\":{},\"planes\":{{{}}},\"aliases\":{},\"attachments\":{},\"archives\":{},\"status\":\"PASS\"}}", jstr(&verify_root.display().to_string()), source_root.is_some(), records, plane_json, aliases, attachments, archives);
+            crate::say_line!("{{\"root\":{},\"strict\":{},\"records\":{},\"planes\":{{{}}},\"aliases\":{},\"relations\":{},\"attachments\":{},\"archives\":{},\"status\":\"PASS\"}}", jstr(&verify_root.display().to_string()), source_root.is_some(), records, plane_json, aliases, relations, attachments, archives);
         } else {
-            crate::say_line!("迁移核验通过: root={} strict={} records={} aliases={} attachments={} archives={}", verify_root.display(), source_root.is_some(), records, aliases, attachments, archives);
+            crate::say_line!("迁移核验通过: root={} strict={} records={} aliases={} relations={} attachments={} archives={}", verify_root.display(), source_root.is_some(), records, aliases, relations, attachments, archives);
         }
         return Ok(0);
     }
