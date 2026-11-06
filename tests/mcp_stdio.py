@@ -349,6 +349,7 @@ migration body
         try:
             os.makedirs(os.path.join(activation_root, "canonical", "records"), exist_ok=True)
             os.makedirs(os.path.join(activation_root, "candidate", "records"), exist_ok=True)
+            legacy_record = os.path.join(activation_root, "canonical", "records", "C-20261106T000011-bbbbbbbb.md")
             relation_target = os.path.join(activation_root, "candidate", "records", "N-20261106T000012-cccccccc.md")
             with open(relation_target, "w", encoding="utf-8") as handle:
                 handle.write("""[CANDIDATE_MEMORY]
