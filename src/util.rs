@@ -177,7 +177,7 @@ const BOOLS: &[&str] = &[
     // 而是它**吃掉后面那个词**：`recall --body GATE` 会把查询词 GATE
     // 当成 --body 的值，于是报"需要查询词"；`upgrade --check` 同理。
     // 两者都是 `a.has(...)` 语义（纯开关），所以必须在这里。
-    "body", "check",
+    "body", "check", "stdin",
     // search modes
     "regex", "re", "fuzzy", "approx", "literal", "exact",
     "semantic", "sem", "ask", "case", "deep", "expand", "raw-lines", "lines", "whole-line",
@@ -329,7 +329,15 @@ impl Args {
                     None => (rest.to_string(), None),
                 };
                 let k = Self::alias(&raw_k).to_string();
-                if BOOLS.contains(&k.as_str()) {
+                // `--body` is a value on mutating/document commands, but remains
+                // a flag for read/recall output selection. Keep parsing contextual
+                // so `write --body TEXT` cannot be swallowed as a boolean while
+                // `recall --body QUERY` keeps its legacy meaning.
+                let body_value = k == "body" && matches!(
+                    a.cmd.as_str(),
+                    "write" | "update" | "edit" | "commit" | "skill" | "vault" | "memory"
+                );
+                if BOOLS.contains(&k.as_str()) && !body_value {
                     let v = inline.unwrap_or_else(|| "true".to_string());
                     a.store_both(&k, &raw_k, v);
                 } else if let Some(v) = inline {
@@ -2025,5 +2033,20 @@ mod args_tests {
             .collect();
         let a = Args::parse(&argv).expect("parse");
         assert!(a.validate_for("list").is_err(), "未知参数必须仍被拒绝");
+    }
+
+    #[test]
+    fn body_is_value_for_write_but_flag_for_recall() {
+        let write = Args::parse(&["write", "--body", "多行\n正文"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse write body");
+        assert_eq!(write.get("body"), Some("多行\n正文"));
+        let recall = Args::parse(&["recall", "--body", "GATE"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse recall body");
+        assert_eq!(recall.get("body"), Some("true"));
+        assert_eq!(recall.pos, vec!["GATE"]);
+    }
+
+    #[test]
+    fn stdin_is_a_boolean_switch() {
+        let args = Args::parse(&["write", "--stdin"].iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("parse stdin");
+        assert!(args.has("stdin"));
     }
 }

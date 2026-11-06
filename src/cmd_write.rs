@@ -15,9 +15,11 @@ fn opt(a: &Args, k: &str) -> String {
 fn build_record(a: &Args, lib: Lib) -> R<Record> {
     let title = a.req("title")?.to_string();
     let body = if let Some(f) = a.get("body-file") {
-        read_str(&expand_tilde(f))?
+        if f == "-" { crate::cmd_edit::read_stdin_all()? } else { read_str(&expand_tilde(f))? }
     } else if let Some(b) = a.get("body") {
-        b.to_string()
+        if b == "-" { crate::cmd_edit::read_stdin_all()? } else { b.to_string() }
+    } else if a.has("stdin") {
+        crate::cmd_edit::read_stdin_all()?
     } else {
         String::new()
     };

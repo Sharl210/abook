@@ -197,7 +197,28 @@ jobs:
             exit 1
           fi
           rm -rf "$UNMARKED"
-      - name: 内置自检
+      - name: CLI 正文通道 smoke
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, tempfile
+          binary = "target/release/abook"
+          body = '第一行\n引号 "反引号 `尖括号 <x> shell $HOME 😀\\尾行'
+          with tempfile.TemporaryDirectory(prefix="abook-body-smoke-") as root:
+              os.makedirs(os.path.join(root, "candidate", "records"))
+              for mode, extra, payload in (("stdin", ["--stdin"], body), ("file", ["--body-file", "-"], body), ("body", ["--body", body], "")):
+                  args = [binary, "write", "--root", root, "--title", mode, "--read-when", "body smoke", *extra]
+                  result = subprocess.run(
+                      args,
+                      input=payload, text=True, encoding="utf-8", capture_output=True, check=True,
+                  )
+                  record_id = os.path.basename(result.stdout.strip()).removesuffix(".md")
+                  read = subprocess.run(
+                      [binary, "get", record_id, "BODY", "--root", root, "--json"],
+                      text=True, encoding="utf-8", capture_output=True, check=True,
+                  )
+                  assert json.loads(read.stdout)["value"] == body
+          PY
         run: |
           set -euo pipefail
           ROOT="$(mktemp -d)"
