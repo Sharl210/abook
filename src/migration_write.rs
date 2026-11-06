@@ -1530,8 +1530,8 @@ mod tests {
         assert!(text.starts_with("version=3\n"));
         assert!(!text.contains("live_root="));
     }
-
-
+    #[test]
+    fn failed_build_does_not_create_requested_root_or_touch_source() {
         let root = temp_dir("boundary");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
