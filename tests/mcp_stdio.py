@@ -80,6 +80,14 @@ def test_modern():
         assert "abook_migrate_activate" in names
         assert "abook_migrate_recover" in names
         assert "abook_migrate_rollback" in names
+        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
+            assert legacy_name not in names, legacy_name
+        hidden_call = send(p, request("legacy-hidden", "tools/call", {"name": "abook_write", "arguments": {"title": "legacy", "body": "must reject"}}))
+        assert hidden_call["error"]["code"] == -32602, hidden_call
+        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
+            assert legacy_name not in names, legacy_name
+        hidden_call = send(p, request("legacy-hidden", "tools/call", {"name": "abook_write", "arguments": {"title": "legacy", "body": "must reject"}}))
+        assert hidden_call["error"]["code"] == -32602, hidden_call
         helper = {x["name"]: x["inputSchema"] for x in tools["tools"] if x["name"] in {"memory_help", "spec_list", "spec_get", "skill_list", "skill_read", "system_update"}}
         assert "argv" not in helper["memory_help"]["properties"]
         assert helper["memory_help"]["additionalProperties"] is False

@@ -290,12 +290,31 @@ fn compatibility_exposure(command: &str) -> Exposure {
     let mut parts = command.split_whitespace();
     let first = parts.next().unwrap_or(command);
     let second = parts.next();
+    // Keep the old CLI handlers and descriptors for transition coverage, but do
+    // not publish the candidate/canonical record model as the MCP API. New MCP
+    // callers use `memory_*`; explicit attachment/vault/skill subcommands remain
+    // independently registered below. The generic group roots would otherwise
+    // re-open the legacy command parser as a public catch-all.
+    const LEGACY_MEMORY_ROUTES: &[&str] = &[
+        "state", "stats", "recall", "index-search", "show", "cat", "atlas", "map",
+        "index", "identity", "recent", "paths", "lint", "doctor", "reconcile",
+        "staging", "review", "search", "find", "grep", "list", "ls", "history", "log",
+        "get", "diff", "tree", "path", "budget", "export", "write", "add", "promote",
+        "update", "edit", "delete", "rm", "restore", "set", "unset", "append", "prepend",
+        "patch", "rename", "move", "mv", "copy", "cp", "demote", "merge", "split",
+        "audit", "check", "refs", "related", "num", "repair", "fix", "init", "refresh",
+        "sync", "normalize", "commit", "branch", "recount", "leftover",
+        "commands", "describe", "help",
+    ];
+    let legacy_model = LEGACY_MEMORY_ROUTES.contains(&first)
+        || first == "branch"
+        || (second.is_none() && matches!(first, "attach" | "vault" | "skill"));
     let lifecycle = matches!(first, "promote" | "demote" | "review" | "staging")
         || (first == "skill"
             && matches!(second, Some("candidate" | "candidates" | "read" | "decide")));
-    if lifecycle {
+    if legacy_model || lifecycle {
         Exposure::CompatibilityOnly {
-            reason: "遗留 candidate/promotion 生命周期路由，仅保留 CLI 兼容与覆盖追踪；不作为 MCP 新 API 暴露。".to_string(),
+            reason: "旧 candidate/canonical CLI 兼容路由仅供迁移与覆盖追踪；新 MCP 客户端使用六平面 memory、独立附件/保险箱/Skill 工具。".to_string(),
         }
     } else {
         Exposure::Public
@@ -731,7 +750,17 @@ mod tests {
     }
 
     #[test]
-    fn schemas_use_spec_and_positionals_and_suppress_transport_flags() {
+    fn legacy_record_model_is_hidden_but_modern_surfaces_remain_public() {
+        let public = public_tools();
+        for name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"] {
+            assert!(!public.iter().any(|tool| tool.name == name), "legacy tool {name} must not be public");
+        }
+        for name in ["memory_write", "memory_read", "memory_list", "memory_search", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan"] {
+            assert!(public.iter().any(|tool| tool.name == name), "modern tool {name} must remain public");
+        }
+    }
+
+
         let write = all_tools().into_iter().find(|tool| tool.command == "write").unwrap();
         let properties = write.input_schema.get("properties").unwrap();
         assert!(properties.get("title").is_some(), "SPEC title property");
