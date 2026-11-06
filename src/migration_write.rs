@@ -213,13 +213,43 @@ fn activation_marker(parent: &Path, id: &str) -> PathBuf {
     parent.join(format!(".abook-migration-{id}.receipt"))
 }
 
+fn receipt_path_encode(path: &Path) -> String {
+    let bytes = {
+        #[cfg(unix)]
+        { use std::os::unix::ffi::OsStrExt; path.as_os_str().as_bytes().to_vec() }
+        #[cfg(windows)]
+        { use std::os::windows::ffi::OsStrExt; path.as_os_str().encode_wide().flat_map(|unit| unit.to_be_bytes()).collect() }
+        #[cfg(not(any(unix, windows)))]
+        { path.to_string_lossy().as_bytes().to_vec() }
+    };
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn receipt_path_decode(value: &str) -> R<PathBuf> {
+    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(integrity_error("迁移 receipt 路径编码无效"));
+    }
+    let bytes = (0..value.len()).step_by(2).map(|index| u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| integrity_error("迁移 receipt 路径编码无效"))).collect::<R<Vec<_>>>()?;
+    #[cfg(unix)]
+    { use std::os::unix::ffi::OsStringExt; Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes))) }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        if bytes.len() % 2 != 0 { return Err(integrity_error("Windows receipt 路径编码长度无效")); }
+        let units = bytes.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect::<Vec<_>>();
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+    }
+    #[cfg(not(any(unix, windows)))]
+    { String::from_utf8(bytes).map(PathBuf::from).map_err(|_| integrity_error("迁移 receipt 路径不是 UTF-8")) }
+}
+
 fn receipt_text(receipt: &ActivationReceipt) -> String {
     format!(
-        "version=2\nid={}\nlive_root={}\nstaging_root={}\nbackup_root={}\nold_tree_sha256={}\nnew_tree_sha256={}\nphase={}\n",
+        "version=3\nid={}\nlive_path_hex={}\nstaging_path_hex={}\nbackup_path_hex={}\nold_tree_sha256={}\nnew_tree_sha256={}\nphase={}\n",
         receipt.id,
-        receipt.live_root.display(),
-        receipt.staging_root.display(),
-        receipt.backup_root.display(),
+        receipt_path_encode(&receipt.live_root),
+        receipt_path_encode(&receipt.staging_root),
+        receipt_path_encode(&receipt.backup_root),
         receipt.old_tree_sha256,
         receipt.new_tree_sha256,
         receipt.phase,
@@ -242,23 +272,31 @@ fn read_receipt(marker: &Path) -> R<ActivationReceipt> {
         values.insert(key, value.to_string());
     }
     let version = values.remove("version").unwrap_or_default();
-    if version != "1" && version != "2" {
+    if version != "1" && version != "2" && version != "3" {
         return Err(integrity_error("迁移 receipt 版本不支持"));
     }
     let old_tree_sha256 = values.remove("old_tree_sha256").unwrap_or_default();
     let new_tree_sha256 = values.remove("new_tree_sha256").unwrap_or_default();
-    if version == "2" && (old_tree_sha256.is_empty() || new_tree_sha256.is_empty()) {
-        return Err(integrity_error("迁移 receipt v2 缺少目录摘要"));
+    if (version == "2" || version == "3") && (old_tree_sha256.is_empty() || new_tree_sha256.is_empty()) {
+        return Err(integrity_error(format!("迁移 receipt v{version} 缺少目录摘要")));
     }
-    Ok(ActivationReceipt {
-        id: values.remove("id").ok_or_else(|| integrity_error("迁移 receipt 缺少 id"))?,
-        live_root: PathBuf::from(values.remove("live_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 live_root"))?),
-        staging_root: PathBuf::from(values.remove("staging_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 staging_root"))?),
-        backup_root: PathBuf::from(values.remove("backup_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 backup_root"))?),
-        old_tree_sha256,
-        new_tree_sha256,
-        phase: values.remove("phase").ok_or_else(|| integrity_error("迁移 receipt 缺少 phase"))?,
-    })
+    let (live_root, staging_root, backup_root) = if version == "3" {
+        (
+            receipt_path_decode(&values.remove("live_path_hex").ok_or_else(|| integrity_error("迁移 receipt v3 缺少 live_path_hex"))?)?,
+            receipt_path_decode(&values.remove("staging_path_hex").ok_or_else(|| integrity_error("迁移 receipt v3 缺少 staging_path_hex"))?)?,
+            receipt_path_decode(&values.remove("backup_path_hex").ok_or_else(|| integrity_error("迁移 receipt v3 缺少 backup_path_hex"))?)?,
+        )
+    } else {
+        (
+            PathBuf::from(values.remove("live_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 live_root"))?),
+            PathBuf::from(values.remove("staging_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 staging_root"))?),
+            PathBuf::from(values.remove("backup_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 backup_root"))?),
+        )
+    };
+    let id = values.remove("id").ok_or_else(|| integrity_error("迁移 receipt 缺少 id"))?;
+    let phase = values.remove("phase").ok_or_else(|| integrity_error("迁移 receipt 缺少 phase"))?;
+    if id.is_empty() || phase.is_empty() { return Err(integrity_error("迁移 receipt 的 id/phase 不能为空")); }
+    Ok(ActivationReceipt { id, live_root, staging_root, backup_root, old_tree_sha256, new_tree_sha256, phase })
 }
 
 fn sync_parent(path: &Path) -> R<()> {
@@ -1470,8 +1508,30 @@ mod tests {
         let _ = fs::remove_dir_all(flat);
         let _ = fs::remove_dir_all(nested);
     }
+    #[cfg(unix)]
     #[test]
-    fn failed_build_does_not_create_requested_root_or_touch_source() {
+    fn receipt_v3_path_encoding_round_trips_newline_and_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = b"/tmp/abook-\xff-\n-path".to_vec();
+        let original = PathBuf::from(std::ffi::OsString::from_vec(raw));
+        let encoded = receipt_path_encode(&original);
+        let decoded = receipt_path_decode(&encoded).unwrap();
+        assert_eq!(decoded.as_os_str(), original.as_os_str());
+        let receipt = ActivationReceipt {
+            id: "receipt-v3-path".into(),
+            live_root: original.clone(),
+            staging_root: original.join("stage"),
+            backup_root: original.join("backup"),
+            old_tree_sha256: "a".repeat(64),
+            new_tree_sha256: "b".repeat(64),
+            phase: "PREPARED".into(),
+        };
+        let text = receipt_text(&receipt);
+        assert!(text.starts_with("version=3\n"));
+        assert!(!text.contains("live_root="));
+    }
+
+
         let root = temp_dir("boundary");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
