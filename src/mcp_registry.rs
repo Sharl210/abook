@@ -759,8 +759,8 @@ mod tests {
             assert!(public.iter().any(|tool| tool.name == name), "modern tool {name} must remain public");
         }
     }
-
-
+    #[test]
+    fn schemas_use_spec_and_positionals_and_suppress_transport_flags() {
         let write = all_tools().into_iter().find(|tool| tool.command == "write").unwrap();
         let properties = write.input_schema.get("properties").unwrap();
         assert!(properties.get("title").is_some(), "SPEC title property");
