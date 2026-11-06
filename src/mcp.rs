@@ -87,7 +87,7 @@ pub fn run_stdio() -> i32 {
         } else {
             match modern_meta_version(&parsed) {
                 Err(message) => { write_error(&mut stdout, id, -32602, &message, None); continue; }
-                Ok(version) if version != MODERN => {
+                Ok(version) if version != MODERN && method != "server/discover" => {
                     write_error(&mut stdout, id, -32022, &format!("不支持 MCP 协议版本 {version}"), Some(obj(vec![("supported", Value::arr(vec![Value::s(MODERN)])), ("requested", Value::s(version))])));
                     continue;
                 }
@@ -153,12 +153,17 @@ fn instructions() -> &'static str {
 }
 
 fn tools_list(_legacy: bool) -> Value {
-    let mut tools = Vec::new();
-    for name in crate::known_commands() {
-        if name.starts_with('-') { continue; }
-        tools.push(tool(&format!("abook_{name}"), &format!("调用 abook CLI 命令 `{name}`；参数使用结构化 argv 数组，不经过 shell。")));
-    }
+    let mut tools: Vec<Value> = crate::mcp_registry::public_tools().iter().map(|t| t.to_mcp_value()).collect();
     for (name, desc) in [
+        ("memory_context", "读取记忆平面入口和相关上下文。"),
+        ("memory_write", "写入一条结构化记忆；当前要求 plane、title、read_when、body。"),
+        ("memory_read", "读取一条记忆记录。"),
+        ("memory_search", "搜索分层记忆。"),
+        ("memory_recall", "按查询召回相关记忆。"),
+        ("memory_batch_preview", "预览批量记忆维护，不修改磁盘。"),
+        ("memory_batch_apply", "应用已确认的批量记忆维护事务。"),
+        ("memory_batch_rollback", "回滚一个已提交的批量事务。"),
+        ("memory_batch_status", "读取批量事务状态。"),
         ("memory_help", "读取 abook 的机器可读帮助和命令描述。"),
         ("spec_list", "列出内置规范主题。"),
         ("spec_get", "读取一份内置规范全文。"),
@@ -167,11 +172,7 @@ fn tools_list(_legacy: bool) -> Value {
         ("system_update", "一次调用完成更新检查、下载、校验、替换和自检。"),
     ] { tools.push(tool(name, desc)); }
     tools.sort_by(|a, b| a.str("name").cmp(&b.str("name")));
-    complete(obj(vec![
-        ("tools", Value::arr(tools)),
-        ("ttlMs", Value::n("300000")),
-        ("cacheScope", Value::s("private")),
-    ]))
+    complete(obj(vec![("tools", Value::arr(tools)), ("ttlMs", Value::n("300000")), ("cacheScope", Value::s("private"))]))
 }
 
 fn tool(name: &str, description: &str) -> Value {
@@ -215,21 +216,32 @@ fn resource(uri: &str, name: &str, mime: &str) -> Value {
     obj(vec![("uri", Value::s(uri)), ("name", Value::s(name)), ("mimeType", Value::s(mime))])
 }
 
-fn resources_read(req: &Value, legacy: bool) -> Value {
+fn resources_read(req: &Value, _legacy: bool) -> Value {
     let uri = req.get("params").and_then(|p| p.str("uri")).unwrap_or("");
-    let text = if uri == "abook://instructions" { Some(instructions().to_string()) }
-    else if uri == "abook://help" { Some(crate::help_text_public()) }
-    else if uri == "abook://state" { Some(run_cli_text(&vec!["state".into(), "--json".into()], None).0) }
-    else if let Some(name) = uri.strip_prefix("abook://spec/") { Some(run_cli_text(&vec!["spec".into(), name.into(), "--json".into()], None).0) }
-    else { None };
+    let (text, mime) = if uri == "abook://instructions" { (Some(instructions().to_string()), "text/plain") }
+    else if uri == "abook://help" { (Some(crate::help_text_public()), "text/plain") }
+    else if uri == "abook://state" { (Some(run_cli_text(&vec!["state".into(), "--json".into()], None).0), "application/json") }
+    else if let Some(name) = uri.strip_prefix("abook://spec/") {
+        if !valid_resource_segment(name) { return error_value(-32602, "非法 spec 资源名", None); }
+        (Some(run_cli_text(&vec!["spec".into(), name.into(), "--json".into()], None).0), "text/markdown")
+    }
+    else if let Some(name) = uri.strip_prefix("abook://skill/") {
+        if !valid_resource_segment(name) { return error_value(-32602, "非法 Skill 资源名", None); }
+        (Some(run_cli_text(&vec!["skill".into(), "show".into(), name.into(), "--json".into()], None).0), "text/markdown")
+    }
+    else { (None, "text/plain") };
     match text {
         Some(t) => complete(obj(vec![
-            ("contents", Value::arr(vec![obj(vec![("uri", Value::s(uri)), ("mimeType", Value::s("text/plain")), ("text", Value::s(t))])])),
+            ("contents", Value::arr(vec![obj(vec![("uri", Value::s(uri)), ("mimeType", Value::s(mime)), ("text", Value::s(t))])])),
             ("ttlMs", Value::n("60000")),
             ("cacheScope", Value::s("private")),
         ])),
         None => error_value(-32602, &format!("资源不存在: {uri}"), None),
     }
+}
+
+fn valid_resource_segment(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..") && !s.chars().any(char::is_control)
 }
 
 fn prompts_list(_legacy: bool) -> Value {
@@ -271,6 +283,9 @@ fn prompts_get(req: &Value, _legacy: bool) -> Value {
 fn tools_call(req: &Value, _legacy: bool) -> Value {
     let params = req.get("params");
     let name = params.and_then(|p| p.str("name")).unwrap_or("");
+    if !tool_is_registered(name) {
+        return error_value(-32602, &format!("未知工具: {name}"), None);
+    }
     let args = params.and_then(|p| p.get("arguments"));
     let (argv, body) = match tool_argv(name, args) {
         Ok(v) => v,
@@ -287,21 +302,20 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
     complete(result)
 }
 
+fn legacy_readonly_command(name: &str) -> bool {
+    !matches!(name, "write" | "add" | "promote" | "update" | "edit" | "delete" | "rm" | "restore" | "set" | "unset" | "append" | "prepend" | "patch" | "rename" | "move" | "mv" | "copy" | "cp" | "demote" | "merge" | "split" | "repair" | "fix" | "init" | "refresh" | "sync" | "normalize" | "commit" | "branch" | "recount" | "leftover" | "vault" | "install" | "self-install" | "upgrade" | "self-update")
+}
+
+fn tool_is_registered(name: &str) -> bool {
+    matches!(name, "memory_context" | "memory_write" | "memory_read" | "memory_search" | "memory_recall" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
+        || name.strip_prefix("abook_").map(|n| crate::known_commands().contains(&n) && legacy_readonly_command(n)).unwrap_or(false)
+}
+
 fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<String>), String> {
     let a = args.cloned().unwrap_or_else(|| obj(vec![]));
     if name == "memory_context" { return Ok((vec!["index".into(), "--json".into()], None)); }
-    if name == "memory_write" {
-        let title = a.str("title").ok_or("memory_write 缺少 title")?;
-        let read_when = a.str("read_when").unwrap_or("");
-        let body = a.str("body").ok_or("memory_write 缺少 body")?.to_string();
-        let plane = a.str("plane").unwrap_or("episodic");
-        return Ok((vec!["write".into(), "--title".into(), title.into(), "--read-when".into(), read_when.into(), "--lib".into(), plane.into(), "--json".into()], Some(body)));
-    }
-    if name == "memory_read" { return Ok((vec!["show".into(), a.str("id").ok_or("memory_read 缺少 id")?.into(), "--json".into()], None)); }
-    if name == "memory_search" { return Ok((vec!["search".into(), a.str("query").ok_or("memory_search 缺少 query")?.into(), "--json".into()], None)); }
-    if name == "memory_recall" { return Ok((vec!["recall".into(), a.str("query").ok_or("memory_recall 缺少 query")?.into(), "--json".into()], None)); }
-    if name == "memory_batch_preview" || name == "memory_batch_apply" || name == "memory_batch_rollback" || name == "memory_batch_status" {
-        return Err(format!("工具尚未实现事务内核: {name}"));
+    if name == "memory_write" || name == "memory_read" || name == "memory_search" || name == "memory_recall" || name.starts_with("memory_batch_") {
+        return Err(format!("{name} 需等六平面内核/事务层接入后开放"));
     }
     if name == "memory_help" { return Ok((vec!["help".into()], None)); }
     if name == "spec_list" { return Ok((vec!["spec".into(), "--json".into()], None)); }
@@ -309,35 +323,73 @@ fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<St
     if name == "skill_list" { return Ok((vec!["skill".into(), "list".into(), "--json".into()], None)); }
     if name == "skill_read" { return Ok((vec!["skill".into(), "read".into(), a.str("name").ok_or("skill_read 缺少 name")?.into(), "--json".into()], None)); }
     if name == "system_update" { return Ok((vec!["upgrade".into(), "--json".into()], None)); }
-    let command = name.strip_prefix("abook_").ok_or_else(|| format!("未知工具: {name}"))?;
-    if !crate::known_commands().contains(&command) { return Err(format!("未知工具: {name}")); }
-    let mut out = vec![command.to_string()];
-    if let Some(argv) = a.array("argv") {
-        for item in argv { out.push(match item { Value::String(s) => s.clone(), _ => return Err("argv 只能包含字符串".into()) }); }
+    if name.starts_with("abook_") {
+        return match crate::mcp_registry::build_argv(name, &a) {
+            Ok(argv) => Ok((argv, None)),
+            Err(e) => Err(e),
+        };
     }
-    if let Some(root) = a.str("root") { out.push("--root".into()); out.push(root.into()); }
-    if !out.iter().any(|x| x == "--json") { out.push("--json".into()); }
-    Ok((out, None))
+    Err(format!("未知工具: {name}"))
 }
 
 fn run_cli_text(argv: &[String], body: Option<&str>) -> (String, String, i32) {
-    let exe = match std::env::current_exe() { Ok(p) => p, Err(e) => return (String::new(), e.to_string(), 6) };
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return (String::new(), format!("无法定位 abook 可执行文件：{e}"), 6),
+    };
     let mut actual = argv.to_vec();
-    let root = actual.iter().position(|x| x == "--root").and_then(|i| actual.get(i + 1)).cloned();
     let temp = if let Some(text) = body {
-        let dir = root.as_ref().map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let p = dir.join(format!(".abook-mcp-body-{}", std::process::id()));
-        if let Err(e) = std::fs::write(&p, text) { return (String::new(), e.to_string(), 6); }
-        actual.push("--body-file".into()); actual.push(p.to_string_lossy().to_string()); Some(p)
+        match write_body_temp(text) {
+            Ok(p) => {
+                actual.push("--body-file".into());
+                actual.push(p.to_string_lossy().to_string());
+                Some(p)
+            }
+            Err(e) => return (String::new(), format!("无法建立 MCP 正文临时文件：{e}"), 6),
+        }
     } else { None };
     let result = Command::new(exe).args(&actual).env("ABOOK_NO_GUARD", "1").output();
-    if let Some(p) = temp { let _ = std::fs::remove_file(p); }
+    let cleanup_error = temp.and_then(|p| std::fs::remove_file(p).err());
     match result {
-        Ok(o) => (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned(), o.status.code().unwrap_or(1)),
-        Err(e) => (String::new(), e.to_string(), 6),
+        Ok(o) => {
+            let mut err = String::from_utf8_lossy(&o.stderr).into_owned();
+            if let Some(e) = cleanup_error { err.push_str(&format!("\n无法删除正文临时文件：{e}")); }
+            (String::from_utf8_lossy(&o.stdout).into_owned(), err, o.status.code().unwrap_or(1))
+        }
+        Err(e) => {
+            let mut message = e.to_string();
+            if let Some(c) = cleanup_error { message.push_str(&format!("；清理正文临时文件也失败：{c}")); }
+            (String::new(), message, 6)
+        }
     }
 }
 
+fn write_body_temp(text: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let dir = std::env::temp_dir();
+    for _ in 0..32 {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("abook-mcp-body-{}-{serial}.tmp", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(text.as_bytes()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+                file.flush()?;
+                drop(file);
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "临时文件名冲突重试达到上限"))
+}
 fn as_string(v: &Value) -> Option<&str> { match v { Value::String(s) => Some(s), _ => None } }
 fn complete(v: Value) -> Value {
     match v {

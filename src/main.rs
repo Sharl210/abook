@@ -43,6 +43,9 @@ mod out;
 mod guard;
 mod mcp_json;
 mod mcp;
+mod mcp_registry;
+mod migration;
+mod txn;
 
 use std::io::IsTerminal;
 
@@ -174,6 +177,11 @@ fn help_text() -> String {
   vault verify              逐条解密自检
   （别名：list/ledger/names/reconcile）
 
+═══ 迁移与事务 ═══
+  migrate [--format entries]  只读扫描旧库，输出迁移 manifest
+  txn preview|apply|rollback|status  批次事务操作
+  recover [--dry-run|--apply]  未完成事务恢复
+
 ═══ 安装与平台 ═══
   detect                    平台识别 + 库根自检（程序是否与库同目录）
   install [--url URL]       首次安装：下载本机架构的二进制，放进库根
@@ -264,7 +272,7 @@ fn help_text() -> String {
                      Skill 约定与候选反哺；候选落 ~/AgentSkills/<名>/candidates/
   spec       不带名字列目录；spec <名> 取回该规范全文
                      可用：plan ulw security compaction maintenance magic skill
-  detect  install  upgrade  self-update  version  selftest  help
+  detect  install  upgrade  self-update  version  selftest  migrate  txn  recover  help
 
 ═══ 参数拼写容错 ═══
   --limit / --size 会被当成 --per-page；--offset 当成 --page。
@@ -851,7 +859,7 @@ fn main() {
     ];
     let need_index = match parsed.as_ref() {
         Ok(a) => {
-            if a.has("dry-run") || a.has("dryrun") {
+            if a.has("dry-run") || a.has("dryrun") || matches!(a.cmd.as_str(), "migrate" | "txn" | "recover") {
                 false
             } else if !crate::util::is_write_command(&a.cmd) {
                 false
@@ -1245,6 +1253,10 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("recount", cmd_branch::cmd_recount),
         ("leftover", cmd_branch::cmd_leftover),
         ("vault", cmd_vault::run),
+        ("migrate", cmd_migrate),
+        ("txn", cmd_txn),
+        ("recover", cmd_recover),
+
         // -- environment
         ("selftest", selftest::cmd_selftest),
         ("detect", cmd_detect),
@@ -1448,6 +1460,71 @@ fn cmd_normalize(a: &Args) -> R<i32> {
         total += ch.len();
     }
     crate::say_line!("{} 条{}", total, if a.dry_run() { "（预演，加 --apply 才写盘）" } else { "已改名" });
+    Ok(0)
+}
+
+fn cmd_migrate(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let manifest = migration::scan(&root)?;
+    if a.has("json") {
+        let report = manifest.render_report();
+        crate::say_line!("{{\"report\":{},\"entries\":{}}}", jstr(&report), manifest.entries.len());
+    } else if a.get("format") == Some("entries") {
+        for line in manifest.render_entries().lines() { crate::say_line!("{}", line); }
+    } else {
+        for line in manifest.render_report().lines() { crate::say_line!("{}", line); }
+    }
+    Ok(0)
+}
+
+fn cmd_recover(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let apply = a.has("apply");
+    let reports = txn::recover(&root, apply)?;
+    if a.has("json") {
+        let mut rows = Vec::new();
+        for r in &reports {
+            rows.push(format!("{{\"transaction\":{},\"phase\":{},\"applied\":{},\"pending\":{},\"conflicts\":{},\"action\":{}}}", jstr(&r.transaction), jstr(r.phase.as_str()), r.applied.len(), r.pending.len(), r.conflicts.len(), jstr(&format!("{:?}", r.action))));
+        }
+        crate::say_line!("[{}]", rows.join(","));
+    } else if reports.is_empty() {
+        crate::say_line!("没有发现需要恢复的事务");
+    } else {
+        for r in reports { crate::say_line!("{} {} applied={} pending={} conflicts={}", r.transaction, r.phase.as_str(), r.applied.len(), r.pending.len(), r.conflicts.len()); }
+    }
+    Ok(0)
+}
+
+fn cmd_txn(a: &Args) -> R<i32> {
+    let root = resolve_root(a);
+    let sub = a.pos.get(0).map(String::as_str).unwrap_or("status");
+    match sub {
+        "preview" => {
+            let mut tx = txn::Transaction::prepare(&root)?;
+            let path = match a.get("path") { Some(v) => v, None => return usage("txn preview 需要 --path") };
+            let body = if let Some(file) = a.get("body-file") { read_str(&expand_tilde(file))? } else { return usage("txn preview 需要 --body-file（支持多行正文）"); };
+            tx.stage_file(txn::Selector::new(path), &body)?;
+            let token = tx.token().to_string();
+            crate::say_line!("{}", if a.has("json") { format!("{{\"token\":{},\"revision\":{}}}", jstr(&token), tx.revision) } else { token });
+        }
+        "apply" => {
+            let token = match a.get("preview-token") { Some(v) => v, None => return usage("txn apply 需要 --preview-token") };
+            let rev = txn::read_library_revision(&root)?;
+            if let Some(expect) = a.num("expect-revision") { if expect != rev { return Err(EE::Integrity(format!("expected revision={}，当前={}", expect, rev))); } }
+            let next = txn::apply_token(&root, token)?;
+            crate::say_line!("{}", if a.has("json") { format!("{{\"revision\":{next}}}") } else { format!("revision={next}") });
+        }
+        "rollback" => {
+            let token = match a.get("preview-token") { Some(v) => v, None => return usage("txn rollback 需要 --preview-token") };
+            let report = txn::rollback(&root, token)?;
+            crate::say_line!("{}", if a.has("json") { format!("{{\"transaction\":{},\"restored\":{},\"already_before\":{}}}", jstr(&report.transaction), report.restored.len(), report.already_before.len()) } else { format!("{} restored={} already_before={}", report.transaction, report.restored.len(), report.already_before.len()) });
+        }
+        "status" => {
+            let reports = txn::recover_dry_run(&root)?;
+            crate::say_line!("{}", if reports.is_empty() { "clean".to_string() } else { format!("{} transaction(s) require review", reports.len()) });
+        }
+        other => return usage(format!("未知 txn 子命令：{other}")),
+    }
     Ok(0)
 }
 

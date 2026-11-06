@@ -148,11 +148,11 @@ pub fn other<T>(m: impl Into<String>) -> R<T> {
 pub const KNOWN_PARAMS: &[&str] = &[
     "after", "and", "at", "authority", "body", "body-file", "branch", "by",
     "card", "concepts", "confidence", "content", "context", "depth", "dest", "dir",
-    "distance", "edits", "entities", "evidence", "field", "file", "for", "format",
+    "distance", "edits", "entities", "evidence", "expect-revision", "field", "file", "for", "format",
     "from", "id", "ids", "in", "into", "json-depth", "kb", "keep",
     "keys", "kind", "level", "lib", "library", "match", "maturity", "max",
     "min-score", "mode", "name", "new", "next", "not-for", "old", "operation",
-    "out", "page", "path", "per", "per-page", "project", "purpose", "q",
+    "out", "page", "path", "per", "per-page", "preview-token", "project", "purpose", "q",
     "query", "read-when", "reason", "related", "root", "scope", "session", "show",
     "since", "size", "slug", "source", "status", "stdin", "summary", "supersedes",
     "tag", "target", "task", "text", "tier", "title", "to", "token",
@@ -1593,7 +1593,7 @@ pub const WRITE_COMMANDS: &[&str] = &[
     // These three rewrite the map or the records too. Leaving them out meant
     // `branch add`, `doctor --fix` and `refs --fix` wrote with no lock at all --
     // exactly the hole that let two concurrent writers lose one of two updates.
-    "branch", "doctor", "refs",
+    "branch", "doctor", "refs", "txn", "recover",
 ];
 
 /// True when this command may modify files under the library root.
