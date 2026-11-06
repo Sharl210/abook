@@ -203,6 +203,8 @@ pub struct ActivationReceipt {
     pub live_root: PathBuf,
     pub staging_root: PathBuf,
     pub backup_root: PathBuf,
+    pub old_tree_sha256: String,
+    pub new_tree_sha256: String,
     pub phase: String,
 }
 
@@ -212,17 +214,23 @@ fn activation_marker(parent: &Path, id: &str) -> PathBuf {
 
 fn receipt_text(receipt: &ActivationReceipt) -> String {
     format!(
-        "version=1\nid={}\nlive_root={}\nstaging_root={}\nbackup_root={}\nphase={}\n",
+        "version=2\nid={}\nlive_root={}\nstaging_root={}\nbackup_root={}\nold_tree_sha256={}\nnew_tree_sha256={}\nphase={}\n",
         receipt.id,
         receipt.live_root.display(),
         receipt.staging_root.display(),
         receipt.backup_root.display(),
+        receipt.old_tree_sha256,
+        receipt.new_tree_sha256,
         receipt.phase,
     )
 }
 
 fn write_receipt(marker: &Path, receipt: &ActivationReceipt) -> R<()> {
-    crate::util::write_atomic(marker, &receipt_text(receipt))
+    crate::util::write_atomic(marker, &receipt_text(receipt))?;
+    if let Some(parent) = marker.parent() {
+        OpenOptions::new().read(true).open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn read_receipt(marker: &Path) -> R<ActivationReceipt> {
@@ -232,14 +240,22 @@ fn read_receipt(marker: &Path) -> R<ActivationReceipt> {
         let (key, value) = line.split_once('=').ok_or_else(|| integrity_error("迁移 receipt 行格式无效"))?;
         values.insert(key, value.to_string());
     }
-    if values.get("version").map(String::as_str) != Some("1") {
+    let version = values.get("version").map(String::as_str).unwrap_or("");
+    if version != "1" && version != "2" {
         return Err(integrity_error("迁移 receipt 版本不支持"));
+    }
+    let old_tree_sha256 = values.remove("old_tree_sha256").unwrap_or_default();
+    let new_tree_sha256 = values.remove("new_tree_sha256").unwrap_or_default();
+    if version == "2" && (old_tree_sha256.is_empty() || new_tree_sha256.is_empty()) {
+        return Err(integrity_error("迁移 receipt v2 缺少目录摘要"));
     }
     Ok(ActivationReceipt {
         id: values.remove("id").ok_or_else(|| integrity_error("迁移 receipt 缺少 id"))?,
         live_root: PathBuf::from(values.remove("live_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 live_root"))?),
         staging_root: PathBuf::from(values.remove("staging_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 staging_root"))?),
         backup_root: PathBuf::from(values.remove("backup_root").ok_or_else(|| integrity_error("迁移 receipt 缺少 backup_root"))?),
+        old_tree_sha256,
+        new_tree_sha256,
         phase: values.remove("phase").ok_or_else(|| integrity_error("迁移 receipt 缺少 phase"))?,
     })
 }
@@ -259,6 +275,33 @@ fn verify_hash(path: &Path, expected: &str, label: &str) -> R<()> {
     Ok(())
 }
 
+fn tree_digest(root: &Path) -> R<String> {
+    let root = canonical_dir(root, "迁移目录")?;
+    let mut entries = Vec::new();
+    fn visit(root: &Path, dir: &Path, entries: &mut Vec<String>) -> R<()> {
+        let mut children = fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).map_err(|_| integrity_error("目录摘要相对路径计算失败"))?.to_string_lossy().replace('\\', "/");
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() { return Err(integrity_error(format!("目录摘要发现符号链接: {rel}"))); }
+            if meta.is_dir() {
+                entries.push(format!("D|{rel}\n"));
+                visit(root, &path, entries)?;
+            } else if meta.is_file() {
+                let bytes = fs::read(&path)?;
+                entries.push(format!("F|{rel}|{}\n", sha256::digest_hex(&bytes)));
+            } else {
+                return Err(integrity_error(format!("目录摘要发现未知文件类型: {rel}")));
+            }
+        }
+        Ok(())
+    }
+    visit(&root, &root, &mut entries)?;
+    entries.sort();
+    Ok(sha256::digest_hex(entries.concat().as_bytes()))
+}
 fn verify_source_baseline(staged: &StagedManifest, source: &Path) -> R<()> {
     for record in &staged.records {
         verify_hash(&source.join(&record.source_rel), &record.raw_sha256, "源记录")?;
@@ -312,6 +355,8 @@ pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
     }
     verify_staged(staged)?;
     let _lock = LibLock::acquire(&live, 30)?;
+    let old_tree_sha256 = tree_digest(&live)?;
+    let new_tree_sha256 = tree_digest(&stage)?;
     verify_source_baseline(staged, &live)?;
     let parent = live.parent().ok_or_else(|| integrity_error("源库根目录没有父目录"))?;
     let serial = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -319,7 +364,15 @@ pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
     let backup = parent.join(format!(".{}.abook-migration-backup-{id}", live.file_name().unwrap_or_default().to_string_lossy()));
     if path_exists_any(&backup) { return Err(integrity_error(format!("迁移 backup 已存在: {}", backup.display()))); }
     let marker = activation_marker(parent, &id);
-    let mut receipt = ActivationReceipt { id, live_root: live.clone(), staging_root: stage.clone(), backup_root: backup.clone(), phase: "PREPARED".into() };
+    let mut receipt = ActivationReceipt {
+        id,
+        live_root: live.clone(),
+        staging_root: stage.clone(),
+        backup_root: backup.clone(),
+        old_tree_sha256,
+        new_tree_sha256,
+        phase: "PREPARED".into(),
+    };
     write_receipt(&marker, &receipt)?;
     fs::rename(&live, &backup)?;
     sync_parent(&backup)?;
@@ -337,7 +390,14 @@ pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
     }
     sync_parent(&live)?;
     receipt.phase = "LIVE_MOVED".into(); write_receipt(&marker, &receipt)?;
-    if let Err(error) = verify_activated_root(&live, staged) {
+    let activation_verification = verify_activated_root(&live, staged).and_then(|_| {
+        let actual = tree_digest(&live)?;
+        if actual != receipt.new_tree_sha256 {
+            return Err(integrity_error(format!("激活目录摘要不匹配: expected={} actual={}", receipt.new_tree_sha256, actual)));
+        }
+        Ok(())
+    });
+    if let Err(error) = activation_verification {
         receipt.phase = "ROLLING_BACK".into(); let _ = write_receipt(&marker, &receipt);
         let failed = parent.join(format!(".{}.abook-migration-failed-{}", live.file_name().unwrap_or_default().to_string_lossy(), receipt.id));
         let rollback_result = fs::rename(&live, &failed).and_then(|_| fs::rename(&backup, &live));
@@ -386,12 +446,43 @@ pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
     let (marker, mut receipt) = found.remove(0);
     let backup_exists = path_exists_any(&receipt.backup_root);
     let live_exists = path_exists_any(&receipt.live_root);
+    if receipt.old_tree_sha256.is_empty() || receipt.new_tree_sha256.is_empty() {
+        return Err(integrity_error("旧版 receipt 没有目录摘要，保留现场，需人工核对后恢复"));
+    }
     if live_exists && backup_exists {
-        receipt.phase = "RECOVERED_COMMITTED".into(); write_receipt(&marker, &receipt)?; fs::remove_file(marker)?; return Ok(receipt);
+        let live_digest = tree_digest(&receipt.live_root)?;
+        let backup_digest = tree_digest(&receipt.backup_root)?;
+        if live_digest == receipt.new_tree_sha256 && backup_digest == receipt.old_tree_sha256 {
+            receipt.phase = "RECOVERED_COMMITTED".into();
+            write_receipt(&marker, &receipt)?;
+            fs::remove_file(marker)?;
+            return Ok(receipt);
+        }
+        if live_digest == receipt.old_tree_sha256 && backup_digest == receipt.new_tree_sha256 {
+            receipt.phase = "RECOVERED_ROLLED_BACK".into();
+            write_receipt(&marker, &receipt)?;
+            fs::remove_file(marker)?;
+            return Ok(receipt);
+        }
+        return Err(integrity_error("迁移 live/backup 目录摘要均不匹配，保留现场供人工恢复"));
     }
     if !live_exists && backup_exists {
-        fs::rename(&receipt.backup_root, &receipt.live_root)?; sync_parent(&receipt.live_root)?;
-        receipt.phase = "RECOVERED_ROLLED_BACK".into(); write_receipt(&marker, &receipt)?; fs::remove_file(marker)?; return Ok(receipt);
+        let backup_digest = tree_digest(&receipt.backup_root)?;
+        if backup_digest != receipt.old_tree_sha256 {
+            return Err(integrity_error("迁移 backup 目录摘要不匹配，拒绝自动回滚"));
+        }
+        fs::rename(&receipt.backup_root, &receipt.live_root)?;
+        sync_parent(&receipt.live_root)?;
+        let restored_digest = tree_digest(&receipt.live_root)?;
+        if restored_digest != receipt.old_tree_sha256 {
+            receipt.phase = "RECOVERY_REQUIRED".into();
+            let _ = write_receipt(&marker, &receipt);
+            return Err(integrity_error("自动回滚后目录摘要不匹配，保留 receipt 供人工恢复"));
+        }
+        receipt.phase = "RECOVERED_ROLLED_BACK".into();
+        write_receipt(&marker, &receipt)?;
+        fs::remove_file(marker)?;
+        return Ok(receipt);
     }
     Err(integrity_error("迁移 receipt 的 live/backup 状态无法安全判定，保留现场供人工恢复"))
 }
@@ -1183,7 +1274,15 @@ mod tests {
         let backup = parent.join(".abook-test-recovery-backup");
         fs::rename(&root, &backup).unwrap();
         let marker = activation_marker(&parent, "test-recovery");
-        let receipt = ActivationReceipt { id: "test-recovery".into(), live_root: root.clone(), staging_root: parent.join("missing-stage"), backup_root: backup.clone(), phase: "SOURCE_MOVED".into() };
+        let receipt = ActivationReceipt {
+            id: "test-recovery".into(),
+            live_root: root.clone(),
+            staging_root: parent.join("missing-stage"),
+            backup_root: backup.clone(),
+            old_tree_sha256: tree_digest(&backup).unwrap(),
+            new_tree_sha256: "new-tree-not-present".into(),
+            phase: "SOURCE_MOVED".into(),
+        };
         write_receipt(&marker, &receipt).unwrap();
         let recovered = recover_activation(&root).unwrap();
         assert_eq!(recovered.phase, "RECOVERED_ROLLED_BACK");
@@ -1194,7 +1293,61 @@ mod tests {
     }
 
     #[test]
-    fn failed_build_does_not_create_requested_root_or_touch_source() {
+    fn recovery_accepts_only_matching_committed_tree_pair() {
+        let root = temp_dir("recovery-committed");
+        let parent = root.parent().unwrap().to_path_buf();
+        let backup = parent.join(".abook-test-recovery-committed-backup");
+        fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
+        fs::write(root.join("planes/long_term/records/new.md"), "new").unwrap();
+        fs::create_dir_all(backup.join("planes/long_term/records")).unwrap();
+        fs::write(backup.join("planes/long_term/records/old.md"), "old").unwrap();
+        let marker = activation_marker(&parent, "test-recovery-committed");
+        let receipt = ActivationReceipt {
+            id: "test-recovery-committed".into(),
+            live_root: root.clone(),
+            staging_root: parent.join("missing-stage"),
+            backup_root: backup.clone(),
+            old_tree_sha256: tree_digest(&backup).unwrap(),
+            new_tree_sha256: tree_digest(&root).unwrap(),
+            phase: "LIVE_MOVED".into(),
+        };
+        write_receipt(&marker, &receipt).unwrap();
+        let recovered = recover_activation(&root).unwrap();
+        assert_eq!(recovered.phase, "RECOVERED_COMMITTED");
+        assert!(!marker.exists());
+        assert!(root.join("planes/long_term/records/new.md").is_file());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(backup);
+    }
+
+    #[test]
+    fn recovery_rejects_digest_mismatch_and_keeps_receipt() {
+        let root = temp_dir("recovery-mismatch");
+        let parent = root.parent().unwrap().to_path_buf();
+        let backup = parent.join(".abook-test-recovery-mismatch-backup");
+        fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
+        fs::write(root.join("planes/long_term/records/new.md"), "tampered").unwrap();
+        fs::create_dir_all(backup.join("planes/long_term/records")).unwrap();
+        fs::write(backup.join("planes/long_term/records/old.md"), "old").unwrap();
+        let marker = activation_marker(&parent, "test-recovery-mismatch");
+        let receipt = ActivationReceipt {
+            id: "test-recovery-mismatch".into(),
+            live_root: root.clone(),
+            staging_root: parent.join("missing-stage"),
+            backup_root: backup.clone(),
+            old_tree_sha256: tree_digest(&backup).unwrap(),
+            new_tree_sha256: "wrong-digest".into(),
+            phase: "LIVE_MOVED".into(),
+        };
+        write_receipt(&marker, &receipt).unwrap();
+        assert!(recover_activation(&root).is_err());
+        assert!(marker.is_file());
+        let _ = fs::remove_file(marker);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(backup);
+    }
+
+
         let root = temp_dir("boundary");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
