@@ -386,7 +386,9 @@ fn verify_source_baseline(staged: &StagedManifest, source: &Path) -> R<()> {
         verify_hash(&source.join(&record.source_rel), &record.raw_sha256, "源记录")?;
     }
     for attachment in &staged.attachments {
-        verify_hash(&source.join(&attachment.source_rel), &attachment.sha256, "源附件")?;
+        if attachment.kind == "file" {
+            verify_hash(&source.join(&attachment.source_rel), &attachment.sha256, "源附件")?;
+        }
     }
     for entries in staged.archives.values() {
         for entry in entries {
