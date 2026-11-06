@@ -86,6 +86,16 @@ def test_modern():
         assert helper_unknown["error"]["code"] == -32602
         helper_missing = send(p, request("helper-missing", "tools/call", {"name": "spec_get", "arguments": {}}))
         assert helper_missing["error"]["code"] == -32602
+        skill_root = tempfile.mkdtemp(prefix="abook-mcp-skills-")
+        try:
+            os.makedirs(os.path.join(skill_root, "demo"), exist_ok=True)
+            with open(os.path.join(skill_root, "demo", "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write("# Demo Skill\n\n正文 😀\n")
+            skill_read = send(p, request("skill-read", "tools/call", {"name": "skill_read", "arguments": {"name": "demo", "root": skill_root}}))
+            assert skill_read["result"]["isError"] is False, skill_read
+            assert "正文 😀" in skill_read["result"]["structuredContent"]["stdout"]
+        finally:
+            shutil.rmtree(skill_root)
         templates = send(p, request("rt", "resources/templates/list"))["result"]
         assert templates["resultType"] == "complete"
         prompts = send(p, request("p", "prompts/list"))["result"]
