@@ -414,13 +414,39 @@ pub fn rollback_activation(live_root: &Path, backup_root: &Path) -> R<PathBuf> {
     let live = canonical_dir(live_root, "当前库根目录")?;
     let backup = canonical_dir(backup_root, "迁移 backup 根目录")?;
     if live.parent() != backup.parent() || live == backup { return Err(integrity_error("rollback 要求 live 与 backup 同父目录且不能相同")); }
+    let parent = live.parent().ok_or_else(|| integrity_error("当前库根目录没有父目录"))?;
     let _lock = LibLock::acquire(&live, 30)?;
-    let id = sha256::digest_hex(format!("{}:{}", live.display(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()).as_bytes())[..16].to_string();
-    let abandoned = live.parent().unwrap().join(format!(".{}.abook-migration-abandoned-{id}", live.file_name().unwrap_or_default().to_string_lossy()));
-    fs::rename(&live, &abandoned)?; sync_parent(&abandoned)?;
+    let old_tree_sha256 = tree_digest(&backup)?;
+    let new_tree_sha256 = tree_digest(&live)?;
+    let id = sha256::digest_hex(format!("rollback:{}:{}", live.display(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()).as_bytes())[..16].to_string();
+    let abandoned = parent.join(format!(".{}.abook-migration-abandoned-{id}", live.file_name().unwrap_or_default().to_string_lossy()));
+    let marker = activation_marker(parent, &id);
+    let mut receipt = ActivationReceipt {
+        id,
+        live_root: live.clone(),
+        staging_root: abandoned.clone(),
+        backup_root: backup.clone(),
+        old_tree_sha256,
+        new_tree_sha256,
+        phase: "ROLLBACK_PREPARED".into(),
+    };
+    write_receipt(&marker, &receipt)?;
+    fs::rename(&live, &abandoned)?;
+    sync_parent(&abandoned)?;
+    receipt.phase = "ROLLBACK_SOURCE_MOVED".into();
+    write_receipt(&marker, &receipt)?;
     if let Err(error) = fs::rename(&backup, &live) {
-        let _ = fs::rename(&abandoned, &live);
-        return Err(integrity_error(format!("rollback 切换失败，已保留原 live: {error}")));
+        let restored = fs::rename(&abandoned, &live);
+        if restored.is_ok() {
+            let _ = sync_parent(&live);
+            receipt.phase = "ROLLBACK_RESTORED".into();
+            let _ = write_receipt(&marker, &receipt);
+            let _ = fs::remove_file(&marker);
+            return Err(integrity_error(format!("rollback 切换失败，已恢复原 live: {error}")));
+        }
+        receipt.phase = "RECOVERY_REQUIRED".into();
+        let _ = write_receipt(&marker, &receipt);
+        return Err(integrity_error(format!("rollback 切换和原 live 恢复均失败，需要 migrate --recover: {error}")));
     }
     sync_parent(&live)?;
     drop(_lock);
@@ -428,12 +454,19 @@ pub fn rollback_activation(live_root: &Path, backup_root: &Path) -> R<PathBuf> {
         Ok(lock) => lock,
         Err(error) => return Err(integrity_error(format!("rollback 已恢复旧库但获取库锁失败: {:?}", error))),
     };
+    receipt.phase = "VERIFIED".into();
+    write_receipt(&marker, &receipt)?;
+    fs::remove_file(&marker)?;
     Ok(abandoned)
 }
 
 pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
     let live = absolutize(live_root)?;
     let parent = live.parent().ok_or_else(|| integrity_error("live 根目录没有父目录"))?;
+    // The live directory may be absent after a crash. LibLock derives its
+    // stable path from the live pathname, so it remains the same lock used
+    // before the directory rename and serializes recovery with writers.
+    let _lock = LibLock::acquire(&live, 30)?;
     let mut found = Vec::new();
     for entry in fs::read_dir(parent)? {
         let path = entry?.path();
@@ -449,9 +482,25 @@ pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
     if receipt.old_tree_sha256.is_empty() || receipt.new_tree_sha256.is_empty() {
         return Err(integrity_error("旧版 receipt 没有目录摘要，保留现场，需人工核对后恢复"));
     }
+    if live_exists && !backup_exists && (receipt.phase == "PREPARED" || receipt.phase == "ROLLBACK_SOURCE_MOVED") {
+        let live_digest = tree_digest(&receipt.live_root)?;
+        if live_digest == receipt.old_tree_sha256 {
+            receipt.phase = if receipt.phase == "PREPARED" { "RECOVERED_NOT_STARTED" } else { "RECOVERED_ROLLED_BACK" }.into();
+            write_receipt(&marker, &receipt)?;
+            fs::remove_file(marker)?;
+            return Ok(receipt);
+        }
+        return Err(integrity_error("迁移 receipt 的 live 目录摘要不匹配，保留现场供人工恢复"));
+    }
     if live_exists && backup_exists {
         let live_digest = tree_digest(&receipt.live_root)?;
         let backup_digest = tree_digest(&receipt.backup_root)?;
+        if receipt.phase == "ROLLBACK_SOURCE_MOVED" && live_digest == receipt.old_tree_sha256 && backup_digest == receipt.old_tree_sha256 {
+            receipt.phase = "RECOVERED_ROLLED_BACK".into();
+            write_receipt(&marker, &receipt)?;
+            fs::remove_file(marker)?;
+            return Ok(receipt);
+        }
         if live_digest == receipt.new_tree_sha256 && backup_digest == receipt.old_tree_sha256 {
             receipt.phase = "RECOVERED_COMMITTED".into();
             write_receipt(&marker, &receipt)?;
@@ -1293,7 +1342,30 @@ mod tests {
     }
 
     #[test]
-    fn recovery_accepts_only_matching_committed_tree_pair() {
+    fn recovery_cleans_prepared_receipt_when_live_remains_old_and_backup_missing() {
+        let root = temp_dir("recovery-prepared");
+        fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
+        fs::write(root.join("planes/long_term/records/old.md"), "old").unwrap();
+        let parent = root.parent().unwrap().to_path_buf();
+        let marker = activation_marker(&parent, "test-recovery-prepared");
+        let receipt = ActivationReceipt {
+            id: "test-recovery-prepared".into(),
+            live_root: root.clone(),
+            staging_root: parent.join("missing-stage"),
+            backup_root: parent.join("missing-backup"),
+            old_tree_sha256: tree_digest(&root).unwrap(),
+            new_tree_sha256: "new-tree-not-installed".into(),
+            phase: "PREPARED".into(),
+        };
+        write_receipt(&marker, &receipt).unwrap();
+        let recovered = recover_activation(&root).unwrap();
+        assert_eq!(recovered.phase, "RECOVERED_NOT_STARTED");
+        assert!(!marker.exists());
+        assert!(root.join("planes/long_term/records/old.md").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+
         let root = temp_dir("recovery-committed");
         let parent = root.parent().unwrap().to_path_buf();
         let backup = parent.join(".abook-test-recovery-committed-backup");
