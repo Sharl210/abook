@@ -22,9 +22,10 @@ def meta(version=MODERN):
     }
 
 
-def start():
+def start(argv=None):
+    command = [BIN, "mcp", "stdio"] if argv is None else [BIN, *argv]
     return subprocess.Popen(
-        [BIN, "mcp", "stdio"], stdin=subprocess.PIPE,
+        command, stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", bufsize=1,
     )
@@ -107,6 +108,9 @@ def test_modern():
         assert templates["resultType"] == "complete"
         prompts = send(p, request("p", "prompts/list"))["result"]
         assert prompts["resultType"] == "complete"
+        prompts_get = send(p, request("pg", "prompts/get", {"name": "memory-first"}))
+        assert prompts_get["result"]["messages"][0]["content"]["text"]
+
 
         bad_meta = send(p, request("bm", "tools/list", add_meta=False))
         assert bad_meta["error"]["code"] == -32602
@@ -176,7 +180,7 @@ def test_batch_tools():
         txn_data = txn_preview["result"]["structuredContent"]
         assert "token" in txn_data, txn_preview
         txn_token = txn_data["token"]
-        txn_apply = send(p, request("t2", "tools/call", {"name": "abook_txn_apply", "arguments": {"root": txn_root, "preview_token": txn_token, "expect_revision": txn_data["revision"]}}))
+        txn_apply = send(p, request("t2", "tools/call", {"name": "abook_txn_apply", "arguments": {"root": txn_root, "preview_token": txn_token, "expect_revision": str(txn_data["revision"])}}))
         assert txn_apply["result"]["isError"] is False, txn_apply
         with open(os.path.join(txn_root, "planes/explicit/records/txn.md"), encoding="utf-8") as handle:
             assert handle.read() == "txn line one\ntxn line two 😀\n"
@@ -254,6 +258,29 @@ def test_memory_tools():
         p.wait(timeout=5)
         shutil.rmtree(root)
     assert p.returncode == 0, p.stderr.read()
+def test_default_stdio_and_cli_prefix():
+    p = start([])
+    try:
+        discovered = send(p, request("default", "server/discover", add_meta=False))
+        assert MODERN in discovered["result"]["supportedVersions"]
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+    assert p.returncode == 0, p.stderr.read()
+
+    root = tempfile.mkdtemp(prefix="abook-cli-prefix-")
+    try:
+        result = subprocess.run(
+            [BIN, "cli", "memory", "write", "--root", root, "--plane", "explicit", "--title", "CLI prefix", "--content", "prefix body", "--json"],
+            text=True, encoding="utf-8", capture_output=True, check=True,
+        )
+        value = json.loads(result.stdout)
+        assert value["content"] == "prefix body"
+        assert value["plane"] == "explicit"
+    finally:
+        shutil.rmtree(root)
+
+
 def test_eof_and_stdout_purity():
     p = start()
     p.stdin.write(json.dumps(request("d", "server/discover"), separators=(",", ":")) + "\n")
@@ -271,5 +298,6 @@ if __name__ == "__main__":
     test_legacy()
     test_batch_tools()
     test_memory_tools()
+    test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 5 suites passed")
+    print("MCP stdio tests: 7 suites passed")
