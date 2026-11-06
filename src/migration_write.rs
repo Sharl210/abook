@@ -1525,7 +1525,31 @@ mod tests {
         let _ = fs::remove_dir_all(&staging);
     }
     #[test]
-    fn activation_verifies_switch_and_rollback_keeps_both_trees_recoverable() {
+    fn stage_relation_edges_preserves_all_target_states() {
+        let records = vec![
+            StagedRecord { source_rel: "canonical/records/C-source.md".to_string(), target_rel: "planes/long_term/records/C-source.md".to_string(), target_plane: "long_term".to_string(), source_class: "canonical".to_string(), classification_basis: "default".to_string(), body_sha256: String::new(), raw_sha256: String::new(), body_bytes: 0, body_lines: 0, unknown_fields: Vec::new(), conflict: false },
+            StagedRecord { source_rel: "candidate/records/N-one.md".to_string(), target_rel: "planes/episodic/records/N-one.md".to_string(), target_plane: "episodic".to_string(), source_class: "candidate".to_string(), classification_basis: "default".to_string(), body_sha256: String::new(), raw_sha256: String::new(), body_bytes: 0, body_lines: 0, unknown_fields: Vec::new(), conflict: false },
+            StagedRecord { source_rel: "candidate/records/N-two.md".to_string(), target_rel: "planes/episodic/records/N-two.md".to_string(), target_plane: "episodic".to_string(), source_class: "candidate".to_string(), classification_basis: "default".to_string(), body_sha256: String::new(), raw_sha256: String::new(), body_bytes: 0, body_lines: 0, unknown_fields: Vec::new(), conflict: false },
+        ];
+        let source = super::RecordKey { lib: Lib::Canonical, stem: "C-source".to_string() };
+        let one = super::RecordKey { lib: Lib::Candidate, stem: "N-one".to_string() };
+        let two = super::RecordKey { lib: Lib::Candidate, stem: "N-two".to_string() };
+        let edges = vec![
+            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 0, value: "N-one".to_string(), target: super::RelationTarget::Resolved(one.clone()) },
+            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 1, value: "N-same".to_string(), target: super::RelationTarget::Ambiguous(vec![one, two]) },
+            super::RelationEdge { source: source.clone(), field: "RELATED_IDS", ordinal: 2, value: "N-missing".to_string(), target: super::RelationTarget::Unresolved },
+            super::RelationEdge { source, field: "RELATED_IDS", ordinal: 3, value: "records/N-one.md".to_string(), target: super::RelationTarget::NonIdentity },
+        ];
+        let staged = stage_relation_edges(&edges, &records).unwrap();
+        assert_eq!(staged.len(), 4);
+        assert_eq!(staged[0].status, "resolved");
+        assert_eq!(staged[1].status, "ambiguous");
+        assert_eq!(staged[1].candidates.len(), 2);
+        assert_eq!(staged[2].status, "unresolved");
+        assert_eq!(staged[3].status, "non_identity");
+    }
+
+
         let root = temp_dir("activation");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
