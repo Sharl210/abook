@@ -325,9 +325,15 @@ pub fn activate_staged(staged: &StagedManifest) -> R<ActivationReceipt> {
     sync_parent(&backup)?;
     receipt.phase = "SOURCE_MOVED".into(); write_receipt(&marker, &receipt)?;
     if let Err(error) = fs::rename(&stage, &live) {
-        let _ = fs::rename(&backup, &live);
-        let _ = fs::remove_file(&marker);
-        return Err(integrity_error(format!("staging 切换失败，已恢复源库: {error}")));
+        let rollback = fs::rename(&backup, &live);
+        if rollback.is_ok() {
+            let _ = sync_parent(&live);
+            let _ = fs::remove_file(&marker);
+            return Err(integrity_error(format!("staging 切换失败，已恢复源库: {error}")));
+        }
+        receipt.phase = "RECOVERY_REQUIRED".into();
+        let _ = write_receipt(&marker, &receipt);
+        return Err(integrity_error(format!("staging 切换失败且自动回滚失败，需要 migrate --recover: {error}")));
     }
     sync_parent(&live)?;
     receipt.phase = "LIVE_MOVED".into(); write_receipt(&marker, &receipt)?;
