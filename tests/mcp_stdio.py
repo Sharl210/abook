@@ -208,17 +208,33 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_context", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
-        written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
+        assert {"memory_init", "memory_context", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
+        memory_list_schema = next(tool for tool in tools if tool["name"] == "memory_list")["inputSchema"]
+
+        assert "all" in next(tool for tool in tools if tool["name"] == "memory_export")["inputSchema"]["properties"]["plane"]["enum"]
+        empty_root = tempfile.mkdtemp(prefix="abook-mcp-empty-")
+        empty_init = send(p, request("m0-init", "tools/call", {"name": "memory_init", "arguments": {"root": empty_root}}))
+        assert empty_init["result"]["isError"] is False, empty_init
+        empty_index = send(p, request("m0-index", "tools/call", {"name": "memory_index", "arguments": {"root": empty_root, "plane": "all"}}))
+        assert empty_index["result"]["isError"] is False, empty_index
+        assert empty_index["result"]["structuredContent"]["total"] == 0
+        assert len(empty_index["result"]["structuredContent"]["planes"]) == 6
+        shutil.rmtree(empty_root)
+
         assert written["result"]["isError"] is False, written
         record = written["result"]["structuredContent"]
         extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
+        assert extra["result"]["isError"] is False, extra
         indexed = send(p, request("m1-index", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "all", "limit": 1, "offset": 0}}))
         assert indexed["result"]["isError"] is False, indexed
         assert indexed["result"]["structuredContent"]["format"] == "abook.memory.index.v1"
         assert indexed["result"]["structuredContent"]["total"] == 2
         assert len(indexed["result"]["structuredContent"]["planes"]) == 6
-        assert len(indexed["result"]["structuredContent"]["items"]) == 1
+        listed_all = send(p, request("m1-list-all", "tools/call", {"name": "memory_list", "arguments": {"root": root, "limit": 10, "offset": 0}}))
+        assert listed_all["result"]["isError"] is False, listed_all
+        assert listed_all["result"]["structuredContent"]["total"] == 2
+        bad_index_plane = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
+        assert bad_index_plane["result"]["isError"] is True, bad_index_plane
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
         assert read["result"]["structuredContent"]["content"] == "第一行\n第二行 😀"
         search = send(p, request("m3", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "plane": "explicit"}}))
@@ -362,6 +378,40 @@ def test_default_stdio_and_cli_prefix():
         value = json.loads(result.stdout)
         assert value["content"] == "prefix body"
         assert value["plane"] == "explicit"
+        listed = subprocess.run([BIN, "list", "--root", root, "--plane", "explicit", "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
+        listing = json.loads(listed.stdout)
+        assert listing["total"] == 1
+        indexed = subprocess.run([BIN, "index", "--root", root, "--plane", "all", "--limit", "1", "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
+        index_value = json.loads(indexed.stdout)
+        assert index_value["format"] == "abook.memory.index.v1"
+        assert index_value["total"] == 1
+        shown = subprocess.run([BIN, "get", value["id"], "TITLE", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
+        assert json.loads(shown.stdout) == "CLI prefix"
+        paged = subprocess.run([BIN, "list", "--root", root, "--plane", "explicit", "--page", "2", "--per-page", "1", "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
+        assert json.loads(paged.stdout)["offset"] == 1
+        rejected = subprocess.run([BIN, "list", "unexpected", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True)
+        assert rejected.returncode != 0
+
+        old_root = tempfile.mkdtemp(prefix="abook-legacy-root-")
+        mixed_root = tempfile.mkdtemp(prefix="abook-mixed-root-")
+        absent_root = tempfile.mkdtemp(prefix="abook-memory-absent-no-side-effect-")
+        shutil.rmtree(absent_root)
+        try:
+            old = subprocess.run([BIN, "write", "--root", old_root, "--title", "Legacy", "--content", "legacy body", "--json"], text=True, encoding="utf-8", capture_output=True)
+            assert old.returncode == 0, old.stderr
+            assert os.path.isdir(os.path.join(old_root, "candidate", "records"))
+            os.makedirs(os.path.join(mixed_root, "planes"), exist_ok=True)
+            mixed = subprocess.run([BIN, "index", "--root", mixed_root, "--json"], text=True, encoding="utf-8", capture_output=True)
+            assert mixed.returncode != 0
+            absent = subprocess.run([BIN, "memory", "context", "--root", absent_root, "--json"], text=True, encoding="utf-8", capture_output=True)
+            assert absent.returncode != 0
+            assert not os.path.exists(absent_root)
+        finally:
+            shutil.rmtree(old_root)
+            shutil.rmtree(mixed_root)
+            if os.path.exists(absent_root):
+                shutil.rmtree(absent_root)
+
     finally:
         shutil.rmtree(root)
 

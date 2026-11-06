@@ -129,6 +129,7 @@ fn help_text() -> String {
                             结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
   memory <子命令>           显式六平面库：init/index/context/export/write/read/list/search/update/delete/restore
+  marker 根兼容入口         marker 根上的 index/list/show/search/export/state/write/update/delete/restore 自动走六平面；旧根保持兼容
       --plane soul|rules|profile|explicit|long_term|episodic
       --root PATH --id ID --title T --content TEXT --read-when W --query Q
 
@@ -774,7 +775,20 @@ fn main() {
     if argv.is_empty() && std::io::stdin().is_terminal() {
         std::process::exit(cmd_help(&Args::empty()).map(|c| c).unwrap_or(2));
     }
-    let parsed = Args::parse(&argv);
+    let parsed_raw = Args::parse(&argv);
+    let mut memory_mode = false;
+    let parsed = match parsed_raw {
+        Ok(a) if a.has("help") => Ok(a),
+        Ok(a) => match a.validate_for(&spec::canonical(&a.cmd)) {
+            Err(error) => Err(error),
+            Ok(()) => match memory_route_args(&a) {
+                Ok(Some(routed)) => { memory_mode = true; Ok(routed) }
+                Ok(None) => Ok(a),
+                Err(error) => Err(error),
+            },
+        },
+        Err(error) => Err(error),
+    };
     // root is resolved the same way every command resolves it, so the write
     // report can print repo-relative names
     let root = parsed
@@ -808,7 +822,8 @@ fn main() {
     // real write would only add waiting.
     let _lib_lock = match parsed.as_ref() {
         Ok(a)
-            if !root.as_os_str().is_empty()
+            if !memory_mode
+                && !root.as_os_str().is_empty()
                 && !a.has("dry-run")
                 && crate::util::is_write_command(&a.cmd) =>
         {
@@ -863,7 +878,7 @@ fn main() {
         "refresh", "sync", "recount", "normalize", "repair", "fix", "refs", "doctor",
         "leftover", "branch",
     ];
-    let need_index = match parsed.as_ref() {
+    let need_index = if memory_mode { false } else { match parsed.as_ref() {
         Ok(a) => {
             if a.has("dry-run") || a.has("dryrun") || matches!(a.cmd.as_str(), "migrate" | "txn" | "recover") {
                 false
@@ -879,7 +894,7 @@ fn main() {
             }
         }
         Err(_) => false,
-    };
+    }};
 
     let code = match parsed {
         Ok(ref a) if a.has("json") && needs_capture(&spec::canonical(&a.cmd)) => {
@@ -1094,11 +1109,55 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+fn memory_route_args(a: &Args) -> R<Option<Args>> {
+    let supported = ["index", "list", "show", "get", "cat", "search", "recall", "export", "state", "stats", "write", "add", "update", "edit", "delete", "rm", "restore"];
+    if !supported.contains(&a.cmd.as_str()) { return Ok(None); }
+    let root = crate::util::resolve_root(a);
+    if !crate::memory_plane::detect_layout(&root)? { return Ok(None); }
+    if a.get("lib").is_some() || a.has("approve") { return usage("六平面布局不接受旧 candidate/canonical 的 --lib/--approve；请使用显式 memory 平面"); }
+    let sub = match a.cmd.as_str() {
+        "index" => "index",
+        "list" => "list",
+        "show" | "get" | "cat" => "read",
+        "search" => "search",
+        "recall" => "recall",
+        "state" | "stats" => "context",
+        "write" | "add" => "write",
+        "update" | "edit" => "update",
+        "delete" | "rm" => "delete",
+        "restore" => "restore",
+        "export" => "export",
+        _ => unreachable!(),
+    };
+    let routed = Args { cmd: "memory".to_string(), pos: vec![sub.to_string()], kv: a.kv.clone() };
+    let allowed_positional_count = match a.cmd.as_str() {
+        "get" => 2,
+        "show" | "cat" | "update" | "edit" | "delete" | "rm" | "restore" => 1,
+        "search" | "recall" => usize::MAX,
+        _ => 0,
+    };
+    if a.pos.len() > allowed_positional_count { return usage(format!("marker 根 `{}` 收到多余位置参数；请按 `abook describe {}` 查看格式", a.cmd, a.cmd)); }
+    let mut routed = routed;
+    if matches!(sub, "read" | "update" | "delete" | "restore") && routed.get("id").is_none() {
+        if let Some(id) = a.pos.first() { routed.kv.insert("id".into(), vec![id.clone()]); }
+    }
+    if sub == "read" && routed.get("field").is_none() {
+        if let Some(field) = a.pos.get(1) { routed.kv.insert("field".into(), vec![field.clone()]); }
+    }
+    if matches!(sub, "search" | "recall") && routed.get("query").is_none() && !a.pos.is_empty() {
+        routed.kv.insert("query".into(), vec![a.pos.join(" ")]);
+    }
+    Ok(Some(routed))
+}
+
 fn dispatch(a: &Args) -> R<i32> {
     // `--help` as a flag keeps per-command help working without a second table.
     if a.has("help") {
         print!("{}", help_text());
         return Ok(0);
+    }
+    if let Some(routed) = memory_route_args(a)? {
+        return crate::cmd_memory::cmd_memory(&routed);
     }
     // Reject unknown parameters up front. Ignoring them was actively harmful:
     // a mistyped `--limt 5` returned the entire library and still looked fine.

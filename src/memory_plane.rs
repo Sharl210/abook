@@ -22,6 +22,12 @@ pub fn verify_layout(root: &Path) -> R<()> {
         let path = root.join(legacy);
         if path.exists() { return Err(err(format!("六平面布局混入旧模型标记: {}", path.display()))); }
     }
+    for plane in PLANES {
+        for dir in [root.join("planes").join(plane), root.join("planes").join(plane).join("records")] {
+            let meta = fs::symlink_metadata(&dir).map_err(|_| err(format!("六平面布局不完整，缺少目录: {}", dir.display())))?;
+            if meta.file_type().is_symlink() || !meta.is_dir() { return Err(err(format!("六平面布局目录类型无效: {}", dir.display()))); }
+        }
+    }
     Ok(())
 }
 
@@ -31,34 +37,60 @@ fn ensure_layout(root: &Path) -> R<()> {
     if marker.exists() { return verify_layout(root); }
     for legacy in ["canonical", "candidate", "Global.md", "Index.md", "Atlas.md", ".numbers"] {
         let path = root.join(legacy);
-        if path.exists() { return Err(err(format!("旧记忆库不能直接作为六平面 memory 根: {}", path.display()))); }
+        if path.exists() { return Err(err(format!("旧/未完成记忆库不能直接作为六平面 memory 根: {}", path.display()))); }
     }
-    write_atomic(&marker, &format!("{LAYOUT_MARKER}\n"))?;
-    verify_layout(root)
+    if root.join("planes").exists() { return Err(err("发现 planes 目录但缺少版本 marker，拒绝猜测库格式")); }
+    let planes_root = root.join("planes");
+    let creation = (|| -> R<()> {
+        for plane in PLANES { fs::create_dir_all(planes_root.join(plane).join("records"))?; }
+        write_atomic(&marker, &format!("{LAYOUT_MARKER}\n"))?;
+        verify_layout(root)
+    })();
+    if let Err(error) = creation {
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_dir_all(&planes_root);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn detect_layout(root: &Path) -> R<bool> {
+    if !root.exists() { return Ok(false); }
+    let metadata = fs::symlink_metadata(root)?;
+    let canonical;
+    let root = if metadata.file_type().is_symlink() { canonical = fs::canonicalize(root)?; canonical.as_path() } else { root };
+    if !root.is_dir() { return Err(err("库根必须是目录")); }
+    let marker = root.join(LAYOUT_MARKER);
+    if marker.exists() { verify_layout(root)?; return Ok(true); }
+    if root.join("planes").exists() { return Err(err("发现 planes 目录但缺少版本 marker，拒绝猜测库格式")); }
+    Ok(false)
 }
 
 pub fn initialize_layout(root: &str) -> R<()> {
-    let root = root_path(root)?;
+    let root = resolve_memory_path(root)?;
+    let _lock = LibLock::acquire(&root, 30)?;
     ensure_layout(&root)
 }
 
-pub fn layout_marker_path(root: &Path) -> PathBuf { root.join(LAYOUT_MARKER) }
-
-fn root_path(root: &str) -> R<PathBuf> {
+fn resolve_memory_path(root: &str) -> R<PathBuf> {
     if root.is_empty() { return Err(err("memory 工具需要 root")); }
     let args = crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::from([("root".to_string(), vec![root.to_string()])]) };
     let resolved = crate::util::resolve_root(&args);
     if resolved.exists() {
         let meta = fs::symlink_metadata(&resolved)?;
-        let canonical = fs::canonicalize(resolved)?;
-        ensure_layout(&canonical)?;
-        Ok(canonical)
+        if meta.file_type().is_symlink() || !meta.is_dir() { return Err(err("memory root 必须是普通目录")); }
+        Ok(fs::canonicalize(resolved)?)
     } else {
-        ensure_layout(&resolved)?;
         Ok(resolved)
     }
 }
-fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
+
+fn root_path(root: &str) -> R<PathBuf> {
+    let resolved = resolve_memory_path(root)?;
+    if !resolved.exists() { return Err(err(format!("六平面 memory 根不存在，请先执行 memory init: {}", resolved.display()))); }
+    verify_layout(&resolved)?;
+    Ok(resolved)
+}
 fn text(value: &Value, key: &str) -> Option<String> { value.get(key).and_then(|v| match v { Value::String(s) => Some(s.clone()), Value::Number(n) => Some(n.clone()), _ => None }) }
 fn object(mut values: Vec<(&str, Value)>) -> Value { let mut map = BTreeMap::new(); for (k, v) in values.drain(..) { map.insert(k.to_string(), v); } Value::Object(map) }
 fn valid_id(id: &str) -> bool {
@@ -230,14 +262,15 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
     items.sort_by(|a,b| text(a,"plane").cmp(&text(b,"plane")).then_with(|| text(a,"id").cmp(&text(b,"id"))));
     let total = items.len();
     let limit = limit.clamp(1, 500);
-    let page: Vec<Value> = items.into_iter().skip(offset).take(limit).collect();
+    let effective_offset = offset.min(total);
+    let page: Vec<Value> = items.into_iter().skip(effective_offset).take(limit).collect();
     Ok(object(vec![
         ("format", Value::s("abook.memory.index.v1")),
         ("planes", Value::arr(selected.iter().map(|p| Value::s(*p)).collect())),
         ("counts", Value::Object(counts)),
         ("items", Value::Array(page)),
         ("total", Value::n(total.to_string())),
-        ("offset", Value::n(offset.to_string())),
+        ("offset", Value::n(effective_offset.to_string())),
         ("limit", Value::n(limit.to_string())),
         ("credentials", Value::s("vault")),
     ]))
@@ -246,8 +279,9 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
 pub fn write(root: &str, plane: &str, title: &str, read_when: &str, content: &str) -> R<Value> {
     if !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
     if title.trim().is_empty() || content.is_empty() { return Err(err("memory_write 需要非空 title 和 content")); }
-    let root = root_path(root)?;
+    let root = resolve_memory_path(root)?;
     let _lock = LibLock::acquire(&root, 30)?;
+    ensure_layout(&root)?;
     let stamp = now();
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let seed = format!("{plane}\0{title}\0{content}\0{nanos}\0{}", std::process::id());
@@ -318,15 +352,16 @@ pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<V
 }
 
 pub fn list(root: &str, plane: &str, limit: usize, offset: usize) -> R<Value> {
-    if !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
+    if plane != "all" && !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
     let root = root_path(root)?;
-    let mut items = records(&root, Some(plane))?;
-    items.sort_by_key(|v| text(v, "id").unwrap_or_default());
+    let selected = if plane == "all" { None } else { Some(plane) };
+    let mut items = records(&root, selected)?;
+    items.sort_by(|a,b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "id").cmp(&text(b, "id"))));
     let total = items.len();
     let start = offset.min(total);
     let size = limit.clamp(1, 500);
     let page = items.into_iter().skip(start).take(size).collect();
-    Ok(object(vec![("items", Value::Array(page)), ("total", Value::n(total.to_string())), ("offset", Value::n(start.to_string())), ("limit", Value::n(size.to_string()))]))
+    Ok(object(vec![("items", Value::Array(page)), ("planes", Value::arr(if plane == "all" { PLANES.iter().map(|p| Value::s(*p)).collect() } else { vec![Value::s(plane)] })), ("total", Value::n(total.to_string())), ("offset", Value::n(start.to_string())), ("limit", Value::n(size.to_string())), ("credentials", Value::s("vault"))]))
 }
 pub fn context(root: &str) -> R<Value> {
     let root = root_path(root)?;
@@ -336,14 +371,16 @@ pub fn context(root: &str) -> R<Value> {
 }
 
 pub fn export(root: &str, plane: Option<&str>) -> R<Value> {
-    if let Some(p) = plane {
-        if !plane_ok(p) { return Err(err(format!("未知记忆平面: {p}"))); }
-    }
+    let selected = match plane {
+        Some("all") | None => None,
+        Some(p) if plane_ok(p) => Some(p),
+        Some(p) => return Err(err(format!("未知记忆平面: {p}"))),
+    };
     let root = root_path(root)?;
-    let items = records(&root, plane)?;
+    let items = records(&root, selected)?;
     let mut counts = BTreeMap::new();
     for p in PLANES {
-        if plane.map(|selected| selected == *p).unwrap_or(true) {
+        if selected.map(|selected| selected == *p).unwrap_or(true) {
             counts.insert((*p).to_string(), Value::n(records(&root, Some(p))?.len().to_string()));
         }
     }
@@ -430,8 +467,8 @@ mod legacy_migration_tests {
     #[test]
     fn six_plane_attachment_manifest_scan_and_cas_roundtrip() {
         let root = temp_root();
+        initialize_layout(root.to_string_lossy().as_ref()).unwrap();
         let record_dir = root.join("planes/explicit/records");
-        fs::create_dir_all(&record_dir).unwrap();
         let record = crate::memory_plane::write(root.to_string_lossy().as_ref(), "explicit", "附件测试", "查附件", "正文").unwrap();
         let indexed = index(root.to_string_lossy().as_ref(), Some("explicit"), 10, 0).unwrap();
         assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
@@ -455,8 +492,8 @@ mod legacy_migration_tests {
     #[test]
     fn staged_markdown_record_and_alias_can_be_read_updated_deleted_and_restored() {
         let root = temp_root();
+        initialize_layout(root.to_string_lossy().as_ref()).unwrap();
         let dir = root.join("planes/long_term/records");
-        fs::create_dir_all(&dir).unwrap();
         let id = "C-20261101T120000-aaaaaaaa";
         let path = dir.join("canonical-legacyhash.md");
         let raw = format!("[CANONICAL_MEMORY]\nID={id}\nTITLE=Legacy title\nREAD_WHEN=legacy lookup\nX_UNKNOWN=preserve me\n[/CANONICAL_MEMORY]\n[MEMORY_BODY]\nLegacy body\n[/MEMORY_BODY]\n");
@@ -514,7 +551,9 @@ mod legacy_migration_tests {
 fn version_of(value: &Value) -> String { text(value, "revision").unwrap_or_else(|| "1".to_string()) }
 
 pub fn update(root: &str, id: &str, expected_revision: &str, title: Option<&str>, read_when: Option<&str>, content: Option<&str>) -> R<Value> {
-    let root = root_path(root)?; let _lock = LibLock::acquire(&root, 30)?;
+    let root = resolve_memory_path(root)?;
+    let _lock = LibLock::acquire(&root, 30)?;
+    verify_layout(&root)?;
     let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
     let current = located.value.clone();
     if version_of(&current) != expected_revision { return Err(err(format!("记忆 revision 冲突: expected={expected_revision} actual={}", version_of(&current)))); }
@@ -539,7 +578,7 @@ pub fn restore(root: &str, id: &str, expected_revision: &str) -> R<Value> {
 }
 
 fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) -> R<Value> {
-    let root = root_path(root)?; let _lock = LibLock::acquire(&root, 30)?; let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+    let root = resolve_memory_path(root)?; let _lock = LibLock::acquire(&root, 30)?; verify_layout(&root)?; let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
     let current = located.value.clone();
     if version_of(&current) != expected_revision { return Err(err("记忆 revision 冲突")); }
     if located.legacy_raw.is_some() { return legacy_update(&located, &current, None, None, None, Some(status)); }

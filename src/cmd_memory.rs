@@ -31,6 +31,22 @@ fn body(a: &Args) -> R<String> {
     a.get("content").or_else(|| a.get("body")).map(str::to_string).ok_or_else(|| match usage::<()>("memory write 缺少 --content / --body-file / --stdin") { Err(e) => e, Ok(()) => unreachable!() })
 }
 
+fn page_args(a: &Args) -> (usize, usize) {
+    let limit = a.num("limit").or_else(|| a.num("per-page")).unwrap_or(100).max(1) as usize;
+    let page = a.num("page").unwrap_or(1).max(1) as usize;
+    let offset = a.num("offset").map(|v| v.max(0) as usize).unwrap_or_else(|| page.saturating_sub(1).saturating_mul(limit));
+    (limit, offset)
+}
+
+fn field_value(value: &mcp_json::Value, field: &str) -> Option<mcp_json::Value> {
+    let key = match field.to_ascii_uppercase().as_str() {
+        "ID" => "id", "TITLE" => "title", "BODY" | "MEMORY_BODY" => "content",
+        "READ_WHEN" => "read_when", "STATUS" => "status", "REVISION" => "revision",
+        "PLANE" => "plane", other => return value.get(other.to_ascii_lowercase().as_str()).cloned(),
+    };
+    value.get(key).cloned()
+}
+
 pub fn cmd_memory(a: &Args) -> R<i32> {
     let sub = a.pos_or(0, "context");
     let root = root(a);
@@ -39,7 +55,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             memory_plane::initialize_layout(&root)?;
             emit(mcp_json::Value::obj([("layout", mcp_json::Value::s(memory_plane::LAYOUT_MARKER))].into_iter().map(|(k,v)| (k.to_string(),v)).collect()))
         }
-        "index" => emit(memory_plane::index(&root, a.get("plane"), a.num("limit").or_else(|| a.num("per-page")).unwrap_or(100) as usize, a.num("offset").or_else(|| a.num("page")).unwrap_or(0) as usize)?),
+        "index" => { let (limit, offset) = page_args(a); emit(memory_plane::index(&root, a.get("plane"), limit, offset)?) },
         "context" => emit(memory_plane::context(&root)?),
         "export" => emit(memory_plane::export(&root, a.get("plane"))?),
         "write" | "add" => {
@@ -48,10 +64,17 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             let content = body(a)?;
             emit(memory_plane::write(&root, plane, title, a.get("read-when").unwrap_or(""), &content)?)
         }
-        "read" | "show" => emit(memory_plane::read(&root, required(a, "id")?)?),
+        "read" | "show" => {
+            let value = memory_plane::read(&root, required(a, "id")?)?;
+            match a.get("field") {
+                Some(field) => emit(field_value(&value, field).ok_or_else(|| match usage::<()>(format!("memory get 没有字段: {field}")) { Err(e) => e, Ok(()) => unreachable!() })?),
+                None => emit(value),
+            }
+        }
         "list" | "ls" => {
-            let plane = required(a, "plane")?;
-            emit(memory_plane::list(&root, plane, a.num("per-page").unwrap_or(100) as usize, a.num("page").unwrap_or(0) as usize)?)
+            let plane = a.get("plane").unwrap_or("all");
+            let (limit, offset) = page_args(a);
+            emit(memory_plane::list(&root, plane, limit, offset)?)
         }
         "search" | "recall" => emit(memory_plane::search(&root, required(a, "query")?, a.get("plane"), a.num("per-page").unwrap_or(20) as usize)?),
         "update" | "edit" => {
