@@ -349,13 +349,24 @@ migration body
         try:
             os.makedirs(os.path.join(activation_root, "canonical", "records"), exist_ok=True)
             os.makedirs(os.path.join(activation_root, "candidate", "records"), exist_ok=True)
-            legacy_record = os.path.join(activation_root, "canonical", "records", "C-20261106T000011-bbbbbbbb.md")
+            relation_target = os.path.join(activation_root, "candidate", "records", "N-20261106T000012-cccccccc.md")
+            with open(relation_target, "w", encoding="utf-8") as handle:
+                handle.write("""[CANDIDATE_MEMORY]
+ID=N-20261106T000012-cccccccc
+TITLE=Relation target
+KIND=DECISION
+[/CANDIDATE_MEMORY]
+[MEMORY_BODY]
+relation target body
+[/MEMORY_BODY]
+""")
             with open(legacy_record, "w", encoding="utf-8") as handle:
                 handle.write("""[CANONICAL_MEMORY]
 ID=C-20261106T000011-bbbbbbbb
 TITLE=Activate fixture
 KIND=DECISION
 READ_WHEN=CI activation
+RELATED_IDS=N-20261106T000012-cccccccc
 [/CANONICAL_MEMORY]
 [MEMORY_BODY]
 activation body
@@ -368,6 +379,28 @@ activation body
             verified = send(p, request("mig-verify", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
             assert verified["result"]["isError"] is False, verified
             assert verified["result"]["structuredContent"]["status"] == "PASS", verified
+            assert verified["result"]["structuredContent"]["relations"] == 1, verified
+            relation_file = os.path.join(activation_root, "relation_edges.jsonl")
+            with open(relation_file, encoding="utf-8") as handle:
+                relation_rows = [json.loads(line) for line in handle if line.strip()]
+            assert len(relation_rows) == 1 and relation_rows[0]["status"] == "resolved", relation_rows
+            with open(relation_file, "a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+            tampered_relation = send(p, request("mig-verify-rel-tamper", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert tampered_relation["result"]["isError"] is True, tampered_relation
+            assert tampered_relation["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", tampered_relation
+            with open(relation_file, "rb+") as handle:
+                handle.truncate(os.path.getsize(relation_file) - 3)
+            with open(relation_file, "r", encoding="utf-8") as handle:
+                relation_row = json.loads(handle.readline())
+            os.unlink(os.path.join(activation_root, "relation_edges.tsv"))
+            missing_relation = send(p, request("mig-verify-rel-missing", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert missing_relation["result"]["isError"] is True, missing_relation
+            assert missing_relation["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", missing_relation
+            with open(os.path.join(activation_root, "relation_edges.tsv"), "w", encoding="utf-8") as handle:
+                handle.write("source_rel\\tfield\\tordinal\\tvalue\\tstatus\\ttarget_rel\\tcandidates\\n")
+                handle.write("{}\\t{}\\t{}\\t{}\\t{}\\t{}\\t{}\\n".format(relation_row["source_rel"], relation_row["field"], relation_row["ordinal"], relation_row["value"], relation_row["status"], relation_row["target_rel"], ",".join(relation_row["candidates"])))
+            # Keep the remaining failure probes against the real staged record.
             targets = []
             for base, _, files in os.walk(os.path.join(activation_root, "planes")):
                 targets.extend(os.path.join(base, name) for name in files if name.endswith(".md"))
