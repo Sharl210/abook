@@ -724,6 +724,9 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
     let mut seen = BTreeSet::new();
     for record in &staged.records {
         validate_relative(&record.target_rel, "目标记录路径")?;
+        if !ALL_PLANES.contains(&record.target_plane.as_str()) || !record.target_rel.starts_with(&format!("{PLAN_DIR}/{}/records/", record.target_plane)) {
+            return Err(integrity_error(format!("记录平面与目标路径不匹配: {}", record.target_rel)));
+        }
         if !seen.insert(record.target_rel.clone()) { return Err(integrity_error(format!("目标记录路径重复: {}", record.target_rel))); }
         let target = root.join(&record.target_rel);
         ensure_within(&root, &target, "目标记录路径")?;
@@ -733,6 +736,9 @@ fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
         if sha256::digest_hex(&raw) != record.raw_sha256 { return Err(integrity_error(format!("记录原文 SHA256 不匹配: {}", record.target_rel))); }
         let parsed = Record::parse_str(std::str::from_utf8(&raw).map_err(|_| integrity_error(format!("记录不是 UTF-8: {}", record.target_rel)))?, &target, lib_from_target(&record.target_plane))?;
         if body_digest(&parsed.body) != record.body_sha256 { return Err(integrity_error(format!("记录正文 SHA256 不匹配: {}", record.target_rel))); }
+        if parsed.body.len() != record.body_bytes { return Err(integrity_error(format!("记录正文字节数不匹配: {}", record.target_rel))); }
+        let body_lines = parsed.body.lines().filter(|line| !line.trim().is_empty()).count();
+        if body_lines != record.body_lines { return Err(integrity_error(format!("记录正文行数不匹配: {}", record.target_rel))); }
         if unknown_fields(&parsed) != record.unknown_fields { return Err(integrity_error(format!("未知字段清单不匹配: {}", record.target_rel))); }
     }
     check_text(&root.join(MANIFEST_JSONL), &render_manifest_jsonl(&staged.records))?;
