@@ -80,6 +80,8 @@ def test_modern():
         assert "abook_migrate_activate" in names
         assert "abook_migrate_recover" in names
         assert "abook_migrate_rollback" in names
+        assert "abook_commands" in names and "abook_describe" in names and "abook_help" in names
+        assert "abook_version" in names and "abook_detect" in names and "abook_upgrade" in names
         for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
             assert legacy_name not in names, legacy_name
         hidden_call = send(p, request("legacy-hidden", "tools/call", {"name": "abook_write", "arguments": {"title": "legacy", "body": "must reject"}}))
