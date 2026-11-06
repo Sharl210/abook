@@ -23,7 +23,10 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         "write" | "add" => {
             let plane = required(a, "plane")?;
             let title = required(a, "title")?;
-            let content = a.get("content").or_else(|| a.get("body")).ok_or_else(|| usage("memory write 缺少 --content"))?;
+            let content = match a.get("content").or_else(|| a.get("body")) {
+                Some(value) => value,
+                None => return usage("memory write 缺少 --content"),
+            };
             emit(memory_plane::write(&root, plane, title, a.get("read-when").unwrap_or(""), content)?)
         }
         "read" | "show" => emit(memory_plane::read(&root, required(a, "id")?)?),

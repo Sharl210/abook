@@ -347,12 +347,12 @@ fn validate_helper_args(name: &str, args: &Value) -> Result<(), String> {
     for key in values.keys() {
         if !allowed.contains(&key.as_str()) { return Err(format!("工具参数未声明: {key}")); }
     }
-    if matches!(name, "spec_get" | "skill_read") && values.get("name").and_then(|v| v.str()).filter(|s| !s.is_empty()).is_none() {
+    if matches!(name, "spec_get" | "skill_read") && values.get("name").and_then(as_string).filter(|s| !s.is_empty()).is_none() {
         return Err(format!("{name} 缺少必填参数 name"));
     }
     for key in ["name", "root"] {
         if let Some(value) = values.get(key) {
-            if value.str().is_none() { return Err(format!("工具参数 {key} 必须是字符串")); }
+            if as_string(value).is_none() { return Err(format!("工具参数 {key} 必须是字符串")); }
         }
     }
     Ok(())
