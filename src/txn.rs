@@ -1097,6 +1097,23 @@ mod tests {
     }
 
     #[test]
+    fn recovery_of_rolling_back_continues_backward() {
+        let root = temp_root("rollback-recover");
+        let mut tx = Transaction::prepare(&root).unwrap();
+        tx.stage_file(Selector::new("record.md"), "after").unwrap();
+        let token = tx.token().to_string();
+        tx.apply(&token).unwrap();
+        let logs = collect_logs(&tx.journal.entries, &root).unwrap();
+        let log = logs.get(&tx.transaction_id).unwrap().clone();
+        let mut journal = Journal::load(&tx.journal_path).unwrap();
+        append_log_phase(&mut journal, &log, Phase::RollingBack).unwrap();
+        let reports = recover_apply(&root).unwrap();
+        assert_eq!(reports[0].action, RecoveryAction::RolledBack);
+        assert!(!root.join("record.md").exists());
+        assert_eq!(read_library_revision(&root).unwrap(), 2);
+        cleanup(&root);
+    }
+    #[test]
     fn rollback_advances_revision_after_forward_commit() {
         let root = temp_root("rollback-revision");
         let mut tx = Transaction::prepare(&root).unwrap();
