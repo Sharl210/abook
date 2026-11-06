@@ -80,6 +80,7 @@ def test_modern():
         assert "abook_migrate_activate" in names
         assert "abook_migrate_recover" in names
         assert "abook_migrate_rollback" in names
+        assert "abook_migrate_verify" in names
         assert "abook_commands" in names and "abook_describe" in names and "abook_help" in names
         assert "abook_version" in names and "abook_detect" in names and "abook_upgrade" in names
         for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
@@ -364,7 +365,18 @@ activation body
             assert "result" in activated, activated
             assert activated["result"]["isError"] is False, activated
             backup_root = activated["result"]["structuredContent"]["backup_root"]
-            recovered = send(p, request("mig-recover", "tools/call", {"name": "abook_migrate_recover", "arguments": {"root": activation_root, "recover": True}}))
+            verified = send(p, request("mig-verify", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert verified["result"]["isError"] is False, verified
+            assert verified["result"]["structuredContent"]["status"] == "PASS", verified
+            target = os.path.join(activation_root, "planes", "long_term", "records", "C-20261106T000011-bbbbbbbb.md")
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write("drift")
+            drift = send(p, request("mig-verify-drift", "tools/call", {"name": "abook_migrate_verify", "arguments": {"root": activation_root, "source_root": backup_root, "verify": True}}))
+            assert drift["result"]["isError"] is True, drift
+            assert drift["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY", drift
+            with open(target, "rb+") as handle:
+                handle.truncate(os.path.getsize(target) - len(b"drift"))
+
             assert "result" in recovered, recovered
             assert recovered["result"]["isError"] is True, recovered
             assert recovered["result"]["structuredContent"]["error"]["tag"] == "INTEGRITY"

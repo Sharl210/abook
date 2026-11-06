@@ -388,6 +388,8 @@ const MIGRATE_COMMANDS: &[NestedCommand] = &[
     NestedCommand { group: "migrate", subcommand: "stage", aliases: &[], summary: "构建隔离的六平面迁移暂存树", positionals: "", params: "staging-root", flags: "json", extra_value_args: &[], extra_bool_args: &[] },
     NestedCommand { group: "migrate", subcommand: "activate", aliases: &[], summary: "构建并激活六平面迁移暂存树", positionals: "", params: "staging-root", flags: "activate,json", extra_value_args: &[], extra_bool_args: &[] },
     NestedCommand { group: "migrate", subcommand: "recover", aliases: &[], summary: "恢复中断的迁移激活", positionals: "", params: "", flags: "recover,json", extra_value_args: &[], extra_bool_args: &[] },
+    NestedCommand { group: "migrate", subcommand: "verify", aliases: &[], summary: "只读校验迁移暂存树；可选提供源库做严格对账", positionals: "", params: "staging-root,source-root", flags: "verify,json", extra_value_args: &[], extra_bool_args: &[] },
+
     NestedCommand { group: "migrate", subcommand: "rollback", aliases: &[], summary: "回滚迁移并恢复备份库", positionals: "", params: "backup-root", flags: "rollback,json", extra_value_args: &[], extra_bool_args: &[] },
 ];
 
@@ -713,7 +715,7 @@ mod tests {
         assert_eq!(SKILL_COMMANDS.len(), 10);
         assert_eq!(BRANCH_COMMANDS.len(), 6);
         assert_eq!(TXN_COMMANDS.len(), 4);
-        assert_eq!(MIGRATE_COMMANDS.len(), 5);
+        assert_eq!(MIGRATE_COMMANDS.len(), 6);
     }
 
     #[test]

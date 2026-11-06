@@ -614,94 +614,113 @@ pub fn recover_activation(live_root: &Path) -> R<ActivationReceipt> {
     }
     Err(integrity_error("迁移 receipt 的 live/backup 状态无法安全判定，保留现场供人工恢复"))
 }
+fn json_string(value: &crate::mcp_json::Value, key: &str) -> R<String> {
+    value.str(key).map(str::to_string).ok_or_else(|| integrity_error(format!("迁移清单字段不是字符串: {key}")))
+}
+fn json_usize(value: &crate::mcp_json::Value, key: &str) -> R<usize> {
+    value.get(key).and_then(|v| match v { crate::mcp_json::Value::Number(n) => n.parse().ok(), _ => None }).ok_or_else(|| integrity_error(format!("迁移清单字段不是数字: {key}")))
+}
+fn json_bool(value: &crate::mcp_json::Value, key: &str) -> R<bool> {
+    value.get(key).and_then(|v| match v { crate::mcp_json::Value::Bool(b) => Some(*b), _ => None }).ok_or_else(|| integrity_error(format!("迁移清单字段不是布尔值: {key}")))
+}
+fn checked_file(root: &Path, file: &str) -> R<PathBuf> {
+    let root = canonical_dir(root, "迁移树根目录")?;
+    let path = root.join(file);
+    ensure_within(&root, &path, "迁移清单路径")?;
+    let meta = fs::symlink_metadata(&path).map_err(|_| integrity_error(format!("迁移清单缺失: {}", path.display())))?;
+    if meta.file_type().is_symlink() || !meta.is_file() { return Err(integrity_error(format!("迁移清单不是普通文件: {}", path.display()))); }
+    Ok(path)
+}
+fn json_lines(root: &Path, file: &str) -> R<Vec<crate::mcp_json::Value>> {
+    let path = checked_file(root, file)?;
+    let text = fs::read_to_string(path)?;
+    text.lines().filter(|line| !line.trim().is_empty()).map(|line| crate::mcp_json::parse(line).map_err(|e| integrity_error(format!("{file} JSONL 无效: {e}")))).collect()
+}
+
+pub fn load_staged_from_disk(root: &Path, source_root: &Path) -> R<StagedManifest> {
+    let records = json_lines(root, MANIFEST_JSONL)?.into_iter().map(|v| {
+        let unknown_fields = v.array("unknown_fields").ok_or_else(|| integrity_error("manifest unknown_fields 缺失"))?.iter().map(|x| match x { crate::mcp_json::Value::String(s) => Ok(s.clone()), _ => Err(integrity_error("manifest unknown_fields 元素无效")) }).collect::<R<Vec<_>>>()?;
+        Ok(StagedRecord { source_rel: json_string(&v,"source_rel")?, target_rel: json_string(&v,"target_rel")?, target_plane: json_string(&v,"target_plane")?, source_class: json_string(&v,"source_class")?, classification_basis: json_string(&v,"classification_basis")?, body_sha256: json_string(&v,"body_sha256")?, raw_sha256: json_string(&v,"raw_sha256")?, body_bytes: json_usize(&v,"body_bytes")?, body_lines: json_usize(&v,"body_lines")?, unknown_fields, conflict: json_bool(&v,"conflict")? })
+    }).collect::<R<Vec<_>>>()?;
+    let aliases = json_lines(root, ALIASES_JSONL)?.into_iter().map(|v| {
+        let sources = v.array("sources").ok_or_else(|| integrity_error("aliases sources 缺失"))?.iter().map(|x| match x { crate::mcp_json::Value::String(s) => Ok(s.clone()), _ => Err(integrity_error("aliases sources 元素无效")) }).collect::<R<Vec<_>>>()?;
+        Ok(StagedAlias { alias: json_string(&v,"alias")?, target_rel: json_string(&v,"target_rel")?, sources })
+    }).collect::<R<Vec<_>>>()?;
+    let attachments = json_lines(root, ATTACHMENTS_JSONL)?.into_iter().map(|v| Ok(StagedAttachment { source_rel: json_string(&v,"source_rel")?, target_rel: json_string(&v,"target_rel")?, kind: json_string(&v,"kind")?, bytes: json_usize(&v,"bytes")? as u64, sha256: json_string(&v,"sha256")? })).collect::<R<Vec<_>>>()?;
+    let mut archives = BTreeMap::new();
+    for category in ARCHIVE_KINDS {
+        let entries = json_lines(&root.join(ARCHIVE_DIR), &format!("{category}.jsonl"))?.into_iter().map(|v| {
+            let sha256 = match v.get("sha256") { Some(crate::mcp_json::Value::String(s)) => Some(s.clone()), Some(crate::mcp_json::Value::Null) | None => None, _ => return Err(integrity_error("archive sha256 无效")) };
+            Ok(ArchiveEntry { category: json_string(&v,"category")?, source_rel: json_string(&v,"source_rel")?, kind: json_string(&v,"kind")?, bytes: json_usize(&v,"bytes")? as u64, sha256 })
+        }).collect::<R<Vec<_>>>()?;
+        archives.insert(category.to_string(), entries);
+    }
+    Ok(StagedManifest { source_root: source_root.to_path_buf(), staging_root: root.to_path_buf(), records, aliases, archives, attachments, readable_report: fs::read_to_string(checked_file(root, REPORT_TXT)?)? })
+}
+
+pub fn verify_tree(root: &Path, source_root: Option<&Path>) -> R<(usize, BTreeMap<String, usize>, usize, usize, usize)> {
+    let source = source_root.unwrap_or(root);
+    let staged = load_staged_from_disk(root, source)?;
+    verify_staged_impl(&staged, source_root.is_some())?;
+    let mut planes = BTreeMap::new();
+    for plane in ALL_PLANES { planes.insert(plane.to_string(), staged.records.iter().filter(|r| r.target_plane == plane).count()); }
+    Ok((staged.records.len(), planes, staged.aliases.len(), staged.attachments.len(), staged.archives.values().map(Vec::len).sum()))
+}
 /// Verify an already-built staged tree without modifying it.
 pub fn verify_staged(staged: &StagedManifest) -> R<()> {
+    verify_staged_impl(staged, true)
+}
+
+fn verify_staged_impl(staged: &StagedManifest, strict: bool) -> R<()> {
     let root = canonical_dir(&staged.staging_root, "staging 根目录")?;
     crate::memory_plane::verify_layout(&root)?;
     let source = canonical_dir(&staged.source_root, "源库根目录")?;
-    if paths_overlap(&source, &root) {
-        return Err(integrity_error(format!(
-            "源库与 staging 路径重叠: source={} staging={}",
-            source.display(),
-            root.display()
-        )));
-    }
-    let expected_archives = prepare_archives(&source)?;
-    if expected_archives != staged.archives {
-        return Err(integrity_error("vault/commits/review 只读归档清单与源目录不一致"));
+    if strict {
+        if paths_overlap(&source, &root) {
+            return Err(integrity_error(format!("源库与 staging 路径重叠: source={} staging={}", source.display(), root.display())));
+        }
+        let expected_archives = prepare_archives(&source)?;
+        if expected_archives != staged.archives { return Err(integrity_error("vault/commits/review 只读归档清单与源目录不一致")); }
+        let expected_attachments = expected_attachments(staged)?;
+        if expected_attachments != staged.attachments { return Err(integrity_error("附件清单与源记录目录不一致")); }
+        verify_source_baseline(staged, &source)?;
     }
     verify_archive_copies(&root, &staged.archives)?;
-    let expected_attachments = expected_attachments(staged)?;
-    if expected_attachments != staged.attachments { return Err(integrity_error("附件清单与源记录目录不一致")); }
     verify_attachments(&root, &staged.attachments)?;
 
     for plane in ALL_PLANES {
         let dir = root.join(PLAN_DIR).join(plane).join("records");
-        if !dir.is_dir() || fs::symlink_metadata(&dir)?.file_type().is_symlink() {
-            return Err(integrity_error(format!("缺少 staging 记录目录: {}", dir.display())));
-        }
+        if !dir.is_dir() || fs::symlink_metadata(&dir)?.file_type().is_symlink() { return Err(integrity_error(format!("缺少 staging 记录目录: {}", dir.display()))); }
     }
-
     let mut seen = BTreeSet::new();
     for record in &staged.records {
         validate_relative(&record.target_rel, "目标记录路径")?;
-        if !seen.insert(record.target_rel.clone()) {
-            return Err(integrity_error(format!("目标记录路径重复: {}", record.target_rel)));
-        }
+        if !seen.insert(record.target_rel.clone()) { return Err(integrity_error(format!("目标记录路径重复: {}", record.target_rel))); }
         let target = root.join(&record.target_rel);
         ensure_within(&root, &target, "目标记录路径")?;
-        let metadata = fs::symlink_metadata(&target).map_err(|_| {
-            integrity_error(format!("staging 缺少记录文件: {}", target.display()))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(integrity_error(format!("目标记录不是普通文件: {}", target.display())));
-        }
+        let metadata = fs::symlink_metadata(&target).map_err(|_| integrity_error(format!("staging 缺少记录文件: {}", target.display())))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() { return Err(integrity_error(format!("目标记录不是普通文件: {}", target.display()))); }
         let raw = fs::read(&target)?;
-        if sha256::digest_hex(&raw) != record.raw_sha256 {
-            return Err(integrity_error(format!("记录原文 SHA256 不匹配: {}", record.target_rel)));
-        }
-        let parsed = Record::parse_str(
-            std::str::from_utf8(&raw)
-                .map_err(|_| integrity_error(format!("记录不是 UTF-8: {}", record.target_rel)))?,
-            &target,
-            lib_from_target(&record.target_plane),
-        )?;
-        if body_digest(&parsed.body) != record.body_sha256 {
-            return Err(integrity_error(format!("记录正文 SHA256 不匹配: {}", record.target_rel)));
-        }
-        let unknown = unknown_fields(&parsed);
-        if unknown != record.unknown_fields {
-            return Err(integrity_error(format!("未知字段清单不匹配: {}", record.target_rel)));
-        }
+        if sha256::digest_hex(&raw) != record.raw_sha256 { return Err(integrity_error(format!("记录原文 SHA256 不匹配: {}", record.target_rel))); }
+        let parsed = Record::parse_str(std::str::from_utf8(&raw).map_err(|_| integrity_error(format!("记录不是 UTF-8: {}", record.target_rel)))?, &target, lib_from_target(&record.target_plane))?;
+        if body_digest(&parsed.body) != record.body_sha256 { return Err(integrity_error(format!("记录正文 SHA256 不匹配: {}", record.target_rel))); }
+        if unknown_fields(&parsed) != record.unknown_fields { return Err(integrity_error(format!("未知字段清单不匹配: {}", record.target_rel))); }
     }
-
-    let expected_manifest_jsonl = render_manifest_jsonl(&staged.records);
-    let expected_manifest_tsv = render_manifest_tsv(&staged.records);
-    check_text(&root.join(MANIFEST_JSONL), &expected_manifest_jsonl)?;
-    check_text(&root.join(MANIFEST_TSV), &expected_manifest_tsv)?;
-
-    let expected_aliases_jsonl = render_aliases_jsonl(&staged.aliases);
-    let expected_aliases_tsv = render_aliases_tsv(&staged.aliases);
-    check_text(&root.join(ALIASES_JSONL), &expected_aliases_jsonl)?;
-    check_text(&root.join(ALIASES_TSV), &expected_aliases_tsv)?;
-
+    check_text(&root.join(MANIFEST_JSONL), &render_manifest_jsonl(&staged.records))?;
+    check_text(&root.join(MANIFEST_TSV), &render_manifest_tsv(&staged.records))?;
+    check_text(&root.join(ALIASES_JSONL), &render_aliases_jsonl(&staged.aliases))?;
+    check_text(&root.join(ALIASES_TSV), &render_aliases_tsv(&staged.aliases))?;
     for category in ARCHIVE_KINDS {
         let entries = staged.archives.get(category).cloned().unwrap_or_default();
-        check_text(
-            &root.join(ARCHIVE_DIR).join(format!("{category}.jsonl")),
-            &render_archive_jsonl(&entries),
-        )?;
-        check_text(
-            &root.join(ARCHIVE_DIR).join(format!("{category}.tsv")),
-            &render_archive_tsv(&entries),
-        )?;
+        check_text(&root.join(ARCHIVE_DIR).join(format!("{category}.jsonl")), &render_archive_jsonl(&entries))?;
+        check_text(&root.join(ARCHIVE_DIR).join(format!("{category}.tsv")), &render_archive_tsv(&entries))?;
     }
-
     check_text(&root.join(ATTACHMENTS_JSONL), &render_attachments_jsonl(&staged.attachments))?;
     check_text(&root.join(ATTACHMENTS_TSV), &render_attachments_tsv(&staged.attachments))?;
     check_text(&root.join(REPORT_TXT), &staged.readable_report)?;
     Ok(())
 }
+
 
 struct PreparedRecord {
     source: PathBuf,
@@ -1369,7 +1388,36 @@ mod tests {
     }
 
     #[test]
-    fn activation_verifies_switch_and_rollback_keeps_both_trees_recoverable() {
+    fn disk_verify_supports_strict_source_check_and_detects_drift_without_writing() {
+        let root = temp_dir("verify-disk");
+        fs::create_dir_all(root.join("canonical/records")).unwrap();
+        fs::create_dir_all(root.join("candidate/records")).unwrap();
+        let source_record = root.join("canonical/records/C-20261101T120000-bbbbbbbb.md");
+        fs::write(&source_record, record(Lib::Canonical, "C-20261101T120000-bbbbbbbb", "X_UNKNOWN=kept", "body\nsecond")).unwrap();
+        let manifest = migration::scan(&root).unwrap();
+        let staging = root.parent().unwrap().join(format!("{}-verify-stage", root.file_name().unwrap().to_string_lossy()));
+        let staged = build_staged(&manifest, &staging).unwrap();
+        let before = tree_digest(&staging).unwrap();
+        let (records, planes, _, attachments, _) = verify_tree(&staging, None).unwrap();
+        assert_eq!(records, 1);
+        assert_eq!(planes.get("long_term"), Some(&1));
+        assert_eq!(attachments, 0);
+        assert_eq!(tree_digest(&staging).unwrap(), before);
+        let receipt = activate_staged(&staged).unwrap();
+        verify_tree(&root, Some(&receipt.backup_root)).unwrap();
+        let target = root.join(&staged.records[0].target_rel);
+        let original = fs::read(&target).unwrap();
+        let mut changed = original.clone();
+        changed.push(b'!');
+        fs::write(&target, &changed).unwrap();
+        assert!(verify_tree(&root, Some(&receipt.backup_root)).is_err());
+        fs::write(&target, original).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&receipt.backup_root);
+        let _ = fs::remove_dir_all(&staging);
+    }
+
+
         let root = temp_dir("activation");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
