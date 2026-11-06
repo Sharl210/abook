@@ -228,6 +228,20 @@ def test_memory_tools():
         written = send(p, request("m1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "偏好", "read_when": "查偏好", "content": "第一行\n第二行 😀"}}))
         assert written["result"]["isError"] is False, written
 
+        routed_memory = send(p, request("m-route-write", "tools/call", {"name": "abook_memory", "arguments": {"subcommand": "write", "root": root, "plane": "explicit", "title": "route body", "read_when": "MCP top-level route", "body": "MCP line one\nMCP line two 😀"}}))
+        assert routed_memory["result"]["isError"] is False, routed_memory
+        routed_stdout = routed_memory["result"]["structuredContent"]["stdout"]
+        routed_record = json.loads(routed_stdout)
+        assert routed_record["content"] == "MCP line one\nMCP line two 😀", routed_record
+        marker_recall = subprocess.run([BIN, "recall", "第二行", "--body", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True)
+        assert marker_recall.returncode == 0, marker_recall.stderr
+        marker_recall_value = json.loads(marker_recall.stdout)
+        assert marker_recall_value["total"] >= 1 and marker_recall_value["items"], marker_recall_value
+        alias_write = subprocess.run([BIN, "add", "--root", root, "--title", "alias body", "--read-when", "alias parser", "--body", "alias line one\nalias line two 😀", "--json"], text=True, encoding="utf-8", capture_output=True)
+        assert alias_write.returncode == 0, alias_write.stderr
+        alias_record = json.loads(alias_write.stdout)
+        assert alias_record["content"] == "alias line one\nalias line two 😀", alias_record
+
         record = written["result"]["structuredContent"]
         extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
         assert extra["result"]["isError"] is False, extra

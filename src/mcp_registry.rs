@@ -216,16 +216,29 @@ pub fn build_argv(tool_name: &str, args: &Value) -> Result<Vec<String>, String> 
     } else {
         Vec::new()
     };
+    let mut positional_args = Vec::new();
     if !positional.is_empty() {
         let max = positional.keys().copied().max().unwrap_or(0);
         let mut slots = vec![String::new(); max + 1];
         for (i, values) in positional { if values.len() == 1 { slots[i] = values[0].clone(); } else { slots[i] = values.join("\u{0000}"); } }
-        for slot in slots { if slot.contains('\u{0000}') { out.extend(slot.split('\u{0000}').map(str::to_string)); } else if !slot.is_empty() { out.push(slot); } }
+        for slot in slots {
+            if slot.contains('\u{0000}') {
+                positional_args.extend(slot.split('\u{0000}').map(str::to_string));
+            } else if !slot.is_empty() {
+                positional_args.push(slot);
+            }
+        }
     }
-    // CLI parsers need the memory subcommand in argv before its flags. Append it
-    // ahead of options; then values/booleans cannot be confused with the route.
-    if !positional_route.is_empty() { out.extend(positional_route); }
-    out.extend(flag_args);
+    // `memory` has a route positional (`write`, `update`, ...), which must be
+    // visible before body/content flags so the CLI parser can select its schema.
+    if tool.command == "memory" {
+        out.extend(positional_route);
+        out.extend(positional_args);
+        out.extend(flag_args);
+    } else {
+        out.extend(flag_args);
+        out.extend(positional_args);
+    }
     if tool.legacy_flag_suppression.inject_json { out.push("--json".into()); }
     Ok(out)
 }
@@ -625,14 +638,14 @@ mod tests {
             ("root", Value::s("/tmp/memory")),
             ("plane", Value::s("explicit")),
             ("title", Value::s("T")),
-            ("content", Value::s("body")),
+            ("body", Value::s("body\nsecond line")),
         ]);
         let argv = build_argv("abook_memory", &args).expect("build memory route");
         assert_eq!(argv.first().map(String::as_str), Some("memory"));
         assert_eq!(argv.get(1).map(String::as_str), Some("write"));
         let parsed = crate::util::Args::parse(&argv).expect("parse routed memory argv");
         assert_eq!(parsed.pos, vec!["write"]);
-        assert_eq!(parsed.get("content"), Some("body"));
+        assert_eq!(parsed.get("body"), Some("body\nsecond line"));
     }
 
     #[test]
