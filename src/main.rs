@@ -46,6 +46,7 @@ mod mcp;
 mod mcp_registry;
 mod migration;
 mod memory_plane;
+mod cmd_memory;
 mod txn;
 
 use std::io::IsTerminal;
@@ -127,7 +128,9 @@ fn help_text() -> String {
   staging resolve <名> --decision 结论 [--ref 记录ID]
                             结清一件：原文保留，结论追加，移入 staging/closed/
   review [关键词]           晋升记录；--show <名> 看全文
-  export [--format jsonl|md] [--out 文件] [--lib L]   导出，支持分页
+  memory <子命令>           新平面主链：context/export/write/read/list/search/update/delete/restore
+      --plane soul|rules|profile|explicit|long_term|episodic
+      --root PATH --id ID --title T --content TEXT --read-when W --query Q
 
 ═══ 写：改动（正式库需 --approve）═══
   write --title T --read-when W --body-file F
@@ -1183,6 +1186,7 @@ fn routes() -> &'static [(&'static str, Handler)] {
         ("-V", cmd_version),
         ("describe", cmd_branch::cmd_describe),
         // -- read
+        ("memory", cmd_memory::cmd_memory),
         ("state", cmd_read::cmd_state),
         ("stats", cmd_read::cmd_stats),
         ("recall", cmd_read::cmd_recall),

@@ -85,7 +85,9 @@ pub fn run_stdio() -> i32 {
                 continue;
             }
         } else {
-            match modern_meta_version(&parsed) {
+            let metadata_optional = method == "server/discover"
+                && parsed.get("params").and_then(|p| p.get("_meta")).is_none();
+            match if metadata_optional { Ok(MODERN.to_string()) } else { modern_meta_version(&parsed) } {
                 Err(message) => { write_error(&mut stdout, id, -32602, &message, None); continue; }
                 Ok(version) if version != MODERN && method != "server/discover" => {
                     write_error(&mut stdout, id, -32022, &format!("不支持 MCP 协议版本 {version}"), Some(obj(vec![("supported", Value::arr(vec![Value::s(MODERN)])), ("requested", Value::s(version))])));
@@ -154,14 +156,14 @@ fn instructions() -> &'static str {
 
 fn tools_list(_legacy: bool) -> Value {
     let mut tools: Vec<Value> = crate::mcp_registry::public_tools().iter().map(|t| t.to_mcp_value()).collect();
-    for (name, desc) in [
+    for (name, description) in [
         ("memory_help", "读取 abook 的机器可读帮助和命令描述。"),
         ("spec_list", "列出内置规范主题。"),
         ("spec_get", "读取一份内置规范全文。"),
         ("skill_list", "列出已安装 Skill。"),
-        ("skill_read", "读取 Skill。"),
+        ("skill_read", "读取 Skill 正文。"),
         ("system_update", "一次调用完成更新检查、下载、校验、替换和自检。"),
-    ] { tools.push(tool(name, desc)); }
+    ] { tools.push(helper_tool(name, description)); }
     tools.extend(memory_tools());
     tools.extend(batch_tools());
     tools.sort_by(|a, b| a.str("name").cmp(&b.str("name")));
@@ -323,18 +325,37 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
     }
 }
 
-fn tool(name: &str, description: &str) -> Value {
-    obj(vec![
-        ("name", Value::s(name)),
-        ("description", Value::s(description)),
-        ("inputSchema", obj(vec![
-            ("type", Value::s("object")),
-            ("properties", obj(vec![
-                ("argv", obj(vec![("type", Value::s("array")), ("items", obj(vec![("type", Value::s("string"))]))])),
-                ("root", obj(vec![("type", Value::s("string"))])),
-            ])),
-        ])),
-    ])
+fn helper_tool(name: &str, description: &str) -> Value {
+    let (properties, required): (Vec<(&str, Value)>, Vec<Value>) = match name {
+        "spec_get" => (vec![("name", obj(vec![("type", Value::s("string"))]))], vec![Value::s("name")]),
+        "skill_list" => (vec![("root", obj(vec![("type", Value::s("string"))]))], vec![]),
+        "skill_read" => (vec![("name", obj(vec![("type", Value::s("string"))])), ("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("name")]),
+        _ => (vec![], vec![]),
+    };
+    batch_tool(name, description, properties, required)
+}
+
+fn validate_helper_args(name: &str, args: &Value) -> Result<(), String> {
+    let Value::Object(values) = args else { return Err("helper 工具 arguments 必须是对象".into()); };
+    let allowed: &[&str] = match name {
+        "spec_get" => &["name"],
+        "skill_list" => &["root"],
+        "skill_read" => &["name", "root"],
+        "memory_help" | "spec_list" | "system_update" => &[],
+        _ => return Err(format!("未知 helper 工具: {name}")),
+    };
+    for key in values.keys() {
+        if !allowed.contains(&key.as_str()) { return Err(format!("工具参数未声明: {key}")); }
+    }
+    if matches!(name, "spec_get" | "skill_read") && values.get("name").and_then(|v| v.str()).filter(|s| !s.is_empty()).is_none() {
+        return Err(format!("{name} 缺少必填参数 name"));
+    }
+    for key in ["name", "root"] {
+        if let Some(value) = values.get(key) {
+            if value.str().is_none() { return Err(format!("工具参数 {key} 必须是字符串")); }
+        }
+    }
+    Ok(())
 }
 
 fn resources_list(_legacy: bool) -> Value {
@@ -366,25 +387,33 @@ fn resource(uri: &str, name: &str, mime: &str) -> Value {
 
 fn resources_read(req: &Value, _legacy: bool) -> Value {
     let uri = req.get("params").and_then(|p| p.str("uri")).unwrap_or("");
-    let (text, mime) = if uri == "abook://instructions" { (Some(instructions().to_string()), "text/plain") }
-    else if uri == "abook://help" { (Some(crate::help_text_public()), "text/plain") }
-    else if uri == "abook://state" { (Some(run_cli_text(&vec!["state".into(), "--json".into()], None).0), "application/json") }
+    let cli_text = |argv: Vec<String>, mime: &str| {
+        let (stdout, stderr, code) = run_cli_text(&argv, None);
+        if code == 0 {
+            Ok((stdout, mime.to_string()))
+        } else {
+            let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+            Err(error_value(-32602, &format!("读取资源失败（exit={code}）：{}", detail.trim()), None))
+        }
+    };
+    let loaded: Result<(String, String), Value> = if uri == "abook://instructions" { Ok((instructions().to_string(), "text/plain".into())) }
+    else if uri == "abook://help" { Ok((crate::help_text_public(), "text/plain".into())) }
+    else if uri == "abook://state" { cli_text(vec!["state".into(), "--json".into()], "application/json") }
     else if let Some(name) = uri.strip_prefix("abook://spec/") {
         if !valid_resource_segment(name) { return error_value(-32602, "非法 spec 资源名", None); }
-        (Some(run_cli_text(&vec!["spec".into(), name.into(), "--json".into()], None).0), "text/markdown")
+        cli_text(vec!["spec".into(), name.into(), "--json".into()], "text/markdown")
     }
     else if let Some(name) = uri.strip_prefix("abook://skill/") {
         if !valid_resource_segment(name) { return error_value(-32602, "非法 Skill 资源名", None); }
-        (Some(run_cli_text(&vec!["skill".into(), "show".into(), name.into(), "--json".into()], None).0), "text/markdown")
+        cli_text(vec!["skill".into(), "show".into(), name.into(), "--json".into()], "text/markdown")
     }
-    else { (None, "text/plain") };
-    match text {
-        Some(t) => complete(obj(vec![
-            ("contents", Value::arr(vec![obj(vec![("uri", Value::s(uri)), ("mimeType", Value::s(mime)), ("text", Value::s(t))])])),
-            ("ttlMs", Value::n("60000")),
-            ("cacheScope", Value::s("private")),
+    else { return error_value(-32602, &format!("资源不存在: {uri}"), None); };
+    match loaded {
+        Ok((text, mime)) => complete(obj(vec![
+            ("contents", Value::arr(vec![obj(vec![("uri", Value::s(uri)), ("mimeType", Value::s(mime)), ("text", Value::s(text))])])),
+            ("ttlMs", Value::n("60000")), ("cacheScope", Value::s("private")),
         ])),
-        None => error_value(-32602, &format!("资源不存在: {uri}"), None),
+        Err(error) => error,
     }
 }
 
@@ -467,11 +496,22 @@ fn tool_is_registered(name: &str) -> bool {
 
 fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<String>), String> {
     let a = args.cloned().unwrap_or_else(|| obj(vec![]));
+    if matches!(name, "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update") {
+        validate_helper_args(name, &a)?;
+    }
     if name == "memory_help" { return Ok((vec!["help".into()], None)); }
     if name == "spec_list" { return Ok((vec!["spec".into(), "--json".into()], None)); }
     if name == "spec_get" { return Ok((vec!["spec".into(), a.str("name").ok_or("spec_get 缺少 name")?.into(), "--json".into()], None)); }
-    if name == "skill_list" { return Ok((vec!["skill".into(), "list".into(), "--json".into()], None)); }
-    if name == "skill_read" { return Ok((vec!["skill".into(), "read".into(), a.str("name").ok_or("skill_read 缺少 name")?.into(), "--json".into()], None)); }
+    if name == "skill_list" {
+        let mut argv = vec!["skill".into(), "list".into(), "--json".into()];
+        if let Some(root) = a.str("root") { argv.extend(["--root".into(), root.into()]); }
+        return Ok((argv, None));
+    }
+    if name == "skill_read" {
+        let mut argv = vec!["skill".into(), "show".into(), a.str("name").ok_or("skill_read 缺少 name")?.into(), "--json".into()];
+        if let Some(root) = a.str("root") { argv.extend(["--root".into(), root.into()]); }
+        return Ok((argv, None));
+    }
     if name == "system_update" { return Ok((vec!["upgrade".into(), "--json".into()], None)); }
     if name.starts_with("abook_") {
         return match crate::mcp_registry::build_argv(name, &a) {

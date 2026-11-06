@@ -161,7 +161,7 @@ pub const PROMPTS: &[PromptDefinition] = &[
 /// All descriptors, including hidden compatibility entries. Sorted by MCP name.
 pub fn all_tools() -> Vec<ToolDefinition> {
     let mut out = Vec::new();
-    for route in crate::known_commands().iter().copied() {
+    for route in crate::known_commands().iter().copied().filter(|route| !route.starts_with('-')) {
         out.push(top_level_tool(route));
     }
     add_nested_tools(&mut out);
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn every_non_option_route_has_exactly_one_top_level_descriptor() {
         let tools = all_tools();
-        let routes: Vec<&str> = crate::known_commands().iter().copied().collect();
+        let routes: Vec<&str> = crate::known_commands().iter().copied().filter(|route| !route.starts_with('-')).collect();
         for route in &routes {
             let count = tools.iter().filter(|tool| tool.route == *route && tool.command == *route).count();
             assert_eq!(count, 1, "route {route} should have one top-level descriptor");
@@ -604,7 +604,7 @@ mod tests {
     fn special_route_names_are_unique_and_never_collide_with_subcommands() {
         let tools = all_tools();
         assert_eq!(names(&tools).len(), tools.len());
-        for route in crate::known_commands().iter().copied() {
+        for route in crate::known_commands().iter().copied().filter(|route| !route.starts_with('-')) {
             assert!(tools.iter().any(|tool| tool.command == route), "missing route {route}");
         }
     }

@@ -152,7 +152,7 @@ pub const KNOWN_PARAMS: &[&str] = &[
     "from", "id", "ids", "in", "into", "json-depth", "kb", "keep",
     "keys", "kind", "level", "lib", "library", "match", "maturity", "max",
     "min-score", "mode", "name", "new", "next", "not-for", "old", "operation",
-    "out", "page", "path", "per", "per-page", "preview-token", "project", "purpose", "q",
+    "out", "page", "path", "per", "per-page", "plane", "preview-token", "project", "purpose", "q",
     "query", "read-when", "reason", "related", "root", "scope", "session", "show",
     "since", "size", "slug", "source", "staging-root", "status", "stdin", "summary", "supersedes",
     "tag", "target", "task", "text", "tier", "title", "to", "token",

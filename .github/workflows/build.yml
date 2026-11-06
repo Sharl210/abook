@@ -125,6 +125,30 @@ jobs:
         run: cargo build --release
       - name: MCP stdio smoke
         run: python3 tests/mcp_stdio.py target/release/abook
+      - name: 六平面 CLI 主链 smoke
+        run: |
+          set -euo pipefail
+          ROOT="$(mktemp -d)"
+          trap 'rm -rf "$ROOT"' EXIT
+          WRITTEN="$(./target/release/abook memory write --root "$ROOT" --plane explicit --title 'CI CLI' --read-when 'CI CLI memory' --content $'第一行\n第二行 😀' --json)"
+          python3 - "$WRITTEN" <<'PY'
+          import json, sys
+          value = json.loads(sys.argv[1])
+          assert value["plane"] == "explicit"
+          assert value["content"] == "第一行\n第二行 😀"
+          print(value["id"])
+          PY
+          ./target/release/abook memory context --root "$ROOT" --json
+          ./target/release/abook memory export --root "$ROOT" --plane explicit --json
+      - name: 内置自检
+        run: |
+          set -euo pipefail
+          ROOT="$(mktemp -d)"
+          trap 'rm -rf "$ROOT"' EXIT
+          mkdir -p "$ROOT/canonical/records" "$ROOT/candidate/records"
+          printf '%s\n' '[CANONICAL_MEMORY]' 'ID=C-20261106T000000-aaaaaaaa' 'TITLE=CI fixture one' 'KIND=DECISION' 'READ_WHEN=CI selftest' '[/CANONICAL_MEMORY]' '[MEMORY_BODY]' 'fixture body one' '[/MEMORY_BODY]' > "$ROOT/canonical/records/C-20261106T000000-aaaaaaaa.md"
+          printf '%s\n' '[CANONICAL_MEMORY]' 'ID=C-20261106T000001-bbbbbbbb' 'TITLE=CI fixture two' 'KIND=DECISION' 'READ_WHEN=CI selftest' '[/CANONICAL_MEMORY]' '[MEMORY_BODY]' 'fixture body two' '[/MEMORY_BODY]' > "$ROOT/canonical/records/C-20261106T000001-bbbbbbbb.md"
+          ABOOK_ROOT="$ROOT" ./target/release/abook selftest --json
       - name: 迁移激活回滚 smoke
         run: |
           set -euo pipefail

@@ -52,7 +52,7 @@ def request(i, method, params=None, version=MODERN, add_meta=True):
 def test_modern():
     p = start()
     try:
-        d = send(p, request("d", "server/discover"))
+        d = send(p, request("d", "server/discover", add_meta=False))
         assert d["id"] == "d"
         dr = d["result"]
         assert dr["resultType"] == "complete"
@@ -63,13 +63,29 @@ def test_modern():
         tools = send(p, request("t", "tools/list"))["result"]
         assert tools["resultType"] == "complete"
         assert tools["ttlMs"] >= 0
+        assert all(isinstance(x.get("inputSchema"), dict) for x in tools["tools"])
         names = [x["name"] for x in tools["tools"]]
         assert names == sorted(names)
         assert len(names) == len(set(names))
-        assert all(isinstance(x.get("inputSchema"), dict) for x in tools["tools"])
+        assert "abook_route_--help" not in names
+        assert "abook_route_-h" not in names
+        helper = {x["name"]: x["inputSchema"] for x in tools["tools"] if x["name"] in {"memory_help", "spec_list", "spec_get", "skill_list", "skill_read", "system_update"}}
+        assert "argv" not in helper["memory_help"]["properties"]
+        assert helper["memory_help"]["additionalProperties"] is False
+        assert helper["spec_get"]["required"] == ["name"]
+        assert helper["skill_read"]["required"] == ["name"]
+        assert "root" in helper["skill_read"]["properties"]
 
         resources = send(p, request("r", "resources/list"))["result"]
         assert resources["resultType"] == "complete"
+        read_help = send(p, request("rr", "resources/read", {"uri": "abook://help"}))
+        assert read_help["result"]["contents"][0]["text"]
+        missing_resource = send(p, request("rr-missing", "resources/read", {"uri": "abook://spec/__does_not_exist__"}))
+        assert missing_resource["error"]["code"] == -32602
+        helper_unknown = send(p, request("helper-extra", "tools/call", {"name": "spec_list", "arguments": {"extra": True}}))
+        assert helper_unknown["error"]["code"] == -32602
+        helper_missing = send(p, request("helper-missing", "tools/call", {"name": "spec_get", "arguments": {}}))
+        assert helper_missing["error"]["code"] == -32602
         templates = send(p, request("rt", "resources/templates/list"))["result"]
         assert templates["resultType"] == "complete"
         prompts = send(p, request("p", "prompts/list"))["result"]
