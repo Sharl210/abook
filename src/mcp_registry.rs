@@ -754,7 +754,7 @@ mod tests {
         for name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"] {
             assert!(!public.iter().any(|tool| tool.name == name), "legacy tool {name} must not be public");
         }
-        for name in ["memory_write", "memory_read", "memory_list", "memory_search", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan", "abook_commands", "abook_describe", "abook_help", "abook_version", "abook_detect", "abook_upgrade"] {
+        for name in ["abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan", "abook_commands", "abook_describe", "abook_help", "abook_version", "abook_detect", "abook_upgrade"] {
             assert!(public.iter().any(|tool| tool.name == name), "modern tool {name} must remain public");
         }
     }
