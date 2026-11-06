@@ -230,8 +230,7 @@ def test_memory_tools():
 
         routed_memory = send(p, request("m-route-write", "tools/call", {"name": "abook_memory", "arguments": {"subcommand": "write", "root": root, "plane": "explicit", "title": "route body", "read_when": "MCP top-level route", "body": "MCP line one\nMCP line two 😀"}}))
         assert routed_memory["result"]["isError"] is False, routed_memory
-        routed_stdout = routed_memory["result"]["structuredContent"]["stdout"]
-        routed_record = json.loads(routed_stdout)
+        routed_record = routed_memory["result"]["structuredContent"]
         assert routed_record["content"] == "MCP line one\nMCP line two 😀", routed_record
         marker_recall = subprocess.run([BIN, "recall", "第二行", "--body", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True)
         assert marker_recall.returncode == 0, marker_recall.stderr
