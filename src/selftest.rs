@@ -4012,11 +4012,18 @@ fn run_tool_script(script: &std::path::Path, root: &std::path::Path, extra: &[&s
     if let Some(me) = self_path() {
         cmd.env("ABOOK_BIN", me);
     }
-    for a in extra {
-        cmd.arg(a);
+    let out = cmd.output();
+    match out {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stdout.trim().is_empty() { eprintln!("文档扫描 stdout:\n{stdout}"); }
+            if !stderr.trim().is_empty() { eprintln!("文档扫描 stderr:\n{stderr}"); }
+            false
+        }
+        Err(e) => { eprintln!("文档扫描启动失败: {e}"); false }
     }
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
-}
 
 fn ok_workflow(script: &std::path::Path, root: &std::path::Path) -> bool {
     run_tool_script(script, root, &[])
