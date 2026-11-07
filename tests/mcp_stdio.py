@@ -251,6 +251,9 @@ def test_memory_tools():
         empty_root = tempfile.mkdtemp(prefix="abook-mcp-empty-")
         empty_init = send(p, request("m0-init", "tools/call", {"name": "memory_init", "arguments": {"root": empty_root}}))
         assert empty_init["result"]["isError"] is False, empty_init
+        vault_probe = send(p, request("m0-vault", "tools/call", {"name": "abook_vault_put", "arguments": {"root": empty_root, "ident": "marker-regression", "purpose": "test only", "body": "dummy"}}))
+        assert vault_probe["result"]["isError"] is False, vault_probe
+        assert not os.path.exists(os.path.join(empty_root, ".numbers")), "vault write must not contaminate six-plane root"
         empty_index = send(p, request("m0-index", "tools/call", {"name": "memory_index", "arguments": {"root": empty_root, "plane": "all"}}))
         assert empty_index["result"]["isError"] is False, empty_index
         assert empty_index["result"]["structuredContent"]["total"] == 0
