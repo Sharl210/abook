@@ -45,8 +45,7 @@ def _default_sample():
 
 
 SAMPLE = _default_sample()
-ABOOK = os.path.join(ROOT, "target", "release", "abook")
-
+ABOOK = os.environ.get("ABOOK_BIN", os.path.join(ROOT, "target", "release", "abook"))
 # `shell=True` defaults to /bin/sh, which does not exist on this on-device
 # Android prefix (it lives under the Termux-style prefix). Pick one that does.
 SHELL = next(
