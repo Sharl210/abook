@@ -753,6 +753,48 @@ if crate::util::Args::known("per-page") {
         }
     }
 
+    // ---- every advertised spec topic must actually exist
+    //
+    // help 里那句"可用：plan ulw …"曾经只写到 7 个主题，而 `abook spec` 实际
+    // 有 13 个。少写不会报错，只会让人以为 attach/vault/integrity 这些规范
+    // 不存在，于是永远不去读。机械核对两处清单，比靠人记得改靠谱。
+    {
+        let help = crate::help_text();
+        let advertised: Vec<String> = help
+            .lines()
+            .skip_while(|l| !l.contains("spec       不带名字列目录"))
+            .take(4)
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("可用：") || t.starts_with("attach ")
+            })
+            .flat_map(|l| {
+                l.split(|c: char| c.is_whitespace() || c == '：')
+                    .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase()))
+                    .map(|w| w.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let actual = crate::spec_text::topic_names();
+        let missing: Vec<&str> = actual
+            .iter()
+            .copied()
+            .filter(|t| !advertised.iter().any(|a| a == t))
+            .collect();
+        if missing.is_empty() && !actual.is_empty() {
+            pass += 1;
+            if verbose {
+                msgs.push(format!("PASS  帮助列全了 spec 主题（{} 个）", actual.len()));
+            }
+        } else {
+            fail += 1;
+            msgs.push(format!(
+                "FAIL  帮助漏掉了 spec 主题: {}",
+                missing.join(", ")
+            ));
+        }
+    }
+
     // ---- every advertised search tier must actually route somewhere different
     //
     // `--deep` was read only inside `semantic_search`, so `search 词 --deep`

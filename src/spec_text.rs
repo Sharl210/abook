@@ -176,3 +176,11 @@ pub const SUMMARIES: &[(&str, &str)] = &[
     ("integrity", "输出完整性规范：命令输出是证据本体，禁一切截断管道、截断按未读论、四类易切坏信息、反向判据、不分页命令的合规出路"),
     ("ui", "UI 与复合文档规范：触发、Skill 发现、交付门、图文绑定、来源可溯、递归解析完备"),
 ];
+
+/// Every spec topic name, in the same order `abook spec` lists them.
+///
+/// Exists so the self-test can compare the help screen against reality instead of
+/// trusting that someone remembered to add a name in two places.
+pub fn topic_names() -> Vec<&'static str> {
+    SUMMARIES.iter().map(|(name, _)| *name).collect()
+}

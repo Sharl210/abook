@@ -288,6 +288,7 @@ fn help_text() -> String {
                      Skill 约定与候选反哺；候选落 ~/AgentSkills/<名>/candidates/
   spec       不带名字列目录；spec <名> 取回该规范全文
                      可用：plan ulw security compaction maintenance magic skill
+                           attach vault stopbudget integrity ui promote
   detect  install  upgrade  self-update  version  selftest  migrate  txn  recover  help
 
 ═══ 参数拼写容错 ═══
