@@ -173,7 +173,11 @@ def first_canonical(lib):
         capture_output=True, text=True, env=env_for(lib),
     ).stdout
     m = re.search(r'"id":\s*"([^"]+)"', out)
-    return m.group(1) if m else ""
+    if m:
+        return m.group(1)
+    records = os.path.join(lib, "canonical", "records")
+    names = sorted(n for n in os.listdir(records) if n.endswith(".md")) if os.path.isdir(records) else []
+    return os.path.splitext(names[0])[0] if names else ""
 
 
 def first_vault_id(lib):
