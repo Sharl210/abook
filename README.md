@@ -75,6 +75,10 @@ abook upgrade --check --json
 
 MCP 客户端优先通过 `server/discover`、`tools/list` 和 `memory_help` 发现完整接口；正文使用结构化参数传输，不拼接 shell 命令。普通记忆平面为 `soul`、`rules`、`profile`、`explicit`、`long_term`、`episodic`，`credentials` 只通过独立 vault 工具访问。
 
+**优先用 MCP 工具，不是命令行。** 凡本服务已把能力暴露成工具，任务与执行就走工具调用；命令行只覆盖工具未涉及的场合以及历史库迁移。同一件事两者都能做时，工具是默认路径。
+
+**环境还没接 MCP 时，先配 MCP 再干活。** 拿到可执行文件后的第一件事是为当前环境接入本服务，配好再开始。具体怎么配取决于所在环境的实际机制——宿主文档、现有配置文件、自己探查都能给出答案，不必套用别的宿主的写法。
+
 旧 CLI 的 `write`、`promote`、`canonical`、`candidate` 等命令仅用于历史库兼容和迁移，不属于新的 MCP 记忆生命周期。
 
 完整清单 `abook commands`，单条契约 `abook describe <命令>`。
