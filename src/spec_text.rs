@@ -153,6 +153,8 @@ pub const SPECS: &[(&str, &str)] = &[
 "#),
     ("ui", r#"
 `UI_PRESENTATION_TRIGGER`=目标包含页面、应用界面、组件、原型或屏幕交互.`UI_SKILL_DISCOVERY_GATE`=首次设计/实现/渲染前只读已暴露Skill元数据,匹配则应用;不可用不降低目标.`UI_PRESENTATION_DELIVERY_GATE`=按用户视觉目标、信息层级、交互状态和已获得的渲染/测试证据交付;无实际证据禁编造视觉结论,成品禁泄露开发信息.
+`UI_SECONDARY_LABEL_RULE`=Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining.
+`PUBLICATION_SURFACE_PURIFICATION_GATE`=AI为用户制作HTML、应用界面、前端页面、前端文档、说明页或其他展示内容时,不得把AI对自己说的开发用语、实现过程、设计思路、内部注意事项、自我提醒、调试信息或工作指令写进用户可见的页面、文档、说明、界面文本、元数据或发布产物;这些内容留在后端代码注释、内部维护文档或开发记录中;前端和用户文档只保留面向用户的产品内容与必要说明,避免污染观感、泄露内部信息,并确保真正需要维护说明的后端代码位置保留对应注释.
 `COMPOSITE_DOCUMENT_PARSE_TRIGGER`=任务要求理解、提取、总结、比较、翻译或审计含页面、图片、附件、嵌入对象、归档或媒体的复合文档.`DOCUMENT_MUST_BIND_VISUAL_GATE`=文字、图片、图表、截图、附件和媒体须放回原上下文共同理解,禁图文割裂或只读文字.`DOCUMENT_OUTPUT_PROVENANCE_GATE`=每项派生事实/判断绑定可定位来源,未知标UNKNOWN.`DOCUMENT_RECURSIVE_PARSE_COMPLETENESS_GATE`=所有影响结论的对象均已解析,明确不需或有证阻塞,并回填原上下文.`MULTIMODAL_DOCUMENT_PARSE_COMPLETENESS_GATE`=图文上下文、来源与阻塞披露共同PASS.
 `UI_METHOD`=读取用户视觉目标→发现可用Skill/渲染证据→实现或调整信息层级与交互状态→以实际渲染/测试复核→扫描发布面;无渲染证据只说明未知,不编造结论.`DOCUMENT_METHOD`=列出影响结论的文字/图片/图表/附件/媒体→逐项回到所在上下文理解→将判断绑定来源→覆盖全部关键对象或列出阻塞;图文冲突或缺失保留不确定性.
 "#),
