@@ -151,7 +151,7 @@ fn discover() -> Value {
 }
 
 fn instructions() -> &'static str {
-    "这是当前 Agent 的结构化记忆服务。功能面包括分层记忆读写检索、规则与画像、明确记忆、长期记忆、事件维护、凭据保险箱、批量预览与应用、Skill、spec、附件、审计迁移和一键更新。遇到可能依赖历史事实时先调用 memory_context 或 memory_recall；用户明确要求记住时在本轮调用 memory_write；多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
+    "这是当前 Agent 的结构化记忆服务。普通记忆平面为 soul、rules、profile、explicit、long_term、episodic；credentials 由独立 vault 存储。功能面包括分层记忆读写检索、批量预览与应用、Skill、spec、附件、审计迁移和一键更新。遇到可能依赖历史事实时先调用 memory_context 或 memory_recall；用户明确要求记住时在本轮调用 memory_write；多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。新 MCP 直接维护平面记录，不使用 candidate/canonical 晋升生命周期；旧 CLI 相关命令仅用于历史兼容与迁移。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
 }
 
 fn tools_list(_legacy: bool) -> Value {

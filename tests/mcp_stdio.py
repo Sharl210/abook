@@ -60,6 +60,9 @@ def test_modern():
         assert dr["supportedVersions"] == [MODERN]
         assert dr["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "abook"
         assert "instructions" in dr
+        assert "普通记忆平面" in dr["instructions"]
+        assert "credentials" in dr["instructions"]
+        assert "candidate/canonical" in dr["instructions"]
         discover_meta = send(p, request("d-meta", "server/discover"))
         assert discover_meta["result"]["resultType"] == "complete"
         assert discover_meta["result"]["supportedVersions"] == [MODERN]
