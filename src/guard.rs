@@ -201,10 +201,22 @@ fn awk_truncates(argv: &[String]) -> bool {
     if p.contains("exit") {
         return true;
     }
-    // NR<=10 / NR==5 / NR<3 都意味着"到点就停"
-    let has_nr = p.contains("NR");
-    let cmpHit = p.contains("<") || p.contains("==");
-    has_nr && cmpHit
+    // NR<=10 / NR==5 / NR<3 / NR>3 / NR!=3 等都会用记录号作门限，可能丢弃输入尾部。
+    let mut chars = p.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != 'N' || chars.next() != Some('R') { continue; }
+        let op = match chars.next() {
+            Some('<') => if chars.peek() == Some(&'=') { chars.next(); "<=" } else { "<" },
+            Some('>') => if chars.peek() == Some(&'=') { chars.next(); ">=" } else { ">" },
+            Some('=') => { if chars.peek() == Some(&'=') { chars.next(); } "==" },
+            Some('!') if chars.next() == Some('=') => "!=",
+            _ => continue,
+        };
+        let rest: String = chars.clone().collect();
+        let has_numeric_bound = rest.chars().next().map(|c| c.is_ascii_digit() || c == '$').unwrap_or(false);
+        if has_numeric_bound && matches!(op, "<=" | "<" | "==" | "!=" | ">=" | ">") { return true; }
+    }
+    false
 }
 
 /// `cut` 是否在截断：`-c` 按字符切会丢内容；`-f` 只选列，行数不变。

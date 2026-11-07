@@ -3694,6 +3694,9 @@ STATUS=ACTIVE\n\
                 root.join("candidate/Atlas.md"),
                 "# Atlas\n",
             );
+            // reconcile also checks the vault. The fixture must be a valid
+            // library, otherwise a missing ledger masks the branch verdict.
+            let _ = crate::cmd_admin::init_book(&root);
             root
         };
         // 同一条记录挂两个分支：合法，不能算问题。
@@ -3789,6 +3792,7 @@ STATUS=ACTIVE\n\
             let _ = std::fs::create_dir_all(tmp.join("candidate/records"));
             let _ = std::fs::write(tmp.join("Global.md"), "FORMAT=1\n");
             let _ = std::fs::write(tmp.join("Index.md"), "FORMAT=1\n");
+            let _ = crate::cmd_admin::init_book(&tmp);
             // 造三条：标题里带同一个词，够建出索引。
             for i in 0..3 {
                 let body = format!(
