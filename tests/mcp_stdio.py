@@ -205,6 +205,10 @@ def test_batch_tools():
         # 写进 `planes/<平面>/records/` 的正文必须是能被解析回来的记录。这不是
         # 测试偏好，而是数据完整性要求：records() 是 list/context/search/export
         # 的共同入口，一条无法解析的文件会让整库读不了。
+        # 库要先初始化：下面要断言"写完之后整库仍可读"，而读路径要求六平面
+        # 布局存在。不初始化就断言可读，测的是"未建库能不能读"，不是本意。
+        init = send(p, request("b0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        assert init["result"]["isError"] is False, init
         record_body = (
             "[CANONICAL_MEMORY]\n"
             "ID=M-20260101T000000-batchdemo\n"
@@ -239,6 +243,8 @@ def test_batch_tools():
 
         txn_root = os.path.join(root, "txn-library")
         os.makedirs(txn_root, exist_ok=True)
+        txn_init = send(p, request("t0", "tools/call", {"name": "memory_init", "arguments": {"root": txn_root}}))
+        assert txn_init["result"]["isError"] is False, txn_init
         body_file = os.path.join(root, "txn-body.txt")
         txn_body = (
             "[CANONICAL_MEMORY]\n"
