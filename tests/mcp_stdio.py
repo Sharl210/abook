@@ -558,12 +558,40 @@ def test_eof_and_stdout_purity():
         json.loads(line)
 
 
+def test_detect_sees_plane_layout():
+    """`abook_detect` 必须认出六平面库。
+
+    回归自一个真实缺陷：`memory init` 建出的新库只有 `planes/` 和
+    `abook.memory.layout.v1`，没有旧布局的 `Global.md`/`Index.md`。detect
+    原先只查旧文件，于是对刚建好的库回答 initialized:false，用户被告知
+    "需要初始化"——而库其实好好的。判定口径与库真实布局脱节，属于产品
+    自身缺陷，不是调用方用法问题。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-detect-")
+    p = start()
+    try:
+        init = send(p, request("d-init", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        assert init["result"]["isError"] is False, init
+        got = send(p, request("d-detect", "tools/call", {"name": "abook_detect", "arguments": {"root": root}}))
+        payload = got["result"].get("structuredContent")
+        if payload is None:
+            payload = json.loads(got["result"]["content"][0]["text"])
+        assert payload["initialized"] is True, payload
+        assert payload["root"] == root, payload
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
+
+
 if __name__ == "__main__":
     test_modern()
     test_legacy()
     test_batch_tools()
     test_memory_tools()
     test_migrate_tools()
+    test_detect_sees_plane_layout()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 8 suites passed")
+    print("MCP stdio tests: 9 suites passed")
