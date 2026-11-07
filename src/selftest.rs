@@ -4012,6 +4012,11 @@ fn run_tool_script(script: &std::path::Path, root: &std::path::Path, extra: &[&s
     if let Some(me) = self_path() {
         cmd.env("ABOOK_BIN", me);
     }
+    if let Ok(sample) = std::env::var("ABOOK_ROOT") {
+        if std::path::Path::new(&sample).is_dir() {
+            cmd.env("ABOOK_SAMPLE_LIB", sample);
+        }
+    }
     for a in extra {
         cmd.arg(a);
     }
