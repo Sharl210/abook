@@ -22,6 +22,7 @@ Exit 0 when nothing unexplained happens.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -477,6 +478,12 @@ def main():
         if "@" in cmd:
             problems.append((raw, "占位符没替换", cmd))
             continue
+
+        if cmd.startswith("abook "):
+            # Use the exact binary under test. On Android the published target
+            # filename is architecture-specific and the containing app path may
+            # not be discoverable by /system/bin/sh through PATH.
+            cmd = shlex.quote(ABOOK) + cmd[len("abook"):]
 
         r = subprocess.run(cmd, shell=True, executable=SHELL, capture_output=True,
                            text=True, env=env, cwd=base, timeout=180)
