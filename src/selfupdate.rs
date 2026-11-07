@@ -953,7 +953,15 @@ pub fn cmd_upgrade(a: &Args) -> R<i32> {
             let head = if last.starts_with("自检") { last.to_string() } else { format!("自检 {last}") };
             println!("{head}");
             verified = true;
+        } else {
+            eprintln!("新文件 selftest 返回非零状态 {}", o.status);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stdout.trim().is_empty() { eprintln!("selftest stdout:\n{stdout}"); }
+            if !stderr.trim().is_empty() { eprintln!("selftest stderr:\n{stderr}"); }
         }
+    } else {
+        eprintln!("无法启动新文件 selftest: {}", install_to.display());
     }
 
     if !verified {
