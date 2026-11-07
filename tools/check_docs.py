@@ -159,7 +159,11 @@ def first_record(lib):
         capture_output=True, text=True, env=env_for(lib),
     ).stdout
     m = re.search(r'"id":\s*"([^"]+)"', out)
-    return m.group(1) if m else ""
+    if m:
+        return m.group(1)
+    records = os.path.join(lib, "candidate", "records")
+    names = sorted(n for n in os.listdir(records) if n.endswith(".md")) if os.path.isdir(records) else []
+    return os.path.splitext(names[0])[0] if names else ""
 
 
 def first_canonical(lib):
@@ -197,6 +201,9 @@ def two_records(lib):
         capture_output=True, text=True, env=env_for(lib),
     ).stdout
     recs = re.findall(r'"id":\s*"([^"]+)"', out)
+    if not recs:
+        records = os.path.join(lib, "candidate", "records")
+        recs = [os.path.splitext(n)[0] for n in sorted(os.listdir(records)) if n.endswith(".md")] if os.path.isdir(records) else []
     while len(recs) < 2:
         recs.append(recs[0] if recs else "x")
     return f"{recs[0]} {recs[1]}"
