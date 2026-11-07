@@ -490,9 +490,14 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         Err(e) => return error_value(-32602, &e, None),
     };
     let (out, err, code) = run_cli_text(&argv, body.as_deref());
+    let attachment_json = mcp_json::parse(&out).ok();
+    let empty_attachment_list = name == "abook_attach_list"
+        && code == 3
+        && matches!(attachment_json.as_ref().and_then(|v| v.get("count")), Some(Value::Number(n)) if n == "0")
+        && matches!(attachment_json.as_ref().and_then(|v| v.get("items")), Some(Value::Array(items)) if items.is_empty());
     let mut result = obj(vec![
         ("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(if out.is_empty() { err.clone() } else { out.clone() }))])])),
-        ("isError", Value::b(code != 0)),
+        ("isError", Value::b(code != 0 && !empty_attachment_list)),
     ]);
     if let Value::Object(ref mut m) = result {
         m.insert("structuredContent".into(), mcp_json::parse(&out).unwrap_or_else(|_| obj(vec![("stdout", Value::s(out)), ("stderr", Value::s(err)), ("exit", Value::n(code.to_string()))])));
