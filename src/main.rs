@@ -368,7 +368,16 @@ fn cmd_detect(a: &Args) -> R<i32> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| std::env::args().next().unwrap_or_default());
     let root = resolve_root(a);
-    let initialized = root.join("Global.md").is_file() || root.join("Index.md").is_file();
+    // 判"库有没有初始化"要同时认两种布局，否则新版库会被自己判成未初始化：
+    //   - 旧 marker 布局：Global.md / Index.md；
+    //   - 六平面布局：abook.memory.layout.v1 标记文件（`memory init` 的产物）。
+    // 初始化好的新库只带 `planes/` 和 `abook.memory.layout.v1`，不带 Global.md，
+    // 所以只看旧文件会让 `detect --root <新库>` 报 initialized:false —— 用户已经
+    // 建好库却被告知"需要初始化"，这是判定错，不是库的问题。
+    let initialized = root.join("Global.md").is_file()
+        || root.join("Index.md").is_file()
+        || root.join(crate::memory_plane::LAYOUT_MARKER).is_file()
+        || root.join("planes").is_dir();
     let in_root = me
         .as_ref()
         .and_then(|p| p.parent())
