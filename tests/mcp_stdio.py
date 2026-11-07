@@ -107,8 +107,8 @@ def test_modern():
         resources = send(p, request("r", "resources/list"))["result"]
         assert resources["resultType"] == "complete"
         read_help = send(p, request("rr", "resources/read", {"uri": "abook://help"}))
-        assert "普通记忆平面" in read_help["result"]["contents"][0]["text"]
-        assert "vault" in read_help["result"]["contents"][0]["text"]
+        assert "六平面结构化记忆" in read_help["result"]["contents"][0]["text"]
+        assert "保险箱" in read_help["result"]["contents"][0]["text"]
         missing_resource = send(p, request("rr-missing", "resources/read", {"uri": "abook://spec/__does_not_exist__"}))
         assert missing_resource["error"]["code"] == -32602
         helper_unknown = send(p, request("helper-extra", "tools/call", {"name": "spec_list", "arguments": {"extra": True}}))

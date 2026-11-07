@@ -132,7 +132,16 @@ fn help_text() -> String {
       --plane soul|rules|profile|explicit|long_term|episodic
       --root PATH --id ID --title T --content TEXT --read-when W --query Q
 
-═══ 写：改动（正式库需 --approve）═══
+═══ MCP 主入口（新模型）═══
+  mcp                       MCP stdio；现代客户端从 server/discover/tools/list 发现
+  memory <子命令>           六平面结构化记忆：soul/rules/profile/explicit/long_term/episodic
+      context/index/paths/export/write/read/list/search/update/delete/restore
+  memory_batch_*             批量预览、应用、状态和回滚
+  vault <子命令>             credentials 独立保险箱，不进入普通记忆 export
+
+旧 `write`/`promote`/`demote`/`candidate`/`canonical` 入口只为历史库迁移和兼容保留，不属于新 MCP 生命周期。
+
+═══ 写：旧 CLI 兼容改动（新 MCP 请用 memory_*）═══
   write --title T --read-when W --body-file F
       --kind --maturity --authority --summary --keys --concepts --entities
       --not-for --evidence --uncertainty --source --related --supersedes
