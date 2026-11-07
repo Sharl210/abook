@@ -432,6 +432,11 @@ def main():
 
     for raw in uniq:
         name = raw.split()[1] if len(raw.split()) > 1 else ""
+        if name == "mcp":
+            # `abook mcp` owns stdio until EOF; it is a process-level mode,
+            # not a bounded shell example that this command runner can execute.
+            skipped += 1
+            continue
         if name in SKIP:
             skipped += 1
             continue
