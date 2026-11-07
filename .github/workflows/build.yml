@@ -226,6 +226,7 @@ jobs:
           ROOT="$(mktemp -d)"
           trap 'rm -rf "$ROOT"' EXIT
           mkdir -p "$ROOT/canonical/records" "$ROOT/candidate/records"
+          ./target/release/abook init --root "$ROOT" --json >/dev/null
           printf '%s\n' '[CANONICAL_MEMORY]' 'ID=C-20261106T000000-aaaaaaaa' 'TITLE=CI fixture one' 'KIND=DECISION' 'READ_WHEN=CI selftest' '[/CANONICAL_MEMORY]' '[MEMORY_BODY]' 'fixture body one' '[/MEMORY_BODY]' > "$ROOT/canonical/records/C-20261106T000000-aaaaaaaa.md"
           printf '%s\n' '[CANONICAL_MEMORY]' 'ID=C-20261106T000001-bbbbbbbb' 'TITLE=CI fixture two' 'KIND=DECISION' 'READ_WHEN=CI selftest' '[/CANONICAL_MEMORY]' '[MEMORY_BODY]' 'fixture body two' '[/MEMORY_BODY]' > "$ROOT/canonical/records/C-20261106T000001-bbbbbbbb.md"
           ABOOK_ROOT="$ROOT" ./target/release/abook selftest --json
