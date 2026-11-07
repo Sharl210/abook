@@ -127,6 +127,8 @@ jobs:
         run: python3 tests/mcp_stdio.py target/release/abook
       - name: 事务回滚原子性回归
         run: python3 tests/txn_rollback_atomicity.py target/release/abook
+      - name: 本地 fixture 更新与坏包保护回归
+        run: python3 tests/upgrade_local_fixture.py target/release/abook
       - name: 六平面 CLI 主链 smoke
         run: |
           set -euo pipefail
