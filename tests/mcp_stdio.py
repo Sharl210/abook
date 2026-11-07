@@ -57,9 +57,12 @@ def test_modern():
         assert d["id"] == "d"
         dr = d["result"]
         assert dr["resultType"] == "complete"
-        assert MODERN in dr["supportedVersions"]
+        assert dr["supportedVersions"] == [MODERN]
         assert dr["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "abook"
         assert "instructions" in dr
+        discover_meta = send(p, request("d-meta", "server/discover"))
+        assert discover_meta["result"]["resultType"] == "complete"
+        assert discover_meta["result"]["supportedVersions"] == [MODERN]
 
         tools = send(p, request("t", "tools/list"))["result"]
         assert tools["resultType"] == "complete"
@@ -133,6 +136,12 @@ def test_modern():
         assert bad_meta["error"]["code"] == -32602
         bad_version = send(p, request("bv", "tools/list", version="1900-01-01"))
         assert bad_version["error"]["code"] == -32022
+        bad_version = send(p, request("bv", "tools/list", version=LEGACY))
+        assert bad_version["error"]["code"] == -32022
+        assert bad_version["error"]["data"]["supported"] == [MODERN]
+        bad_discover_version = send(p, request("bdv", "server/discover", version=LEGACY))
+        assert bad_discover_version["error"]["code"] == -32022
+        assert bad_discover_version["error"]["data"]["supported"] == [MODERN]
         unknown = send(p, request("u", "does/not/exist"))
         assert unknown["error"]["code"] == -32601
         bad_tool = send(p, request("bt", "tools/call", {"name": "abook_no_such_tool", "arguments": {}}))
@@ -157,11 +166,26 @@ def test_legacy():
         })
         assert init["result"]["protocolVersion"] == LEGACY
         assert "resultType" not in init["result"]
+        init_modern = send(p, {
+            "jsonrpc": "2.0", "id": "init-modern", "method": "initialize",
+            "params": {"protocolVersion": MODERN, "capabilities": {}, "clientInfo": CLIENT},
+        })
+        assert init_modern["error"]["code"] == -32602
+        init_old = send(p, {
+            "jsonrpc": "2.0", "id": "init-old", "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": CLIENT},
+        })
+        assert init_old["error"]["code"] == -32602
+        assert "server/discover" in init_old["error"]["message"]
+        pre_initialized_tools = send(p, {"jsonrpc": "2.0", "id": "before-init", "method": "tools/list", "params": {}})
+        assert pre_initialized_tools["error"]["code"] == -32602
         send(p, {"jsonrpc": "2.0", "method": "notifications/initialized"}, response=False)
         tools = send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         assert tools["id"] == 2
         assert "tools" in tools["result"]
         assert "resultType" not in tools["result"]
+        legacy_discover = send(p, {"jsonrpc": "2.0", "id": "legacy-discover", "method": "server/discover", "params": {}})
+        assert legacy_discover["error"]["code"] == -32601
     finally:
         p.stdin.close()
         p.wait(timeout=5)
@@ -453,7 +477,7 @@ def test_default_stdio_and_cli_prefix():
     p = start([])
     try:
         discovered = send(p, request("default", "server/discover", add_meta=False))
-        assert MODERN in discovered["result"]["supportedVersions"]
+        assert discovered["result"]["supportedVersions"] == [MODERN]
     finally:
         p.stdin.close()
         p.wait(timeout=5)

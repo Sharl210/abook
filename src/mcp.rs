@@ -89,7 +89,7 @@ pub fn run_stdio() -> i32 {
                 && parsed.get("params").and_then(|p| p.get("_meta")).is_none();
             match if metadata_optional { Ok(MODERN.to_string()) } else { modern_meta_version(&parsed) } {
                 Err(message) => { write_error(&mut stdout, id, -32602, &message, None); continue; }
-                Ok(version) if version != MODERN && method != "server/discover" => {
+                Ok(version) if version != MODERN => {
                     write_error(&mut stdout, id, -32022, &format!("不支持 MCP 协议版本 {version}"), Some(obj(vec![("supported", Value::arr(vec![Value::s(MODERN)])), ("requested", Value::s(version))])));
                     continue;
                 }
@@ -140,7 +140,7 @@ fn discover() -> Value {
     let mut meta = obj(vec![("io.modelcontextprotocol/serverInfo", server_info.clone())]);
     let mut out = obj(vec![
         ("resultType", Value::s("complete")),
-        ("supportedVersions", Value::arr(vec![Value::s(MODERN), Value::s(LEGACY)])),
+        ("supportedVersions", Value::arr(vec![Value::s(MODERN)])),
         ("capabilities", caps),
         ("_meta", meta),
         ("instructions", Value::s(instructions())),
