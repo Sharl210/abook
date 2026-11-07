@@ -1126,6 +1126,50 @@ mod tests {
         cleanup(&root);
     }
     #[test]
+    fn multi_file_commit_and_rollback_restore_mixed_baseline() {
+        let root = temp_root("multi-file-roundtrip");
+        write_atomic(&root.join("existing.md"), "原文\n😀").unwrap();
+        let mut tx = Transaction::prepare(&root).unwrap();
+        tx.stage_file(Selector::new("existing.md"), "更新\n😀").unwrap();
+        tx.stage_file(Selector::new("new/a.md"), "new A").unwrap();
+        tx.stage_file(Selector::new("new/b.md"), "new B").unwrap();
+        let token = tx.token().to_string();
+        assert_eq!(tx.apply(&token).unwrap(), 1);
+        assert_eq!(read_str(&root.join("existing.md")).unwrap(), "更新\n😀");
+        assert_eq!(read_str(&root.join("new/a.md")).unwrap(), "new A");
+        assert_eq!(read_str(&root.join("new/b.md")).unwrap(), "new B");
+        let report = rollback(&root, &token).unwrap();
+        assert_eq!(report.restored.len(), 3);
+        assert_eq!(read_str(&root.join("existing.md")).unwrap(), "原文\n😀");
+        assert!(!root.join("new/a.md").exists());
+        assert!(!root.join("new/b.md").exists());
+        assert_eq!(read_library_revision(&root).unwrap(), 2);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rollback_revision_conflict_has_no_side_effects() {
+        let root = temp_root("rollback-revision-conflict-no-side-effect");
+        let path = root.join("record.md");
+        write_atomic(&path, "before").unwrap();
+        let mut tx = Transaction::prepare(&root).unwrap();
+        tx.stage_file(Selector::new("record.md"), "after").unwrap();
+        let token = tx.token().to_string();
+        tx.apply(&token).unwrap();
+        let revision_before = read_library_revision(&root).unwrap();
+        write_atomic(&root.join("LIBRARY_REVISION"), "99\n").unwrap();
+        let journal_before = read_str(&root.join(JOURNAL_FILE)).unwrap();
+        let err = rollback(&root, &token).unwrap_err();
+        assert!(matches!(err, EE::Integrity(_)));
+        assert_eq!(read_str(&path).unwrap(), "after");
+        assert_eq!(read_str(&root.join("LIBRARY_REVISION")).unwrap(), "99\n");
+        assert_eq!(read_str(&root.join(JOURNAL_FILE)).unwrap(), journal_before);
+        assert_ne!(revision_before, 99);
+        cleanup(&root);
+    }
+
+
+    #[test]
     fn rollback_advances_revision_after_forward_commit() {
         let root = temp_root("rollback-revision");
         let mut tx = Transaction::prepare(&root).unwrap();
