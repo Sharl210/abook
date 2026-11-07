@@ -202,17 +202,37 @@ def test_batch_tools():
     root = tempfile.mkdtemp(prefix="abook-mcp-batch-")
     p = start()
     try:
-        preview = send(p, request("b1", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "planes/explicit/records/demo.md", "body": "标题\n正文 😀\n"}}))
+        # 写进 `planes/<平面>/records/` 的正文必须是能被解析回来的记录。这不是
+        # 测试偏好，而是数据完整性要求：records() 是 list/context/search/export
+        # 的共同入口，一条无法解析的文件会让整库读不了。
+        record_body = (
+            "[CANONICAL_MEMORY]\n"
+            "ID=M-20260101T000000-batchdemo\n"
+            "TITLE=批量写入示例\n"
+            "READ_WHEN=验证批量工具时\n"
+            "[/CANONICAL_MEMORY]\n"
+            "[MEMORY_BODY]\n"
+            "标题\n正文 😀\n"
+            "[/MEMORY_BODY]\n"
+        )
+        preview = send(p, request("b1", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "planes/explicit/records/demo.md", "body": record_body}}))
         result = preview["result"]
         assert result["isError"] is False, result
         token = result["structuredContent"]["token"]
         assert result["structuredContent"]["revision"] == 0
+        # 非法正文必须被挡在 preview，不能等到写进去才让库读不了。
+        bad = send(p, request("b1bad", "tools/call", {"name": "memory_batch_preview", "arguments": {"root": root, "path": "planes/explicit/records/bad.md", "body": "标题\n正文 😀\n"}}))
+        assert bad["result"]["isError"] is True, bad
+        assert not os.path.exists(os.path.join(root, "planes/explicit/records/bad.md"))
         status = send(p, request("b2", "tools/call", {"name": "memory_batch_status", "arguments": {"root": root}}))
         assert status["result"]["structuredContent"]["pending_transactions"] == 0
         applied = send(p, request("b3", "tools/call", {"name": "memory_batch_apply", "arguments": {"root": root, "token": token, "expected_revision": 0}}))
         assert applied["result"]["isError"] is False, applied
         with open(os.path.join(root, "planes/explicit/records/demo.md"), encoding="utf-8") as handle:
-            assert handle.read() == "标题\n正文 😀\n"
+            assert handle.read() == record_body
+        # 写完之后整库仍必须可读——这正是原缺陷的判别点。
+        lst = send(p, request("b3list", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit"}}))
+        assert lst["result"]["isError"] is False, lst
         rolled = send(p, request("b4", "tools/call", {"name": "memory_batch_rollback", "arguments": {"root": root, "token": token}}))
         assert rolled["result"]["isError"] is False, rolled
         assert not os.path.exists(os.path.join(root, "planes/explicit/records/demo.md"))
@@ -220,8 +240,17 @@ def test_batch_tools():
         txn_root = os.path.join(root, "txn-library")
         os.makedirs(txn_root, exist_ok=True)
         body_file = os.path.join(root, "txn-body.txt")
+        txn_body = (
+            "[CANONICAL_MEMORY]\n"
+            "ID=M-20260101T000001-txndemo\n"
+            "TITLE=事务写入示例\n"
+            "[/CANONICAL_MEMORY]\n"
+            "[MEMORY_BODY]\n"
+            "txn line one\ntxn line two 😀\n"
+            "[/MEMORY_BODY]\n"
+        )
         with open(body_file, "w", encoding="utf-8") as handle:
-            handle.write("txn line one\ntxn line two 😀\n")
+            handle.write(txn_body)
         txn_preview = send(p, request("t1", "tools/call", {"name": "abook_txn_preview", "arguments": {"root": txn_root, "path": "planes/explicit/records/txn.md", "body_file": body_file}}))
         assert "result" in txn_preview, txn_preview
         txn_data = txn_preview["result"]["structuredContent"]
@@ -230,7 +259,9 @@ def test_batch_tools():
         txn_apply = send(p, request("t2", "tools/call", {"name": "abook_txn_apply", "arguments": {"root": txn_root, "preview_token": txn_token, "expect_revision": str(txn_data["revision"])}}))
         assert txn_apply["result"]["isError"] is False, txn_apply
         with open(os.path.join(txn_root, "planes/explicit/records/txn.md"), encoding="utf-8") as handle:
-            assert handle.read() == "txn line one\ntxn line two 😀\n"
+            assert handle.read() == txn_body
+        txn_list = send(p, request("t2list", "tools/call", {"name": "memory_list", "arguments": {"root": txn_root, "plane": "explicit"}}))
+        assert txn_list["result"]["isError"] is False, txn_list
         txn_status = send(p, request("t3", "tools/call", {"name": "abook_txn_status", "arguments": {"root": txn_root}}))
         assert "result" in txn_status, txn_status
         txn_rollback = send(p, request("t4", "tools/call", {"name": "abook_txn_rollback", "arguments": {"root": txn_root, "preview_token": txn_token}}))

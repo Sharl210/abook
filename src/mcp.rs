@@ -310,6 +310,11 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
             "memory_batch_preview" => {
                 let path = scalar_text(args, "path").ok_or("preview 缺少 path")?;
                 let body = scalar_text(args, "body").ok_or("preview 缺少 body")?;
+                // 落在 `planes/<平面>/records/` 下的内容必须是可解析的记录。
+                // 不校验的后果不是"多一个文件"，而是整库读不了：records() 是
+                // list/context/search/export 的共同入口，一条坏文件让它报错退出。
+                crate::memory_plane::validate_record_path_and_body(&root, &path, &body)
+                    .map_err(|e| e.msg().to_string())?;
                 let mut tx = crate::txn::Transaction::prepare(&root).map_err(|e| e.msg().to_string())?;
                 tx.stage_file(crate::txn::Selector::new(path), &body).map_err(|e| e.msg().to_string())?;
                 Ok(obj(vec![("token", Value::s(tx.token().to_string())), ("revision", Value::n(tx.revision.to_string()))]))

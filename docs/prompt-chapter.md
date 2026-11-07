@@ -187,8 +187,10 @@ abook memory write --root ROOT --plane explicit --title T --content C
 abook memory export --root ROOT --plane all
 abook migrate --staging-root PATH --verify
 abook recover --dry-run
-abook txn preview --path file --body-file F
+abook txn preview --path notes/report.txt --body x
 ```
+
+`txn preview` 与 `memory_batch_preview` 只对 `planes/<平面>/records/` 下的写入做记录格式校验：目标落在记录目录时正文必须能解析成一条记录，否则整库会读不了；写到 `notes/` 这类普通路径不受此限。
 
 ## 6. 保险箱
 

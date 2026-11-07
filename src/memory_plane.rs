@@ -633,3 +633,47 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     map.insert("status".into(), Value::s(status)); map.insert("revision".into(), Value::n(next.to_string())); map.insert("updated_at".into(), Value::n(now().to_string()));
     let next_value = Value::Object(map); let path = record_path(&root, &plane, id)?; crate::util::write_atomic_cas(&path, &mcp_json::stringify(&next_value), &mcp_json::stringify(&current))?; Ok(next_value)
 }
+
+/// 拦住"会把整库写坏"的批量写入。
+///
+/// 背景是一个真实缺陷：`memory_batch_preview` 原本对 body 完全不校验，于是
+/// 调用方把一段普通正文（比如 `标题\n正文 😀\n`）写进
+/// `planes/explicit/records/x.md` 之后，这条文件既不是 JSON 也不是带字段的
+/// 旧格式记录，`records()` 解析它必然报错——而 `records()` 是 list/context/
+/// search/export 的共同入口，所以**一条坏文件让整个库读不了**。调用方只是想
+/// "批量写个文件"，代价却是库变成不可用状态。
+///
+/// 因此凡是落在 `planes/<平面>/records/` 下的写入，正文必须能解析成一条记录；
+/// 其他路径（配置、报告之类）不归这里管，照旧放行。
+pub fn validate_record_path_and_body(root: &str, path: &str, body: &str) -> R<()> {
+    let rel = Path::new(path);
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    // 只认 `planes/<plane>/records/<file>` 这一种形状，其他路径放行。
+    if parts.len() < 4 || parts[0] != "planes" || parts[2] != "records" {
+        return Ok(());
+    }
+    if !plane_ok(&parts[1]) {
+        return Err(err(format!("未知记忆平面: {}", parts[1])));
+    }
+    let ext = rel.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext != "md" && ext != "json" {
+        return Err(err(format!(
+            "记忆平面的记录必须是 .md 或 .json，不接受 .{ext}"
+        )));
+    }
+    let root_abs = root_path(root)?;
+    let full = root_abs.join(rel);
+    if ext == "json" {
+        mcp_json::parse(body)
+            .map_err(|e| err(format!("记录内容不是合法 JSON，会使库无法读取: {e}")))?;
+        return Ok(());
+    }
+    // .md 走与读取完全相同的解析器：能解析成记录才算通过，避免"写入放行、
+    // 读取失败"这种自相矛盾的状态。
+    legacy_value(&full, &parts[1], body)
+        .map(|_| ())
+        .map_err(|e| err(format!("记录内容无法解析为记忆记录，会使整库不可读: {}", e.msg())))
+}
