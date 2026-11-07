@@ -4012,6 +4012,9 @@ fn run_tool_script(script: &std::path::Path, root: &std::path::Path, extra: &[&s
     if let Some(me) = self_path() {
         cmd.env("ABOOK_BIN", me);
     }
+    for a in extra {
+        cmd.arg(a);
+    }
     let out = cmd.output();
     match out {
         Ok(o) if o.status.success() => true,
@@ -4024,7 +4027,7 @@ fn run_tool_script(script: &std::path::Path, root: &std::path::Path, extra: &[&s
         }
         Err(e) => { eprintln!("文档扫描启动失败: {e}"); false }
     }
-
+}
 fn ok_workflow(script: &std::path::Path, root: &std::path::Path) -> bool {
     run_tool_script(script, root, &[])
 }
