@@ -525,21 +525,29 @@ pub fn increment_library_revision(root: impl AsRef<Path>) -> R<u64> {
     advance_library_revision(&root, current, &txid)
 }
 
-fn advance_library_revision(root: &Path, expected: u64, transaction: &str) -> R<u64> {
+fn validate_library_revision(root: &Path, expected: u64, transaction: &str) -> R<()> {
     let current = read_library_revision(root)?;
     let next = expected.checked_add(1).ok_or_else(|| EE::Integrity("库级修订号溢出".to_string()))?;
     let marker_path = root.join(REVISION_TXN);
     if current == next {
         let marker = read_str(&marker_path).unwrap_or_default();
-        if marker.trim() == format!("{transaction}|{expected}|{next}") { return Ok(next); }
+        if marker.trim() == format!("{transaction}|{expected}|{next}") { return Ok(()); }
         return Err(EE::Integrity(format!("revision {next} 已由其他事务占用，当前事务 {transaction} 不能重复认领")));
     }
     if current != expected { return Err(EE::Integrity(format!("库级修订号冲突：事务基线 {expected}，磁盘为 {current}"))); }
+    Ok(())
+}
+
+fn advance_library_revision(root: &Path, expected: u64, transaction: &str) -> R<u64> {
+    validate_library_revision(root, expected, transaction)?;
+    let next = expected.checked_add(1).ok_or_else(|| EE::Integrity("库级修订号溢出".to_string()))?;
+    let marker_path = root.join(REVISION_TXN);
     durable_write(&marker_path, &format!("{transaction}|{expected}|{next}\n"))?;
     durable_write(&root.join(LIBRARY_REVISION), &format!("{next}\n"))?;
     if read_library_revision(root)? != next { return Err(EE::Integrity("库级修订号复读不一致".into())); }
     Ok(next)
 }
+
 
 /// 从 durable journal 重建一个 staged 事务并按 token 应用。
 /// 这使 preview 与 apply 可以跨进程工作，且 apply 仍会逐目标重验 before hash。
@@ -819,6 +827,11 @@ pub fn rollback(root: impl AsRef<Path>, token: &str) -> R<RollbackReport> {
             if sha256::digest_hex(old.as_bytes()) != op.before_hash { return Err(EE::Integrity(format!("回滚 before 快照 hash 不符: {}", snapshot.display()))); }
         }
     }
+    let rollback_expected = log.revision.checked_add(1).ok_or_else(|| EE::Integrity("回滚 revision 溢出".into()))?;
+    let rollback_id = format!("{}:rollback", log.transaction);
+    // Validate the revision before changing either targets or journal state.
+    // Keep the actual advance after restoration so ROLLING_BACK remains durable.
+    validate_library_revision(&root, rollback_expected, &rollback_id)?;
     append_log_phase(&mut journal, log, Phase::RollingBack)?;
     for op in log.operations.values() {
         let path = op.path(&root)?;
@@ -832,8 +845,6 @@ pub fn rollback(root: impl AsRef<Path>, token: &str) -> R<RollbackReport> {
         if hash_file(&path)? != op.before_hash { return Err(EE::Integrity(format!("回滚后 hash 不符: {}", path.display()))); }
         restored.push(path.to_string_lossy().to_string());
     }
-    let rollback_expected = log.revision.checked_add(1).ok_or_else(|| EE::Integrity("回滚 revision 溢出".into()))?;
-    let rollback_id = format!("{}:rollback", log.transaction);
     advance_library_revision(&root, rollback_expected, &rollback_id)?;
     append_log_phase(&mut journal, log, Phase::RolledBack)?;
     Ok(RollbackReport { transaction: log.transaction.clone(), restored, already_before })
