@@ -625,6 +625,11 @@ pub fn recover(root: impl AsRef<Path>, apply: bool) -> R<Vec<RecoveryReport>> {
             let mut report = classify_recovery(&root, &log)?;
             if !apply { report.action = if report.conflicts.is_empty() { RecoveryAction::DryRun } else { RecoveryAction::RecoveryRequired }; reports.push(report); continue; }
             if !report.conflicts.is_empty() { report.action = RecoveryAction::RecoveryRequired; reports.push(report); continue; }
+            let expected = log.revision.checked_add(1).ok_or_else(|| EE::Integrity("回滚 revision 溢出".into()))?;
+            let rollback_id = format!("{}:rollback", log.transaction);
+            if let Err(error) = validate_library_revision(&root, expected, &rollback_id) {
+                report.conflicts.push(error.msg().to_string()); report.action = RecoveryAction::RecoveryRequired; reports.push(report); continue;
+            }
             let mut failed = None;
             for op in log.operations.values() {
                 let path = op.path(&root)?;
@@ -637,8 +642,6 @@ pub fn recover(root: impl AsRef<Path>, apply: bool) -> R<Vec<RecoveryReport>> {
                 }
             }
             if let Some(error) = failed { report.conflicts.push(error.msg().to_string()); report.action = RecoveryAction::RecoveryRequired; reports.push(report); continue; }
-            let expected = log.revision.checked_add(1).ok_or_else(|| EE::Integrity("回滚 revision 溢出".into()))?;
-            let rollback_id = format!("{}:rollback", log.transaction);
             if let Err(error) = advance_library_revision(&root, expected, &rollback_id) { report.conflicts.push(error.msg().to_string()); report.action = RecoveryAction::RecoveryRequired; reports.push(report); continue; }
             append_log_phase(&mut journal, &log, Phase::RolledBack)?;
             report.phase = Phase::RolledBack; report.action = RecoveryAction::RolledBack; reports.push(report); continue;
@@ -647,6 +650,12 @@ pub fn recover(root: impl AsRef<Path>, apply: bool) -> R<Vec<RecoveryReport>> {
         let mut report = classify_recovery(&root, &log)?;
         if !apply { report.action = if report.conflicts.is_empty() { RecoveryAction::DryRun } else { RecoveryAction::RecoveryRequired }; reports.push(report); continue; }
         if !report.conflicts.is_empty() { append_log_phase(&mut journal, &log, Phase::RecoveryRequired)?; report.action = RecoveryAction::RecoveryRequired; reports.push(report); continue; }
+        if let Err(error) = validate_library_revision(&root, log.revision, &log.transaction) {
+            report.action = RecoveryAction::RecoveryRequired;
+            report.conflicts.push(error.msg().to_string());
+            reports.push(report);
+            continue;
+        }
         let mut failed = None;
         for op in log.operations.values() {
             let path = op.path(&root)?;
@@ -1105,6 +1114,52 @@ mod tests {
         let root = temp_root("path-boundary");
         assert!(Transaction::prepare(&root).unwrap().stage_file(Selector::new("../outside.md"), "x").is_err());
         assert!(Transaction::prepare(&root).unwrap().stage_file(Selector::new(root.join("outside.md")), "x").is_err());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn applying_recovery_revision_conflict_has_no_side_effects() {
+        let root = temp_root("apply-recovery-revision-conflict");
+        write_atomic(&root.join("record.md"), "before").unwrap();
+        let mut tx = Transaction::prepare(&root).unwrap();
+        tx.stage_file(Selector::new("record.md"), "after").unwrap();
+        let journal_path = root.join(JOURNAL_FILE);
+        let mut journal = Journal::load(&journal_path).unwrap();
+        let logs = collect_logs(&journal.entries, &root).unwrap();
+        let log = logs.get(&tx.transaction_id).unwrap();
+        append_log_phase(&mut journal, log, Phase::Applying).unwrap();
+        write_atomic(&root.join(LIBRARY_REVISION), "99\n").unwrap();
+        let before = read_str(&journal_path).unwrap();
+        let reports = recover_apply(&root).unwrap();
+        assert_eq!(reports[0].action, RecoveryAction::RecoveryRequired);
+        assert!(!reports[0].conflicts.is_empty());
+        assert_eq!(read_str(&root.join("record.md")).unwrap(), "before");
+        assert_eq!(read_str(&root.join(LIBRARY_REVISION)).unwrap(), "99\n");
+        assert_eq!(read_str(&journal_path).unwrap(), before);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rolling_back_recovery_revision_conflict_has_no_side_effects() {
+        let root = temp_root("rollback-recovery-revision-conflict");
+        write_atomic(&root.join("record.md"), "before").unwrap();
+        let mut tx = Transaction::prepare(&root).unwrap();
+        tx.stage_file(Selector::new("record.md"), "after").unwrap();
+        let token = tx.token().to_string();
+        tx.apply(&token).unwrap();
+        let journal_path = root.join(JOURNAL_FILE);
+        let mut journal = Journal::load(&journal_path).unwrap();
+        let logs = collect_logs(&journal.entries, &root).unwrap();
+        let log = logs.get(&tx.transaction_id).unwrap();
+        append_log_phase(&mut journal, log, Phase::RollingBack).unwrap();
+        write_atomic(&root.join(LIBRARY_REVISION), "99\n").unwrap();
+        let before = read_str(&journal_path).unwrap();
+        let reports = recover_apply(&root).unwrap();
+        assert_eq!(reports[0].action, RecoveryAction::RecoveryRequired);
+        assert!(!reports[0].conflicts.is_empty());
+        assert_eq!(read_str(&root.join("record.md")).unwrap(), "after");
+        assert_eq!(read_str(&root.join(LIBRARY_REVISION)).unwrap(), "99\n");
+        assert_eq!(read_str(&journal_path).unwrap(), before);
         cleanup(&root);
     }
 
