@@ -40,73 +40,52 @@ curl -sSfL https://raw.githubusercontent.com/Sharl210/abook/downloads/install.sh
 
 ## 库长什么样
 
-```
+新库布局：
+
+```text
 ~/AgentsBook/
-  Global.md               入口，带上记录数与索引摘要
-  Index.md                路由表：什么话题去看哪一条
-  canonical/              正式库：已验收的知识
-    Atlas.md              地图：每条记录归在哪个分支
-    records/<ID>.md       一条记录
-    records/<ID>-refs/    该记录的附件（截图、日志、原始数据）
-  candidate/              候选库：待验证或待批准的内容
-  staging/                待决件
-  review/                 晋升记录
-  commits/                变更日志
-  vault/                  凭据保险箱（加密）
+  abook.memory.layout.v1
+  planes/soul/records/
+  planes/rules/records/
+  planes/profile/records/
+  planes/explicit/records/
+  planes/long_term/records/
+  planes/episodic/records/
+  vault/                  凭据独立存储域
+  projections/            普通记忆投影
 ```
 
-一条记录是带标签的文本：
+旧 `canonical/`、`candidate/`、`review/`、`commits/` 目录只在历史库兼容与 staged migration 中保留，不是新记忆模型。新记录是结构化 JSON，正文作为完整字符串保存；凭据不进入普通平面索引和 export。
 
-```
-FORMAT=CANONICAL_MEMORY_V2
-ID=AB2-IMS-051
-KIND=EVIDENCE
-TITLE=IMS 注册失败在三个平台上的差异
-KEYS=IMS,注册,REGISTER
-READ_WHEN=遇到 IMS 注册相关问题时
-[SECTIONS]
-[MEMORY_BODY]
-正文…
-[/MEMORY_BODY]
-```
 
 `KEYS` 和 `READ_WHEN` 是召回索引的来源，不是装饰——写记录时漏掉它们，这条内容
 以后就只能靠全文搜索找到。
 
-## 常用命令
+## 常用入口
 
 ```sh
-abook state                      # 库状态一屏：记录数、地图数、一致性
-abook recall 关键词              # 召回：词面 → 适用条件 → 分支摘要
-abook show <记录>                # 全字段加正文
-abook search 词                  # 全文检索，五级精度
-abook write --title T --read-when W --body-file F
-abook set <记录> TITLE 新标题
-abook promote <候选> --approve
-abook vault put 标识 --purpose 用途
+abook mcp                         # MCP stdio（现代客户端）
+abook memory context --root ROOT  # 读取六个普通平面与凭据域边界
+abook memory write --root ROOT --plane explicit --title T --content C
+abook memory search --root ROOT --query 关键词
+abook memory export --root ROOT --plane all
+abook vault put 标识 --purpose 用途 --body-file F
+abook upgrade --check --json
 ```
+
+MCP 客户端优先通过 `server/discover`、`tools/list` 和 `memory_help` 发现完整接口；正文使用结构化参数传输，不拼接 shell 命令。普通记忆平面为 `soul`、`rules`、`profile`、`explicit`、`long_term`、`episodic`，`credentials` 只通过独立 vault 工具访问。
+
+旧 CLI 的 `write`、`promote`、`canonical`、`candidate` 等命令仅用于历史库兼容和迁移，不属于新的 MCP 记忆生命周期。
 
 完整清单 `abook commands`，单条契约 `abook describe <命令>`。
 
-## 两条使用纪律
+## 写入与并发
 
-**一、写正式库要明确批准。** `promote`、对 canonical 记录的修改，不带 `--approve`
-会被拒绝。这是设计，不是故障——正式库是已经验证过的结论，静默改写它的代价比多
-一次确认大。
+新 MCP 记忆直接按平面写入，不需要人工批准；更新、软删除和恢复使用 `expected_revision` 做冲突保护。批量维护使用 `memory_batch_preview`、`memory_batch_apply`、`memory_batch_status` 和 `memory_batch_rollback`。
 
-**二、改动前先读版本号。** `show` 和 `cat` 会在末尾打印 `[version xxxxxxxx]`。
-把它带进写命令的 `--if-version`：
-
-```sh
-abook show C-20261022T113737-3014f5dc        # 看到 [version 3f2a1b8c]
-abook set C-20261022T113737-3014f5dc TITLE 新标题 --if-version 3f2a1b8c
-```
-
-如果在这两次命令之间别的东西改过这条记录，`set` 会拒绝并告诉你双方版本。不带
-`--if-version` 也能写，行为与以前一样——但那意味着你放弃了这层保护。
+改动前若使用旧 CLI 记录接口，可用 `show`/`cat` 读取版本号并带入 `--if-version`；这只是兼容入口，不改变新 MCP 平面的结构化接口。
 
 ## 文档
-
 - `docs/MAINTENANCE.md` — 维护者须知：架构、数据格式的坑、缺陷史、发版流程
 - `docs/DOWNLOADS.md` — 固定下载地址与镜像
 

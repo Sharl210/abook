@@ -107,7 +107,8 @@ def test_modern():
         resources = send(p, request("r", "resources/list"))["result"]
         assert resources["resultType"] == "complete"
         read_help = send(p, request("rr", "resources/read", {"uri": "abook://help"}))
-        assert read_help["result"]["contents"][0]["text"]
+        assert "普通记忆平面" in read_help["result"]["contents"][0]["text"]
+        assert "vault" in read_help["result"]["contents"][0]["text"]
         missing_resource = send(p, request("rr-missing", "resources/read", {"uri": "abook://spec/__does_not_exist__"}))
         assert missing_resource["error"]["code"] == -32602
         helper_unknown = send(p, request("helper-extra", "tools/call", {"name": "spec_list", "arguments": {"extra": True}}))
@@ -130,6 +131,8 @@ def test_modern():
         assert prompts["resultType"] == "complete"
         prompts_get = send(p, request("pg", "prompts/get", {"name": "memory-first"}))
         assert prompts_get["result"]["messages"][0]["content"]["text"]
+        write_prompt = send(p, request("pgw", "prompts/get", {"name": "memory-write"}))
+        assert "memory_write" in write_prompt["result"]["messages"][0]["content"]["text"]
 
 
         bad_meta = send(p, request("bm", "tools/list", add_meta=False))

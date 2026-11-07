@@ -1,10 +1,12 @@
 # abook 命令参考
 
-单二进制、零依赖。全部命令都接受 `--root <路径>`；不传时库根就是程序自己所处的
-目录（其中含 `Global.md`/`Index.md` 时），再退到 `~/AgentsBook`。`ABOOK_ROOT` 仅作
-老脚本兼容。
+单二进制、零依赖。新客户端优先启动 `abook mcp`，通过 `server/discover`、`tools/list`、`memory_help` 和 spec/resources 发现接口。普通记忆使用六个平面：`soul`、`rules`、`profile`、`explicit`、`long_term`、`episodic`；凭据只通过独立 vault 工具访问。正文通过结构化参数传输。
+
+全部命令都接受 `--root <路径>`；不传时库根就是程序自己所处的目录（其中含 `Global.md`/`Index.md` 时），再退到 `~/AgentsBook`。`ABOOK_ROOT` 仅作老脚本兼容。
 
 `abook help` 里列了每个命令实际接受哪些参数——写错参数名会被直接拒绝，不会静默忽略。
+
+旧 `write`、`promote`、`demote`、`candidate`、`canonical` 命令只用于历史库兼容、迁移和旧脚本，不属于新的 MCP 记忆生命周期。下方逐命令参数表是**旧 CLI 兼容参考**，其中路径与 `--approve` 语义只适用于旧目录格式；新客户端应使用上文 MCP 平面工具，不把这些旧生命周期规则套用到 MCP。
 
 ## 读：了解库
 
@@ -105,7 +107,9 @@ L1 只做字面匹配；L2 加正则与编辑距离；L3 起进入 BM25 语义�
 
 多条匹配会报错并列出候选，不会瞎猜。
 
-## 写：改动（正式库需 `--approve`）
+## 写：改动（旧 CLI 兼容参考）
+
+本节只描述历史目录格式和旧脚本兼容行为。新 MCP 直接使用 `memory_write`、`memory_update`、`memory_delete`、`memory_restore` 与 `memory_batch_*`，不接受 candidate/canonical 或 `--approve` 作为新平面写入前置。
 
 | 命令 | 作用 |
 |---|---|
@@ -124,9 +128,9 @@ L1 只做字面匹配；L2 加正则与编辑距离；L3 起进入 BM25 语义�
 | `copy <记录>` | 复制，`--to canonical\|candidate` |
 | `merge <A> <B> ...` | 合并成新记录；源记录标 `SUPERSEDED`，仍可检索 |
 | `split <记录> --at <文本>` | 在指定位置拆成两条 |
-| `promote <候选>` | 候选 → 正式（需 `--approve`） |
-| `promote --all` | 一次晋升全部未归档候选（需 `--approve`，见下） |
-| `demote <正式>` | 正式 → 候选（需 `--approve`） |
+| `promote <候选>` | 历史兼容：迁移旧记录到目标平面；新 MCP 使用 `memory_write`/`memory_update` |
+| `promote --all` | 历史兼容迁移入口；新 MCP 使用 `memory_batch_*` |
+| `demote <正式>` | 历史兼容迁移入口；新 MCP 使用显式平面移动/批量维护 |
 | `staging resolve <名> --decision 结论` | 结清一件待决件：原文保留、结论追加、移入 `staging/closed/` |
 | `commit --slug S --body-file F` | 写一条 `canonical/commits` 变更记录 |
 
