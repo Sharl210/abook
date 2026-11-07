@@ -177,6 +177,19 @@ memory_export
 
 旧 `promote`、`demote`、`candidate`、`canonical` 命令仅保留给旧库迁移和兼容脚本；新 MCP 不使用候选/正式晋升生命周期。
 
+## 8. 新 MCP 与迁移事务入口
+
+新客户端优先使用结构化接口：
+
+```text
+abook memory context --root ROOT
+abook memory write --root ROOT --plane explicit --title T --content C
+abook memory export --root ROOT --plane all
+abook migrate --staging-root PATH --verify
+abook recover --dry-run
+abook txn preview --path file --body-file F
+```
+
 ## 6. 保险箱
 
 ```

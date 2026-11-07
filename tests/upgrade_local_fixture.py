@@ -12,6 +12,8 @@ def main(binary):
   init=subprocess.run([str(src),'init','--root',env['ABOOK_ROOT']],env=env,capture_output=True,text=True,timeout=60); assert init.returncode==0,init.stdout+init.stderr
   records=pathlib.Path(env['ABOOK_ROOT'])/'canonical/records'; records.mkdir(parents=True,exist_ok=True)
   for i in range(5): (records/f'C{i}.md').write_text(f'[CANONICAL_MEMORY]\nFORMAT=CANONICAL_MEMORY_V2\nID=C{i}\nTITLE=fixture {i}\nSTATUS=ACTIVE\nKEYS=k{i}\nREAD_WHEN=always\n[/CANONICAL_MEMORY]\n[MEMORY_BODY]\nbody {i}\n[/MEMORY_BODY]\n')
+  candidates=pathlib.Path(env['ABOOK_ROOT'])/'candidate/records'; candidates.mkdir(parents=True,exist_ok=True)
+  for i in range(2): (candidates/f'N-fixture-{i}.md').write_text(f'[CANDIDATE_MEMORY]\nFORMAT=CANDIDATE_MEMORY_V2\nID=N-fixture-{i}\nTITLE=candidate fixture {i}\nSTATUS=ACTIVE\nKEYS=k{i}\nREAD_WHEN=always\n[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\ncandidate body {i}\n[/MEMORY_BODY]\n')
   def fixture(name,data,digest_value):
    base=root/name; rel=pathlib.Path(target)/exe.name; f=base/rel; f.parent.mkdir(parents=True); f.write_bytes(data); f.chmod(0o755)
    (base/'manifest.json').write_text(json.dumps({'schema':'abook-downloads/1','version':version,'files':[{'target':target,'os':'android' if 'android' in target else 'linux','arch':'aarch64' if 'aarch64' in target else 'x86_64','file':rel.as_posix(),'size':len(data),'sha256':digest_value}]}))
