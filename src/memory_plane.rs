@@ -645,7 +645,7 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
 ///
 /// 因此凡是落在 `planes/<平面>/records/` 下的写入，正文必须能解析成一条记录；
 /// 其他路径（配置、报告之类）不归这里管，照旧放行。
-pub fn validate_record_path_and_body(root: &str, path: &str, body: &str) -> R<()> {
+pub fn validate_record_path_and_body(root: &std::path::Path, path: &str, body: &str) -> R<()> {
     let rel = Path::new(path);
     let parts: Vec<String> = rel
         .components()
@@ -664,7 +664,9 @@ pub fn validate_record_path_and_body(root: &str, path: &str, body: &str) -> R<()
             "记忆平面的记录必须是 .md 或 .json，不接受 .{ext}"
         )));
     }
-    let root_abs = root_path(root)?;
+    // 这里刻意不用 `root_path`：它要求库已初始化且布局合法，而批量/事务写入
+    // 本身就可能发生在建库之前；真正的库状态由后续 stage/apply 负责判定。
+    let root_abs = resolve_memory_path(root.to_string_lossy().as_ref())?;
     let full = root_abs.join(rel);
     if ext == "json" {
         mcp_json::parse(body)

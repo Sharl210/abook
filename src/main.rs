@@ -1623,8 +1623,7 @@ fn cmd_txn(a: &Args) -> R<i32> {
             // 能被解析回记录，否则一条坏文件会让 list/context/search/export 全挂。
             // 这道校验放在 CLI 层，是因为 `abook_txn_preview` 在 MCP 侧走的就是
             // 通用路由——只堵 MCP 批量入口会留下同一个洞的另一个出口。
-            let path_text = path.to_string_lossy().to_string();
-            crate::memory_plane::validate_record_path_and_body(&root, &path_text, &body)?;
+            crate::memory_plane::validate_record_path_and_body(&root, path, &body)?;
             tx.stage_file(txn::Selector::new(path), &body)?;
             let token = tx.token().to_string();
             crate::say_line!("{}", if a.has("json") { format!("{{\"token\":{},\"revision\":{}}}", jstr(&token), tx.revision) } else { token });
