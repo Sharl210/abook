@@ -336,6 +336,10 @@ def test_memory_tools():
         assert attach_get["result"]["structuredContent"]["stdout"].splitlines()[0].endswith("-refs/proof.txt")
         attach_rm = send(p, request("m17", "tools/call", {"name": "abook_attach_rm", "arguments": {"record": record["id"], "attachment_name": "proof.txt", "root": root}}))
         assert attach_rm["result"]["isError"] is False, attach_rm
+        empty_attach_list = send(p, request("m18", "tools/call", {"name": "abook_attach_list", "arguments": {"record": record["id"], "root": root}}))
+        assert empty_attach_list["result"]["isError"] is False, empty_attach_list
+        assert empty_attach_list["result"]["structuredContent"]["count"] == 0
+        assert empty_attach_list["result"]["structuredContent"]["items"] == []
 
     finally:
         p.stdin.close()
