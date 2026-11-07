@@ -735,7 +735,10 @@ if crate::util::Args::known("per-page") {
         listed.sort();
         listed.dedup();
         let known = crate::known_commands();
-        let missing: Vec<&String> = listed.iter().filter(|c| !known.contains(&c.as_str())).collect();
+        // `mcp` is an early process-level mode dispatch (before CLI routes), so it
+        // is a valid advertised entry but intentionally absent from known_commands,
+        // which feeds legacy CLI/MCP route registration.
+        let missing: Vec<&String> = listed.iter().filter(|c| c.as_str() != "mcp" && !known.contains(&c.as_str())).collect();
         if missing.is_empty() {
             pass += 1;
             if verbose {
@@ -2602,7 +2605,10 @@ if crate::util::Args::known("per-page") {
         }
         listed.sort();
         listed.dedup();
-        let missing: Vec<&String> = listed.iter().filter(|c| !known.contains(&c.as_str())).collect();
+        // `mcp` is an early process-level mode dispatch (before CLI routes), so it
+        // is a valid advertised entry but intentionally absent from known_commands,
+        // which feeds legacy CLI/MCP route registration.
+        let missing: Vec<&String> = listed.iter().filter(|c| c.as_str() != "mcp" && !known.contains(&c.as_str())).collect();
         if missing.is_empty() && !listed.is_empty() {
             pass += 1;
             if verbose {
