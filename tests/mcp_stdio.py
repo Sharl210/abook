@@ -63,6 +63,13 @@ def test_modern():
         assert "普通记忆平面" in dr["instructions"]
         assert "credentials" in dr["instructions"]
         assert "candidate/canonical" in dr["instructions"]
+        # 两条优先级要求必须出现在主入口里，否则模型会退回命令行：
+        # ① 有工具就用工具，不要用 CLI；② 环境没接 MCP 就先配 MCP 再干活。
+        assert "优先用这里提供的工具" in dr["instructions"]
+        assert "不要退回命令行" in dr["instructions"]
+        assert "为本环境配置它" in dr["instructions"]
+        # 配法只给判断原则，不写死某个宿主的分步手册——写死就会误导别的环境。
+        assert "不必套用别的宿主的写法" in dr["instructions"]
         discover_meta = send(p, request("d-meta", "server/discover"))
         assert discover_meta["result"]["resultType"] == "complete"
         assert discover_meta["result"]["supportedVersions"] == [MODERN]
