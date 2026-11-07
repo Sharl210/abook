@@ -595,6 +595,32 @@ def test_eof_and_stdout_purity():
         json.loads(line)
 
 
+def test_plane_layout_diagnostics():
+    """六平面库上 reconcile/doctor 必须按六平面口径判健康。
+
+    回归自真实缺陷：reconcile 固定遍历旧 canonical/candidate，在刚建好的六平面
+    库上直接 IO 失败(rc=6)；doctor 固定查 Global.md/Index.md，把健康库判成异常
+    (rc=5)；vault 又是按需创建的，把它算缺失等于给每个新库记一条假异常。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-diag-")
+    p = start()
+    try:
+        init = send(p, request("g0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        assert init["result"]["isError"] is False, init
+        w = send(p, request("g1", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "诊断样本", "content": "正文"}}))
+        assert w["result"]["isError"] is False, w
+        # reconcile/doctor 没有独立的 MCP 工具，直接跑 CLI：缺陷本来就在 CLI 层。
+        for cmd in ("reconcile", "doctor"):
+            done = subprocess.run([BIN, cmd, "--root", root, "--json"],
+                                  capture_output=True, text=True)
+            assert done.returncode == 0, (cmd, done.returncode, done.stdout, done.stderr)
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
+
+
 def test_detect_sees_plane_layout():
     """`abook_detect` 必须认出六平面库。
 
@@ -629,6 +655,7 @@ if __name__ == "__main__":
     test_memory_tools()
     test_migrate_tools()
     test_detect_sees_plane_layout()
+    test_plane_layout_diagnostics()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 9 suites passed")
+    print("MCP stdio tests: 10 suites passed")

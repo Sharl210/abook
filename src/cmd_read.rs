@@ -2141,11 +2141,12 @@ fn doctor_planes(root: &std::path::Path, want_json: bool) -> R<i32> {
         }
     }
 
+    // vault 是按需创建的：没有存过凭据的库本来就没有这个目录。把它判成
+    // "缺失"会让每个刚初始化的健康库都报一条异常，噪音掩盖真问题。
     if root.join("vault").is_dir() {
         entries.push(("vault".to_string(), "存在".to_string(), true));
     } else {
-        entries.push(("vault".to_string(), "缺失".to_string(), false));
-        fail += 1;
+        entries.push(("vault".to_string(), "未使用（按需创建）".to_string(), true));
     }
 
     // 记录可解析性是这套布局最要紧的健康项：一条坏文件会让整库读不了。
