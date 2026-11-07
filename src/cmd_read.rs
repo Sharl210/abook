@@ -1437,6 +1437,11 @@ pub fn cmd_doctor(a: &Args) -> R<i32> {
         }
         return Ok(4);
     }
+    // 六平面库没有 Global.md/Index.md 这对旧文件，硬查会把一个刚建好的健康库
+    // 判成不健康（rc=5）。布局不同，健康标准也不同。
+    if crate::memory_plane::detect_layout(&root)? {
+        return doctor_planes(&root, want_json);
+    }
     for f in ["Global.md", "Index.md"] {
         let p = root.join(f);
         if p.exists() {
@@ -1534,6 +1539,12 @@ fn doctor_json(root: &std::path::Path, entries: &[(String, String, bool)], fail:
 
 pub fn cmd_reconcile(a: &Args) -> R<i32> {
     let root = resolve_root(a);
+    // 六平面库没有 canonical/candidate 目录与旧 Atlas，硬按旧布局遍历会在
+    // 第一次读 canonical 时直接 IO 失败——用户对一个刚建好、完全健康的库
+    // 得到 rc=6，看起来像库坏了。库格式不同就走不同的对账口径。
+    if crate::memory_plane::detect_layout(&root)? {
+        return reconcile_planes(&root, a);
+    }
     let mut problems = 0;
     // JSON is assembled alongside the human report; reconcile already computes
     // every number it prints, so one more sink is cheaper than a second pass
@@ -1989,3 +2000,189 @@ fn plane_view(
 }
 
 
+
+/// 六平面库的三方对账：磁盘记录 vs 平面索引 vs context 计数。
+///
+/// 旧布局有两个库目录和一张 Atlas 地图，六平面布局没有这些：每条记录是
+/// `planes/<平面>/records/` 下的独立文件，索引由内存索引在读取时建立。
+/// 因此"对账"在这里的含义是——盘上文件数、可解析记录数、context 报告数
+/// 三者是否一致，以及有没有解析不了的文件（那会让整库读不了）。
+fn reconcile_planes(root: &std::path::Path, a: &Args) -> R<i32> {
+    let root_str = root.to_string_lossy().to_string();
+    let mut problems = 0i64;
+    let mut mismatched = 0i64;
+    let mut dirs = 0i64;
+    let mut per_plane: Vec<(String, usize, usize)> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+
+    for plane in crate::memory_plane::PLANES.iter().copied() {
+        let dir = root.join("planes").join(plane).join("records");
+        if !dir.is_dir() {
+            continue;
+        }
+        dirs += 1;
+        let mut on_disk = 0usize;
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if !meta.is_file() {
+                continue;
+            }
+            match path.extension().and_then(|s| s.to_str()) {
+                Some("json") | Some("md") => on_disk += 1,
+                _ => continue,
+            }
+        }
+        // 用真实读取路径数一遍：读不出来的文件正是要报的问题。这里按 total
+        // 取而不是按页取，否则超过单页上限的平面会被误报成"盘上多、解析少"。
+        let parsed = match crate::memory_plane::list(&root_str, plane, 1, 0) {
+            Ok(value) => value.get("total").cloned().and_then(|v| match v { crate::mcp_json::Value::Number(n) => n.parse::<usize>().ok(), _ => None }).unwrap_or(0),
+            Err(e) => {
+                unreadable.push(format!("{plane}: {}", e.msg()));
+                0
+            }
+        };
+        if parsed != on_disk {
+            mismatched += 1;
+        }
+        per_plane.push((plane.to_string(), on_disk, parsed));
+    }
+
+    let ctx_total = crate::memory_plane::context(&root_str)
+        .ok()
+        .and_then(|v| v.get("total").cloned())
+        .and_then(|v| match v { crate::mcp_json::Value::Number(n) => n.parse::<usize>().ok(), _ => None })
+        .unwrap_or(0);
+    let sum_parsed: usize = per_plane.iter().map(|(_, _, p)| *p).sum();
+    if sum_parsed != ctx_total {
+        mismatched += 1;
+    }
+    problems += mismatched + unreadable.len() as i64;
+
+    if a.has("json") {
+        let planes_json = per_plane
+            .iter()
+            .map(|(name, disk, parsed)| {
+                format!(
+                    "{{\"plane\":{},\"on_disk\":{},\"parsed\":{}}}",
+                    crate::util::jstr(name),
+                    disk,
+                    parsed
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let bad_json = unreadable
+            .iter()
+            .map(|s| crate::util::jstr(s))
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::say_line!(
+            "{{\"layout\":\"abook.memory.layout.v1\",\"planes\":[{}],\"dirs\":{},\"records\":{},\"context_total\":{},\"mismatched\":{},\"unreadable\":[{}],\"problems\":{},\"ok\":{}}}",
+            planes_json,
+            dirs,
+            sum_parsed,
+            ctx_total,
+            mismatched,
+            bad_json,
+            problems,
+            problems == 0
+        );
+    } else {
+        for (name, disk, parsed) in &per_plane {
+            crate::say_line!("{}  盘上 {} 条 / 可解析 {} 条", name, disk, parsed);
+        }
+        crate::say_line!("记录合计 {}，context 计数 {}", sum_parsed, ctx_total);
+        if !unreadable.is_empty() {
+            for item in &unreadable {
+                crate::say_line!("无法解析: {}", item);
+            }
+        }
+        crate::say_line!(
+            "{}",
+            if problems == 0 { "对账通过".to_string() } else { format!("发现 {} 处问题", problems) }
+        );
+    }
+    Ok(if problems == 0 { 0 } else { 5 })
+}
+
+/// 六平面库的健康检查。
+///
+/// 判据是这套布局真正的完整性条件：marker 版本正确、六个平面目录齐全、
+/// 每条记录都能被解析、vault 目录存在。缺哪个报哪个，不套用旧布局的文件清单。
+fn doctor_planes(root: &std::path::Path, want_json: bool) -> R<i32> {
+    let mut entries: Vec<(String, String, bool)> = Vec::new();
+    let mut fail = 0i64;
+
+    let marker = root.join(crate::memory_plane::LAYOUT_MARKER);
+    match std::fs::read_to_string(&marker) {
+        Ok(text) if text.trim_end() == crate::memory_plane::LAYOUT_MARKER => {
+            entries.push((crate::memory_plane::LAYOUT_MARKER.to_string(), "版本正确".to_string(), true));
+        }
+        Ok(_) => {
+            entries.push((crate::memory_plane::LAYOUT_MARKER.to_string(), "版本不符".to_string(), false));
+            fail += 1;
+        }
+        Err(_) => {
+            entries.push((crate::memory_plane::LAYOUT_MARKER.to_string(), "缺失".to_string(), false));
+            fail += 1;
+        }
+    }
+
+    for plane in crate::memory_plane::PLANES.iter().copied() {
+        let dir = root.join("planes").join(plane).join("records");
+        if dir.is_dir() {
+            entries.push((format!("planes/{plane}/records"), "存在".to_string(), true));
+        } else {
+            entries.push((format!("planes/{plane}/records"), "缺失".to_string(), false));
+            fail += 1;
+        }
+    }
+
+    if root.join("vault").is_dir() {
+        entries.push(("vault".to_string(), "存在".to_string(), true));
+    } else {
+        entries.push(("vault".to_string(), "缺失".to_string(), false));
+        fail += 1;
+    }
+
+    // 记录可解析性是这套布局最要紧的健康项：一条坏文件会让整库读不了。
+    let root_str = root.to_string_lossy().to_string();
+    match crate::memory_plane::list(&root_str, "all", 1, 0) {
+        Ok(_) => entries.push(("records".to_string(), "全部可解析".to_string(), true)),
+        Err(e) => {
+            entries.push(("records".to_string(), format!("解析失败: {}", e.msg()), false));
+            fail += 1;
+        }
+    }
+
+    if want_json {
+        let rows = entries
+            .iter()
+            .map(|(name, detail, ok)| {
+                format!(
+                    "{{\"name\":{},\"detail\":{},\"ok\":{}}}",
+                    crate::util::jstr(name),
+                    crate::util::jstr(detail),
+                    ok
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::say_line!(
+            "{{\"root\":{},\"layout\":\"abook.memory.layout.v1\",\"healthy\":{},\"entries\":[{}]}}",
+            crate::util::jstr(&root.display().to_string()),
+            fail == 0,
+            rows
+        );
+    } else {
+        crate::say_line!("记忆根    {}", root.display());
+        for (name, detail, ok) in &entries {
+            crate::say_line!("  {}  {}  {}", if *ok { "OK  " } else { "FAIL" }, name, detail);
+        }
+        crate::say_line!("{}", if fail == 0 { "健康".to_string() } else { format!("{fail} 项异常") });
+    }
+    Ok(if fail == 0 { 0 } else { 5 })
+}
