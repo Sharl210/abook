@@ -608,7 +608,34 @@ fn legacy_readonly_command(name: &str) -> bool {
 
 fn tool_is_registered(name: &str) -> bool {
     if crate::mcp_registry::public_tools().iter().any(|tool| tool.name == name && tool.is_public()) { return true; }
-    matches!(name, "memory_init" | "memory_paths" | "memory_index" | "memory_export" | "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
+    matches!(name, "memory_init" | "memory_paths" | "memory_index" | "memory_export" | "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_move_plane" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
+}
+
+/// 自检：schema 里声明的每个 memory_* 工具都必须能被白名单接受，反之亦然。
+///
+/// 这条来自一个真实事故：`memory_move_plane` 已写进 tools/list 的 schema、
+/// 也已实现分发，却漏进 `tool_is_registered` 的白名单，于是调用直接得到
+/// JSON-RPC 层错误而不是工具结果。schema 说有、实际调不通，是最难查的一类
+/// 不一致——调用方看到工具存在，却永远失败。
+#[cfg(test)]
+pub fn assert_memory_tools_consistent() -> Vec<String> {
+    let declared: Vec<String> = memory_tools()
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(as_string).map(str::to_string))
+        .collect();
+    let mut problems = Vec::new();
+    for name in &declared {
+        if !tool_is_registered(name) {
+            problems.push(format!("schema 已声明但白名单拒绝: {name}"));
+        }
+    }
+    for name in &declared {
+        let probe = obj(vec![("root", Value::s("/nonexistent-probe"))]);
+        if matches!(direct_memory_call(name, &probe), Value::Null) {
+            problems.push(format!("分发返回空: {name}"));
+        }
+    }
+    problems
 }
 
 fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<String>), String> {
@@ -738,3 +765,12 @@ fn legacy_result(v: Value, legacy: bool) -> Value {
 fn write_response(w: &mut impl Write, id: Value, result: Value) { let line = if let Value::Object(mut m) = result { if let Some(Value::Number(code)) = m.remove("__error") { let message = m.remove("message").unwrap_or(Value::s("error")); let data = m.remove("data").unwrap_or(Value::Null); obj(vec![("jsonrpc", Value::s("2.0")), ("id", id), ("error", obj(vec![("code", Value::Number(code)), ("message", message), ("data", data)]))]) } else { obj(vec![("jsonrpc", Value::s("2.0")), ("id", id), ("result", Value::Object(m))]) } } else { obj(vec![("jsonrpc", Value::s("2.0")), ("id", id), ("result", result)]) }; let _ = writeln!(w, "{}", mcp_json::stringify(&line)); let _ = w.flush(); }
 fn write_error(w: &mut impl Write, id: Value, code: i64, message: &str, data: Option<Value>) { write_response(w, id, error_value(code, message, data)); }
 fn write_legacy_initialize(w: &mut impl Write, id: Value) { let r = obj(vec![("protocolVersion", Value::s(LEGACY)), ("capabilities", obj(vec![("tools", obj(vec![])), ("resources", obj(vec![])), ("prompts", obj(vec![]))])), ("serverInfo", obj(vec![("name", Value::s(SERVER)), ("version", Value::s(VERSION))])), ("instructions", Value::s(instructions()))]); let msg = obj(vec![("jsonrpc", Value::s("2.0")), ("id", id), ("result", r)]); let _ = writeln!(w, "{}", mcp_json::stringify(&msg)); let _ = w.flush(); }
+
+#[cfg(test)]
+mod consistency_tests {
+    #[test]
+    fn memory_tools_all_reachable() {
+        let problems = super::assert_memory_tools_consistent();
+        assert!(problems.is_empty(), "工具面不一致: {problems:?}");
+    }
+}
