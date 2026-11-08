@@ -904,7 +904,7 @@ pub fn move_plane(root: &str, id: &str, to_plane: &str, expected_revision: &str)
 /// 模式匹配"，不是完整的 PCRE 语义——不支持反向引用和前瞻，遇到不支持的
 /// 语法直接报错，而不是静默给出错误结果（静默错配比不支持更糟）。
 pub struct LiteRegex {
-    branches: Vec<Vec<Token>>,
+    branches: Vec<Vec<(Token, Quant)>>,
 }
 
 #[derive(Clone, Debug)]

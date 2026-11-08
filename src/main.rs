@@ -1549,12 +1549,12 @@ fn cmd_migrate(a: &Args) -> R<i32> {
             let rendered: Vec<String> = items
                 .iter()
                 .map(|i| {
-                    crate::mcp_json::stringify(&crate::mcp_json::object(vec![
-                        ("path", crate::mcp_json::Value::s(i.path.clone())),
-                        ("kind", crate::mcp_json::Value::s(i.kind.clone())),
-                        ("reason", crate::mcp_json::Value::s(i.reason.clone())),
-                        ("removable", crate::mcp_json::Value::b(i.removable)),
-                    ]))
+                    let mut map = crate::mcp_json::Value::object();
+                    map.insert("path".into(), crate::mcp_json::Value::s(i.path.clone()));
+                    map.insert("kind".into(), crate::mcp_json::Value::s(i.kind.clone()));
+                    map.insert("reason".into(), crate::mcp_json::Value::s(i.reason.clone()));
+                    map.insert("removable".into(), crate::mcp_json::Value::b(i.removable));
+                    crate::mcp_json::stringify(&crate::mcp_json::Value::Object(map))
                 })
                 .collect();
             crate::say_line!("[{}]", rendered.join(","));
