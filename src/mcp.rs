@@ -694,7 +694,17 @@ fn legacy_readonly_command(name: &str) -> bool {
 
 fn tool_is_registered(name: &str) -> bool {
     if crate::mcp_registry::public_tools().iter().any(|tool| tool.name == name && tool.is_public()) { return true; }
-    matches!(name, "memory_init" | "memory_paths" | "memory_index" | "memory_export" | "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore" | "memory_move_plane" | "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status" | "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
+    // memory 工具不再手抄名单：只要写进 memory_tools()/batch_tools() 就自动被认可。
+    // 这份名单手抄过两次，两次都漏了新工具，症状是"tools/list 里有、调用报未知工具"。
+    // 由 schema 驱动之后，这类漏登记在结构上不可能再发生。
+    // 先绑定到局部变量：`Vec` 的临时值在 `.iter()` 借用期间会被立刻释放，
+    // 直接把两次调用串起来写会得到一个借用已释放值的编译错误。
+    let declared = memory_tools();
+    let batched = batch_tools();
+    if declared.iter().chain(batched.iter()).any(|tool| tool.get("name").and_then(as_string) == Some(name)) {
+        return true;
+    }
+    matches!(name, "memory_help" | "spec_list" | "spec_get" | "skill_list" | "skill_read" | "system_update")
 }
 
 /// 自检：schema 里声明的每个 memory_* 工具都必须能被白名单接受，反之亦然。
