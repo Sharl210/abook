@@ -692,6 +692,40 @@ def test_root_optional_and_field_edit():
     assert p.returncode == 0, p.stderr.read()
 
 
+def test_attach_root_at_config_time():
+    """配置期把库根写进启动参数，之后每次调用都不必再传。
+
+    这是 MCP 服务该有的形态：客户端在配置里写一次
+    `args: ["mcp", "stdio", "--root", "/path"]`，进程内所有工具都用它。
+    靠"每次调用时推导"不如这样确定——推导取决于二进制位置、环境变量和 cwd，
+    任何一处变动都会指向别的库。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-attach-")
+    try:
+        setup = subprocess.run([BIN, "memory", "init", "--root", root], capture_output=True, text=True)
+        assert setup.returncode == 0, setup.stderr
+        p = start(["mcp", "stdio", "--root", root])
+        try:
+            send(p, request("a0", "initialize", {"protocolVersion": LEGACY, "capabilities": CAPS, "clientInfo": CLIENT}))
+            send(p, request("a1", "notifications/initialized", {}, add_meta=False), response=False)
+            # 完全不传 root
+            wrote = send(p, request("a2", "tools/call", {"name": "memory_write", "arguments": {
+                "plane": "explicit", "title": "配置期固定库根", "content": "正文"}}))
+            assert wrote["result"]["isError"] is False, wrote
+            ctx = send(p, request("a3", "tools/call", {"name": "memory_context", "arguments": {}}))
+            assert ctx["result"]["isError"] is False, ctx
+            assert ctx["result"]["structuredContent"]["total"] == 1, ctx
+            # 写下来的确实在启动参数指定的那个库
+            assert os.path.isdir(os.path.join(root, "planes", "explicit", "records")), "记录应落在 --root 指定的库"
+            on_disk = os.listdir(os.path.join(root, "planes", "explicit", "records"))
+            assert len(on_disk) == 1, on_disk
+        finally:
+            p.stdin.close()
+            p.wait(timeout=5)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_detect_sees_plane_layout():
     """`abook_detect` 必须认出六平面库。
 
@@ -728,6 +762,7 @@ if __name__ == "__main__":
     test_detect_sees_plane_layout()
     test_plane_layout_diagnostics()
     test_root_optional_and_field_edit()
+    test_attach_root_at_config_time()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 11 suites passed")
+    print("MCP stdio tests: 12 suites passed")

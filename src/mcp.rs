@@ -21,7 +21,44 @@ pub fn should_start_default_stdio(argv: &[String]) -> bool {
     argv.is_empty() && !io::stdin().is_terminal()
 }
 
-pub fn run_stdio() -> i32 {
+/// 进程级固定库根。
+///
+/// MCP 服务由客户端在配置里拉起，客户端本来就能给启动参数。把库根在**配置期**
+/// 定下来（`abook mcp stdio --root /path/to/lib`），比每次调用时推导更确定：
+/// 推导依赖二进制位置、环境变量和 cwd，任何一处变动都可能指向别的库；
+/// 而写进配置的路径是唯一的、可复核的、不随运行环境漂移的。
+///
+/// 进程内所有未显式传 root 的工具调用都用它，显式传的仍然优先。
+static ATTACHED_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn attached_root() -> Option<&'static str> {
+    ATTACHED_ROOT.get().map(String::as_str)
+}
+
+/// 从 MCP 启动参数里取 `--root` / `--root=...`。
+fn parse_attached_root(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--root=") {
+            if !value.trim().is_empty() { return Some(value.trim().to_string()); }
+        }
+        if arg == "--root" {
+            if let Some(value) = args.get(index + 1) {
+                if !value.starts_with('-') && !value.trim().is_empty() {
+                    return Some(value.trim().to_string());
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+pub fn run_stdio(argv: &[String]) -> i32 {
+    if let Some(root) = parse_attached_root(argv) {
+        let _ = ATTACHED_ROOT.set(root);
+    }
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout());
     let mut legacy = false;
@@ -218,8 +255,13 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             _ => return Err(format!("未知 memory 工具: {name}")),
         };
         validate_batch_args(args, allowed)?;
-        // root 可选：二进制与库同层，程序自己知道库在哪。传了就按传的走。
-        let root = scalar_text(args, "root").unwrap_or_default();
+        // root 优先级：显式传参 > 配置期固定的 --root > 运行时推导。
+        // 配置期固定排在推导前面，因为写进客户端配置的路径是确定的，
+        // 而推导取决于二进制位置、环境变量和 cwd，任一处变动就会指向别的库。
+        let root = scalar_text(args, "root")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| attached_root().map(str::to_string))
+            .unwrap_or_default();
         match name {
             "memory_index" => {
                 let plane = scalar_text(args, "plane");
@@ -352,7 +394,10 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
             _ => return Err(format!("未知批量工具: {name}")),
         };
         validate_batch_args(args, allowed)?;
-        let root = scalar_text(args, "root").unwrap_or_default();
+        let root = scalar_text(args, "root")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| attached_root().map(str::to_string))
+            .unwrap_or_default();
         match name {
             "memory_batch_preview" => {
                 let path = scalar_text(args, "path").ok_or("preview 缺少 path")?;

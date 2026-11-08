@@ -782,8 +782,21 @@ fn main() {
     // 是协议通道，只允许逐行 JSON-RPC。
     if crate::mcp::is_requested(&argv) || crate::mcp::should_start_default_stdio(&argv) {
         let args = if argv.first().map(|x| x == "mcp").unwrap_or(false) { &argv[1..] } else { &argv[..] };
-        if args.first().map(|x| x == "stdio").unwrap_or(false) || args.is_empty() {
-            std::process::exit(crate::mcp::run_stdio());
+        // `--root` 是配置期参数，不是子命令：客户端在配置里写成
+        // `args: ["mcp", "stdio", "--root", "/path"]`，库根就此固定，
+        // 之后每次工具调用都不必再传。这里把 stdio 从参数里摘掉，其余
+        // 原样交给 run_stdio 解析（未来加别的启动参数也不必再改这里）。
+        let mut rest = args;
+        if rest.first().map(|x| x == "stdio").unwrap_or(false) {
+            rest = &rest[1..];
+        }
+        // 三种启动形态都进 stdio：`mcp`（无参）、`mcp stdio`、`mcp --root X`。
+        // 其余形态（未知子命令）交回下面的 CLI 路由，保持既有行为。
+        let stdio_form = args.is_empty()
+            || args.first().map(|x| x == "stdio").unwrap_or(false)
+            || args.first().map(|x| x.starts_with("--")).unwrap_or(false);
+        if stdio_form {
+            std::process::exit(crate::mcp::run_stdio(rest));
         }
     }
     if argv.first().map(|x| x == "cli").unwrap_or(false) {
