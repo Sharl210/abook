@@ -569,6 +569,20 @@ fn prompts_get(req: &Value, _legacy: bool) -> Value {
     ]))
 }
 
+/// 直接经内存内核处理（不走 CLI 子进程）的 memory 工具。
+///
+/// 唯一真源：新增 memory_* 工具时只改这里，schema 与分发自动一致。
+fn is_direct_memory_tool(name: &str) -> bool {
+    memory_tools()
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(as_string))
+        .any(|declared| declared == name)
+        && !matches!(
+            name,
+            "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status"
+        )
+}
+
 fn tools_call(req: &Value, _legacy: bool) -> Value {
     let params = req.get("params");
     let name = params.and_then(|p| p.str("name")).unwrap_or("");
@@ -576,7 +590,10 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         return error_value(-32602, &format!("未知工具: {name}"), None);
     }
     let args = params.and_then(|p| p.get("arguments"));
-    if matches!(name, "memory_init" | "memory_paths" | "memory_index" | "memory_export" | "memory_context" | "memory_write" | "memory_read" | "memory_list" | "memory_search" | "memory_recall" | "memory_update" | "memory_delete" | "memory_restore") {
+    // 这份清单必须与 memory_tools() 的 schema 一致。原先它被手抄了两份，
+    // 加新工具时漏一处就出现"schema 说有、调用报未知工具"——最难查的不一致。
+    // 现在统一由 is_direct_memory_tool 判定，只有一处定义。
+    if is_direct_memory_tool(name) {
         return direct_memory_call(name, args.unwrap_or(&obj(vec![])));
     }
     if matches!(name, "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status") {
@@ -627,6 +644,17 @@ pub fn assert_memory_tools_consistent() -> Vec<String> {
     for name in &declared {
         if !tool_is_registered(name) {
             problems.push(format!("schema 已声明但白名单拒绝: {name}"));
+        }
+    }
+    // 第二道：白名单通过还不够，必须真的进到内存内核。
+    // 原先 tools_call 里另有一份手抄清单，漏项时工具会掉到 CLI 路由并报"未知工具"。
+    for name in &declared {
+        let is_batch = matches!(
+            name.as_str(),
+            "memory_batch_preview" | "memory_batch_apply" | "memory_batch_rollback" | "memory_batch_status"
+        );
+        if !is_batch && !is_direct_memory_tool(name) {
+            problems.push(format!("schema 已声明但未进内存内核（会掉到 CLI 路由）: {name}"));
         }
     }
     for name in &declared {
