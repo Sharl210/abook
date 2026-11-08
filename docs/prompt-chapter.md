@@ -60,7 +60,7 @@ abook recent       # 最近变更
 
 六平面库直接用 `memory search`，字段范围由平面决定：
 
-```
+```text
 abook memory search --query 保险箱
 abook memory search --query 保险箱 --plane explicit
 abook memory search --query 保险箱 --field title        # 只搜标题
@@ -71,7 +71,7 @@ abook memory recall --query 保险箱 --plane long_term
 
 维护与追溯：
 
-```
+```text
 abook memory list --status deleted      # 回收站
 abook memory trash                      # 同上，专用入口
 abook memory history --id ID            # 这条为什么变成现在这样
