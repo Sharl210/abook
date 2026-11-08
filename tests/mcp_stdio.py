@@ -68,6 +68,8 @@ def test_modern():
         assert "优先用这里提供的工具" in dr["instructions"]
         assert "不要退回命令行" in dr["instructions"]
         assert "为本环境配置它" in dr["instructions"]
+        # 配置期就要把库根写进启动参数，免得每次调用都传 root。
+        assert "mcp stdio --root" in dr["instructions"]
         # 配法只给判断原则，不写死某个宿主的分步手册——写死就会误导别的环境。
         assert "不必套用别的宿主的写法" in dr["instructions"]
         discover_meta = send(p, request("d-meta", "server/discover"))
