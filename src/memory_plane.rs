@@ -72,9 +72,22 @@ pub fn initialize_layout(root: &str) -> R<()> {
     ensure_layout(&root)
 }
 
+/// 解析记忆库根。
+///
+/// 空 `root` 不是错误：abook 二进制与记忆库同层放置，程序自己就知道库在哪，
+/// 因此缺省时走与 CLI 完全相同的定位链（显式 root → 程序所在目录 →
+/// `ABOOK_ROOT` → `~/AgentsBook`）。要求调用方每次传 root 是把工具的内部
+/// 约定外泄给使用者——真实使用里每调一次 MCP 工具都要重复粘贴一个路径，
+/// 既啰嗦又容易指错目录。
+///
+/// 注意不能简单用"当前工作目录"兜底：cwd 与库根无关，用错地方会静默
+/// 把记录写到别处，比报错更糟。
 fn resolve_memory_path(root: &str) -> R<PathBuf> {
-    if root.is_empty() { return Err(err("memory 工具需要 root")); }
-    let args = crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::from([("root".to_string(), vec![root.to_string()])]) };
+    let args = if root.is_empty() {
+        crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::new() }
+    } else {
+        crate::util::Args { cmd: String::new(), pos: Vec::new(), kv: BTreeMap::from([("root".to_string(), vec![root.to_string()])]) }
+    };
     let resolved = crate::util::resolve_root(&args);
     if resolved.exists() {
         let meta = fs::symlink_metadata(&resolved)?;
@@ -147,7 +160,7 @@ fn legacy_value(path: &Path, plane: &str, raw: &str) -> R<Value> {
         ("revision", Value::n(revision.to_string())), ("status", Value::s(status)),
     ]))
 }
-fn legacy_update(located: &LocatedRecord, expected: &Value, title: Option<&str>, read_when: Option<&str>, content: Option<&str>, status: Option<&str>) -> R<Value> {
+fn legacy_update(located: &LocatedRecord, expected: &Value, title: Option<&str>, read_when: Option<&str>, content: Option<&str>, status: Option<&str>, fields: &[(String, String)]) -> R<Value> {
     let raw = located.legacy_raw.as_ref().ok_or_else(|| err("不是旧迁移记录"))?;
     let mut record = crate::rec::Record::parse_str(raw, &located.path, crate::rec::Lib::Canonical)?;
     let revision = version_of(expected).parse::<u64>().unwrap_or(1).saturating_add(1);
@@ -156,6 +169,17 @@ fn legacy_update(located: &LocatedRecord, expected: &Value, title: Option<&str>,
     if let Some(value) = read_when { record.set("READ_WHEN", value); }
     if let Some(value) = content { record.body = value.to_string(); }
     if let Some(value) = status { record.set("STATUS", value); }
+    // 任意头部字段：KIND/MATURITY/AUTHORITY/KEYS/NOT_FOR/ENTITIES 这些原本没有
+    // 任何写入路径，想改只能删掉重写，那会断掉 ID 与关系链接。这里按调用方
+    // 给的键值逐个写入；空值表示清除该字段。
+    for (key, value) in fields {
+        let upper = key.trim().to_ascii_uppercase();
+        if upper.is_empty() || upper == "ID" {
+            // ID 是身份，改它等于换一条记录，不在字段编辑范围内。
+            return Err(err("字段编辑不接受 ID；改身份请用迁移工具"));
+        }
+        record.set(&upper, value);
+    }
     let rendered = record.render_for_write();
     crate::util::write_atomic_cas(&located.path, &rendered, raw)?;
     legacy_value(&located.path, &located.plane, &rendered)
@@ -595,19 +619,30 @@ mod legacy_migration_tests {
 
 fn version_of(value: &Value) -> String { text(value, "revision").unwrap_or_else(|| "1".to_string()) }
 
-pub fn update(root: &str, id: &str, expected_revision: &str, title: Option<&str>, read_when: Option<&str>, content: Option<&str>) -> R<Value> {
+pub fn update(root: &str, id: &str, expected_revision: &str, title: Option<&str>, read_when: Option<&str>, content: Option<&str>, fields: &[(String, String)]) -> R<Value> {
     let root = resolve_memory_path(root)?;
     let _lock = LibLock::acquire(&root, 30)?;
     verify_layout(&root)?;
     let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
     let current = located.value.clone();
     if version_of(&current) != expected_revision { return Err(err(format!("记忆 revision 冲突: expected={expected_revision} actual={}", version_of(&current)))); }
-    if located.legacy_raw.is_some() { return legacy_update(&located, &current, title, read_when, content, None); }
+    if located.legacy_raw.is_some() { return legacy_update(&located, &current, title, read_when, content, None, fields); }
     let plane = text(&current, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
     let mut map = match current.clone() { Value::Object(m) => m, _ => return Err(err("记忆记录必须是对象")) };
     if let Some(v) = title { map.insert("title".into(), Value::s(v)); }
     if let Some(v) = read_when { map.insert("read_when".into(), Value::s(v)); }
     if let Some(v) = content { map.insert("content".into(), Value::s(v)); }
+    for (key, value) in fields {
+        let normalized = key.trim().to_ascii_lowercase();
+        if normalized.is_empty() || normalized == "id" {
+            return Err(err("字段编辑不接受 id；改身份请用迁移工具"));
+        }
+        // revision/updated_at 由工具维护，调用方写它们会破坏并发保护。
+        if matches!(normalized.as_str(), "revision" | "updated_at" | "created_at") {
+            return Err(err(format!("字段 {normalized} 由工具维护，不接受直接编辑")));
+        }
+        map.insert(normalized, Value::s(value));
+    }
     let next = version_of(&current).parse::<u64>().unwrap_or(1).saturating_add(1);
     map.insert("revision".into(), Value::n(next.to_string())); map.insert("updated_at".into(), Value::n(now().to_string()));
     let next = Value::Object(map); let path = record_path(&root, &plane, id)?; let serialized = mcp_json::stringify(&next); crate::util::write_atomic_cas(&path, &serialized, &mcp_json::stringify(&current))?;
@@ -626,12 +661,25 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     let root = resolve_memory_path(root)?; let _lock = LibLock::acquire(&root, 30)?; verify_layout(&root)?; let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
     let current = located.value.clone();
     if version_of(&current) != expected_revision { return Err(err("记忆 revision 冲突")); }
-    if located.legacy_raw.is_some() { return legacy_update(&located, &current, None, None, None, Some(status)); }
+    if located.legacy_raw.is_some() { return legacy_update(&located, &current, None, None, None, Some(status), &[]); }
     let plane = text(&current, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
     let mut map = match current.clone() { Value::Object(m) => m, _ => return Err(err("记忆记录必须是对象")) };
     let next = version_of(&current).parse::<u64>().unwrap_or(1).saturating_add(1);
     map.insert("status".into(), Value::s(status)); map.insert("revision".into(), Value::n(next.to_string())); map.insert("updated_at".into(), Value::n(now().to_string()));
-    let next_value = Value::Object(map); let path = record_path(&root, &plane, id)?; crate::util::write_atomic_cas(&path, &mcp_json::stringify(&next_value), &mcp_json::stringify(&current))?; Ok(next_value)
+    let next_value = Value::Object(map); let path = record_path(&root, &plane, id)?; crate::util::write_atomic_cas(&path, &mcp_json::stringify(&next_value), &mcp_json::stringify(&current))?;
+    // 默认只回身份与状态：整条记录可能带几十项 legacy_fields，单条 3KB，
+    // 批量删 20 条就吃掉 70KB 上下文，而调用方真正需要知道的只是"改成了什么状态、
+    // 新版本号多少"。要全量再显式要。
+    Ok(compact_status(&next_value))
+}
+
+fn compact_status(value: &Value) -> Value {
+    object(vec![
+        ("id", Value::s(text(value, "id").unwrap_or_default())),
+        ("plane", Value::s(text(value, "plane").unwrap_or_default())),
+        ("revision", Value::s(version_of(value))),
+        ("status", Value::s(text(value, "status").unwrap_or_default())),
+    ])
 }
 
 /// 拦住"会把整库写坏"的批量写入。
@@ -678,4 +726,62 @@ pub fn validate_record_path_and_body(root: &std::path::Path, path: &str, body: &
     legacy_value(&full, &parts[1], body)
         .map(|_| ())
         .map_err(|e| err(format!("记录内容无法解析为记忆记录，会使整库不可读: {}", e.msg())))
+}
+
+/// 跨平面移动一条记录。
+///
+/// 规范把平面归置当常规维护操作，但此前只有 delete + write 两条路可走，
+/// 那样会换掉 ID、断掉 relations 与附件清单——等于把"归置"变成了"删掉重建"。
+/// 这里保留 ID、revision 递增、其余字段原样搬运，只改 plane 归属。
+///
+/// 目标平面已有同 ID 记录时直接报错，不覆盖：那说明调用方指错了对象，
+/// 静默覆盖会让一条真实记录凭空消失。
+pub fn move_plane(root: &str, id: &str, to_plane: &str, expected_revision: &str) -> R<Value> {
+    if !plane_ok(to_plane) { return Err(err(format!("未知记忆平面: {to_plane}"))); }
+    let root = resolve_memory_path(root)?;
+    let _lock = LibLock::acquire(&root, 30)?;
+    verify_layout(&root)?;
+    let located = locate_record(&root, id)?.ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+    let current = located.value.clone();
+    if version_of(&current) != expected_revision {
+        return Err(err(format!(
+            "记忆 revision 冲突: expected={expected_revision} actual={}",
+            version_of(&current)
+        )));
+    }
+    let from_plane = text(&current, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
+    if from_plane == to_plane {
+        return Err(err(format!("记录已在 {to_plane} 平面，无需移动")));
+    }
+    if located.legacy_raw.is_some() {
+        return Err(err(
+            "旧迁移记录暂不支持直接跨平面移动：它的平面信息编码在文件路径上，直接搬会破坏 legacy_ids 映射",
+        ));
+    }
+    let mut map = match current.clone() {
+        Value::Object(m) => m,
+        _ => return Err(err("记忆记录必须是对象")),
+    };
+    let next = version_of(&current).parse::<u64>().unwrap_or(1).saturating_add(1);
+    map.insert("plane".into(), Value::s(to_plane));
+    map.insert("revision".into(), Value::n(next.to_string()));
+    map.insert("updated_at".into(), Value::n(now().to_string()));
+    let moved = Value::Object(map);
+
+    let dest = file_for(&root, to_plane, id)?;
+    if dest.exists() {
+        return Err(err(format!(
+            "目标平面已有同 ID 记录，拒绝覆盖: {id} in {to_plane}"
+        )));
+    }
+    let src = record_path(&root, &from_plane, id)?;
+    crate::util::write_atomic_cas(&dest, &mcp_json::stringify(&moved), &mcp_json::stringify(&current))?;
+    fs::remove_file(&src)?;
+    Ok(object(vec![
+        ("id", Value::s(id)),
+        ("from_plane", Value::s(from_plane)),
+        ("plane", Value::s(to_plane)),
+        ("revision", Value::n(next.to_string())),
+        ("status", Value::s(text(&moved, "status").unwrap_or_else(|| "active".to_string()))),
+    ]))
 }

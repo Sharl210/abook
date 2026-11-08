@@ -87,10 +87,32 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             } else {
                 a.get("content").or_else(|| a.get("body")).map(str::to_string)
             };
-            emit(memory_plane::update(&root, required(a, "id")?, required(a, "expect-revision")?, a.get("title"), a.get("read-when"), content.as_deref())?)
+            emit(memory_plane::update(&root, required(a, "id")?, required(a, "expect-revision")?, a.get("title"), a.get("read-when"), content.as_deref(), &parse_fields(a)?)?)
         }
         "delete" | "rm" => emit(memory_plane::delete(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "restore" => emit(memory_plane::restore(&root, required(a, "id")?, required(a, "expect-revision")?)?),
-        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/update/delete/restore")),
+        "move-plane" | "move" => emit(memory_plane::move_plane(&root, required(a, "id")?, required(a, "to-plane")?, required(a, "expect-revision")?)?),
+        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/update/delete/restore/move-plane")),
     }
+}
+
+/// 解析 `--field KEY=VALUE`，可重复。
+///
+/// 头部字段（KIND/MATURITY/AUTHORITY/KEYS/NOT_FOR/ENTITIES 等）此前没有任何
+/// 写入路径，想改只能删掉整条重写——那会断掉 ID、关系链接和附件清单。
+/// 用可重复的 `--field` 而不是给每个字段开一个专用 flag：头部字段是开放集合，
+/// 每加一个就改一次参数面不现实。
+fn parse_fields(a: &Args) -> R<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for raw in a.kv.get("field").map(|v| v.as_slice()).unwrap_or(&[]) {
+        let (key, value) = match raw.split_once('=') {
+            Some((k, v)) => (k.trim(), v),
+            None => return usage(format!("--field 需要 KEY=VALUE 形式，收到: {raw}")),
+        };
+        if key.is_empty() {
+            return usage(format!("--field 的键不能为空: {raw}"));
+        }
+        out.push((key.to_string(), value.to_string()));
+    }
+    Ok(out)
 }

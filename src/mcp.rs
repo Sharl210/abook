@@ -183,19 +183,20 @@ fn batch_tool(name: &str, desc: &str, properties: Vec<(&str, Value)>, required: 
 
 fn memory_tools() -> Vec<Value> {
     vec![
-        batch_tool("memory_init", "在不包含旧布局的目录中初始化并锁定六平面记忆布局。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
-        batch_tool("memory_context", "读取六个普通记忆平面的计数与凭据域边界。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
-        batch_tool("memory_paths", "读取已验证六平面布局的目录路径，不暴露旧模型路径或凭据值。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
-        batch_tool("memory_index", "分页列出六平面索引元信息，含删除统计、读取回链和标注截断的正文预览；credentials 不出值。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("root")]),
-        batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![Value::s("root")]),
-        batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("root"), Value::s("plane"), Value::s("title"), Value::s("content")]),
-        batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("id")]),
-        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("root")]),
-        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("query")]),
-        batch_tool("memory_recall", "memory_search 的历史事实召回入口。", vec![("root", obj(vec![("type", Value::s("string"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("query")]),
-        batch_tool("memory_update", "按 expected_revision 更新一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("root"), Value::s("id"), Value::s("expected_revision")]),
-        batch_tool("memory_delete", "按 expected_revision 软删除一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("id"), Value::s("expected_revision")]),
-        batch_tool("memory_restore", "按 expected_revision 恢复一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("root"), Value::s("id"), Value::s("expected_revision")]),
+        batch_tool("memory_init", "在不包含旧布局的目录中初始化并锁定六平面记忆布局。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        batch_tool("memory_context", "读取六个普通记忆平面的计数与凭据域边界。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        batch_tool("memory_paths", "读取已验证六平面布局的目录路径，不暴露旧模型路径或凭据值。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        batch_tool("memory_index", "分页列出六平面索引元信息，含删除统计、读取回链和标注截断的正文预览；credentials 不出值。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![]),
+        batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
+        batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
+        batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("id")]),
+        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![]),
+        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("query")]),
+        batch_tool("memory_recall", "memory_search 的历史事实召回入口。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("query")]),
+        batch_tool("memory_update", "按 expected_revision 更新一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))])), ("fields", obj(vec![("type", Value::s("object")), ("description", Value::s("头部字段键值对，如 {\"KIND\":\"DECISION\",\"AUTHORITY\":\"USER_EXPLICIT\"}；数组按逗号拼接")))])], vec![Value::s("id"), Value::s("expected_revision")]),
+        batch_tool("memory_delete", "按 expected_revision 软删除一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
+        batch_tool("memory_move_plane", "按 expected_revision 把一条记录移到另一个平面，保留 ID 与关系链接。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("to_plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("to_plane"), Value::s("expected_revision")]),
+        batch_tool("memory_restore", "按 expected_revision 恢复一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
     ]
 }
 
@@ -210,13 +211,15 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_list" => &["root", "plane", "limit", "offset"][..],
             "memory_search" | "memory_recall" => &["root", "query", "plane", "limit"][..],
             "memory_update" => &[
-                "root", "id", "expected_revision", "title", "read_when", "content", "body",
+                "root", "id", "expected_revision", "title", "read_when", "content", "body", "fields",
             ][..],
             "memory_delete" | "memory_restore" => &["root", "id", "expected_revision"][..],
+            "memory_move_plane" => &["root", "id", "to_plane", "expected_revision"][..],
             _ => return Err(format!("未知 memory 工具: {name}")),
         };
         validate_batch_args(args, allowed)?;
-        let root = scalar_text(args, "root").ok_or("memory 工具缺少 root")?;
+        // root 可选：二进制与库同层，程序自己知道库在哪。传了就按传的走。
+        let root = scalar_text(args, "root").unwrap_or_default();
         match name {
             "memory_index" => {
                 let plane = scalar_text(args, "plane");
@@ -258,7 +261,14 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                 let id = scalar_text(args, "id").ok_or("memory_update 缺少 id")?;
                 let revision = scalar_text(args, "expected_revision").ok_or("memory_update 缺少 expected_revision")?;
                 let content = scalar_text(args, "content").or_else(|| scalar_text(args, "body"));
-                crate::memory_plane::update(&root, &id, &revision, scalar_text(args, "title").as_deref(), scalar_text(args, "read_when").as_deref(), content.as_deref()).map_err(|e| e.msg().to_string())
+                let fields = object_fields(args, "fields")?;
+                crate::memory_plane::update(&root, &id, &revision, scalar_text(args, "title").as_deref(), scalar_text(args, "read_when").as_deref(), content.as_deref(), &fields).map_err(|e| e.msg().to_string())
+            }
+            "memory_move_plane" => {
+                let id = scalar_text(args, "id").ok_or("memory_move_plane 缺少 id")?;
+                let to_plane = scalar_text(args, "to_plane").ok_or("memory_move_plane 缺少 to_plane")?;
+                let revision = scalar_text(args, "expected_revision").ok_or("memory_move_plane 缺少 expected_revision")?;
+                crate::memory_plane::move_plane(&root, &id, &to_plane, &revision).map_err(|e| e.msg().to_string())
             }
             "memory_delete" | "memory_restore" => {
                 let id = scalar_text(args, "id").ok_or("memory 工具缺少 id")?;
@@ -276,11 +286,45 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
 
 fn batch_tools() -> Vec<Value> {
     vec![
-        batch_tool("memory_batch_preview", "预览单批次文件变更并写入 durable preview journal，不修改目标文件。", vec![("root", obj(vec![("type", Value::s("string"))])), ("path", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("path"), Value::s("body")]),
-        batch_tool("memory_batch_apply", "按 preview token 和 expected revision 原子应用暂存变更。", vec![("root", obj(vec![("type", Value::s("string"))])), ("token", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("root"), Value::s("token"), Value::s("expected_revision")]),
-        batch_tool("memory_batch_rollback", "回滚已提交事务并推进新的库 revision。", vec![("root", obj(vec![("type", Value::s("string"))])), ("token", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root"), Value::s("token")]),
-        batch_tool("memory_batch_status", "读取未完成事务的恢复状态，不改目标文件。", vec![("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("root")]),
+        batch_tool("memory_batch_preview", "预览单批次文件变更并写入 durable preview journal，不修改目标文件。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("path", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string"))]))], vec![Value::s("path"), Value::s("body")]),
+        batch_tool("memory_batch_apply", "按 preview token 和 expected revision 原子应用暂存变更。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("token", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("token"), Value::s("expected_revision")]),
+        batch_tool("memory_batch_rollback", "回滚已提交事务并推进新的库 revision。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("token", obj(vec![("type", Value::s("string"))]))], vec![Value::s("token")]),
+        batch_tool("memory_batch_status", "读取未完成事务的恢复状态，不改目标文件。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
     ]
+}
+
+/// 把 `fields` 对象展开成键值对，供 update 写头部字段。
+///
+/// 头部字段是开放集合（KIND/MATURITY/AUTHORITY/KEYS/NOT_FOR/ENTITIES…），
+/// 给每个开一个独立参数会让参数面随字段增长而膨胀，所以用一个对象承载。
+/// 值统一按字符串写入：这些字段本来就是文本语义，数组会按逗号拼接——
+/// 与旧记录格式一致，读回时也能被 legacy_value 正确解析成 relations。
+fn object_fields(args: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    match args.get(key) {
+        None | Some(Value::Null) => return Ok(out),
+        Some(Value::Object(map)) => {
+            for (name, value) in map {
+                let text = match value {
+                    Value::String(s) | Value::Number(s) => s.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Null => String::new(),
+                    Value::Array(items) => items
+                        .iter()
+                        .map(|item| match item {
+                            Value::String(s) | Value::Number(s) => s.clone(),
+                            other => mcp_json::stringify(other),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    other => mcp_json::stringify(other),
+                };
+                out.push((name.clone(), text));
+            }
+        }
+        Some(_) => return Err(format!("{key} 必须是对象，形如 {{\"KIND\":\"DECISION\"}}")),
+    }
+    Ok(out)
 }
 
 fn scalar_text(args: &Value, key: &str) -> Option<String> {
@@ -308,7 +352,7 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
             _ => return Err(format!("未知批量工具: {name}")),
         };
         validate_batch_args(args, allowed)?;
-        let root = scalar_text(args, "root").ok_or("批量工具缺少 root")?;
+        let root = scalar_text(args, "root").unwrap_or_default();
         match name {
             "memory_batch_preview" => {
                 let path = scalar_text(args, "path").ok_or("preview 缺少 path")?;
@@ -351,8 +395,8 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
 fn helper_tool(name: &str, description: &str) -> Value {
     let (properties, required): (Vec<(&str, Value)>, Vec<Value>) = match name {
         "spec_get" => (vec![("name", obj(vec![("type", Value::s("string"))]))], vec![Value::s("name")]),
-        "skill_list" => (vec![("root", obj(vec![("type", Value::s("string"))]))], vec![]),
-        "skill_read" => (vec![("name", obj(vec![("type", Value::s("string"))])), ("root", obj(vec![("type", Value::s("string"))]))], vec![Value::s("name")]),
+        "skill_list" => (vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        "skill_read" => (vec![("name", obj(vec![("type", Value::s("string"))])), ("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![Value::s("name")]),
         _ => (vec![], vec![]),
     };
     batch_tool(name, description, properties, required)
