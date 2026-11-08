@@ -554,7 +554,7 @@ mod legacy_migration_tests {
         fs::write(root.join("legacy_aliases.jsonl"), map).unwrap();
         let read = read(root.to_string_lossy().as_ref(), alias).unwrap();
         assert_eq!(text(&read, "content").as_deref(), Some("Legacy body"));
-        let updated = update(root.to_string_lossy().as_ref(), id, "1", None, None, Some("updated body\nwith newline")).unwrap();
+        let updated = update(root.to_string_lossy().as_ref(), id, "1", None, None, Some("updated body\nwith newline"), &[]).unwrap();
         assert_eq!(text(&updated, "content").as_deref(), Some("updated body\nwith newline"));
         assert_eq!(text(&updated, "revision").as_deref(), Some("2"));
         assert!(fs::read_to_string(&path).unwrap().contains("X_UNKNOWN=preserve me"));
