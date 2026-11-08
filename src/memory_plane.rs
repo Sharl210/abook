@@ -1148,7 +1148,10 @@ pub fn grep(root: &str, pattern: &str, plane: Option<&str>, context: usize, rege
             let window: Vec<String> = (low..high)
                 .map(|i| {
                     let marker = if i == index { ":" } else { "-" };
-                    format!("{i + 1}{marker}{}", lines[i])
+                    // 先算出行号再插入：`{i + 1}` 里的 `+` 会被当成格式标志，
+                    // 编译期直接报 "the `+` sign flag must appear after `:`"。
+                    let line_no = i + 1;
+                    format!("{line_no}{marker}{}", lines[i])
                 })
                 .collect();
             hits.push(object(vec![
