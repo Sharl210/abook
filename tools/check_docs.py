@@ -154,6 +154,21 @@ def first_record(lib):
     但默认列表会把它排除。批量晋升后候选库只剩 0 条待办，`@REC@` 又变空串。
     文档示例要的是"一条真实存在的记录"，不是"一条待办"，所以要看全量。
     """
+    # 六平面库不接受 --lib candidate：那个参数属于旧两库布局。
+    # 这里按库的实际布局选取样命令，否则 @REC@ 恒为空，文档里所有
+    # 需要记录 ID 的命令都会被误报成"缺少参数"。
+    six_plane = os.path.isfile(os.path.join(lib, "abook.memory.layout.v1"))
+    if six_plane:
+        out = subprocess.run(
+            [ABOOK, "list", "--per-page", "1", "--json"],
+            capture_output=True, text=True, env=env_for(lib),
+        ).stdout
+        m = re.search(r'"id":\s*"([^"]+)"', out)
+        if m:
+            return m.group(1)
+        records = os.path.join(lib, "planes", "explicit", "records")
+        names = sorted(n for n in os.listdir(records) if n.endswith((".md", ".json"))) if os.path.isdir(records) else []
+        return os.path.splitext(names[0])[0] if names else ""
     out = subprocess.run(
         [ABOOK, "list", "--lib", "candidate", "--per-page", "1", "--json",
          "--include-promoted"],
@@ -172,7 +187,9 @@ def first_record(lib):
 
 def first_canonical(lib):
     """同 `first_record`：用 JSON 取完整 ID，不解析显示层。"""
+    six_plane = os.path.isfile(os.path.join(lib, "abook.memory.layout.v1"))
     out = subprocess.run(
+        [ABOOK, "list", "--per-page", "1", "--json"] if six_plane else
         [ABOOK, "list", "--lib", "canonical", "--per-page", "1", "--json"],
         capture_output=True, text=True, env=env_for(lib),
     ).stdout

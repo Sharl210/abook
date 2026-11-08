@@ -42,7 +42,7 @@ abook log          # 变更记录，带大小
 abook map          # 地图概览：分支数、路径数、收录时刻
 abook atlas [canonical|candidate]      # 逐分支看地图块
 abook atlas <库> --card <ID>           # 看某条的地图卡
-abook index [关键词]                   # Index.md 的路由表
+abook index                            # 平面计数与收录时刻（六平面）；旧库另支持关键词
 abook tree         # 分支 → 条目数
 abook paths        # 全部路径
 abook recent       # 最近变更
@@ -50,7 +50,21 @@ abook recent       # 最近变更
 
 `state` 是一切的起点。一致性不是"通过"就先 `reconcile` 查明差距，别带着不一致的库继续写。
 
-## 3. 找东西：按代价分五级，默认 L1
+## 3. 找东西
+
+六平面库直接用 `memory search`，字段范围由平面决定：
+
+```
+abook memory search --query 保险箱
+abook memory search --query 保险箱 --plane explicit
+abook memory recall --query 保险箱 --plane long_term
+```
+
+下面的五级检索是**旧两库布局**的能力（`--fuzzy` / `--regex` / `--semantic`
+都建立在旧记录的字段与分支地图上）。六平面库不认这些参数，传了会明确报错
+而不是静默忽略。旧库仍可用，迁移完成后请改用 `memory search`。
+
+### 旧两库布局：按代价分五级，默认 L1
 
 | 级别 | 命令 | 量级 | 什么时候用 |
 |---|---|---|---|
@@ -63,7 +77,7 @@ abook recent       # 最近变更
 L1 走字节预过滤加多线程，不命中的文件根本不解码。L3–L5 在内存里建 BM25 索引，
 **不落盘、不留文件、不预处理库**，搜完即弃。
 
-```
+```text-old-layout
 abook search 保险箱                          # L1
 abook search 记忆开关 --fuzzy --distance 1    # L2 模糊
 abook search 'GATE[A-Z_]+' --regex           # L2 正则
