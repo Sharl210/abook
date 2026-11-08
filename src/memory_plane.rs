@@ -775,7 +775,11 @@ pub fn move_plane(root: &str, id: &str, to_plane: &str, expected_revision: &str)
         )));
     }
     let src = record_path(&root, &from_plane, id)?;
-    crate::util::write_atomic_cas(&dest, &mcp_json::stringify(&moved), &mcp_json::stringify(&current))?;
+    // 目标是新建文件，不是覆盖：`write_atomic_cas` 的语义是"我读到的旧字节
+    // 必须仍然在"，目标不存在时它会把新建判成"文件被删除后重建"而拒绝。
+    // 这里用普通原子写，先写目标、成功后删源——中途失败时两个文件都在，
+    // 后果只是多一条重复记录（可检测可清理），而不是凭空丢一条。
+    crate::util::write_atomic(&dest, &mcp_json::stringify(&moved))?;
     fs::remove_file(&src)?;
     Ok(object(vec![
         ("id", Value::s(id)),
