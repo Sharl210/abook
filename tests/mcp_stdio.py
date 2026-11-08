@@ -643,13 +643,25 @@ def test_root_optional_and_field_edit():
         init = send(p, request("r0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
         assert init["result"]["isError"] is False, init
 
-        # 1) 省略 root：二进制所在目录不是库根，此时必须诚实地报错而不是乱写；
-        #    显式传 root 仍照常工作。这条防的是"省略 root 就静默写到别处"。
-        no_root = send(p, request("r1", "tools/call", {"name": "memory_list", "arguments": {"plane": "explicit"}}))
+        # 1) 省略 root：用 ABOOK_ROOT 指向同一库，验证省略时真的解析到它，
+        #    而不是靠"看看报错文案里有没有 root"这种不稳的判据。
         explicit = send(p, request("r2", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit"}}))
         assert explicit["result"]["isError"] is False, explicit
-        # 至少有一条路径能工作；省略时要么正确解析到同一库，要么明确报错。
-        assert (no_root["result"]["isError"] is False) or ("root" in json.dumps(no_root["result"], ensure_ascii=False).lower())
+        p2 = subprocess.Popen(
+            [BIN, "mcp", "stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+            env={**os.environ, "ABOOK_ROOT": root},
+        )
+        try:
+            send(p2, request("e0", "initialize", {"protocolVersion": LEGACY, "capabilities": CAPS, "clientInfo": CLIENT}))
+            send(p2, request("e1", "notifications/initialized", {}, add_meta=False), response=False)
+            no_root = send(p2, request("e2", "tools/call", {"name": "memory_list", "arguments": {"plane": "explicit"}}))
+            assert no_root["result"]["isError"] is False, no_root
+            # 与显式传 root 的结果一致，说明确实解析到同一个库。
+            assert no_root["result"]["structuredContent"]["total"] == explicit["result"]["structuredContent"]["total"], (no_root, explicit)
+        finally:
+            p2.stdin.close()
+            p2.wait(timeout=5)
 
         # 2) 头部字段编辑
         wrote = send(p, request("r3", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "long_term", "title": "字段编辑样本", "content": "正文"}}))
