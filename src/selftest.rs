@@ -420,8 +420,11 @@ pub fn run(verbose: bool, only: Option<usize>) -> (usize, usize, usize, Vec<Stri
                 }
             }
             if total == 0 {
-                fail += 1;
-                msgs.push("FAIL  lint/audit 一致性：库为空，无法验证".to_string());
+                // 空库是合法状态，不是失败。旧写法把它记成 FAIL，用户装好工具
+                // 第一件事就是看到一条"FAIL"，去查一个不存在的问题。
+                // 这里改为如实跳过并说明原因：检查没做，但没做不等于坏了。
+                skip += 1;
+                msgs.push("SKIP lint/audit 一致性：当前库无旧布局记录（六平面库不含这套字段），已跳过".to_string());
             } else if audit_clean + lint_bad != total {
                 fail += 1;
                 msgs.push(format!(
@@ -3003,7 +3006,10 @@ TARGET=candidate/records/a.md\nSCOPE=仅改动 1 条记录\nSUMMARY=改了一个
     // got prose, and every layer above it accepted the text because the command
     // exited 0. A format the tool cannot produce must be a usage error.
     if let Some(exe) = self_path() {
-        let live = crate::util::resolve_root(&crate::util::Args::default());
+        // 这一段测的是旧两库布局的 export 格式契约（`--format json/jsonl`）。
+        // 六平面库没有这套格式，拿当前库去探测只会得到"不是数组"的假失败，
+        // 让健康安装看起来是坏的。所以在自己的临时旧库里测，与当前库无关。
+        let live = selftest_legacy_probe_root(&exe);
         let mut bad: Vec<String> = Vec::new();
         let probe = |args: &[&str]| -> Option<(i32, String, String)> {
             let out = std::process::Command::new(&exe)
@@ -3060,7 +3066,9 @@ TARGET=candidate/records/a.md\nSCOPE=仅改动 1 条记录\nSUMMARY=改了一个
     // counts rather than hunting for a marker string, because a body may
     // legitimately contain the word TITLE.
     if let Some(exe) = self_path() {
-        let root = crate::util::resolve_root(&crate::util::Args::default());
+        // 同样在临时旧库里测：`cat`/`show` 的旧参数面属于两库布局，
+        // 六平面库上它们按设计拒绝，拿当前库探测只会把"格式不同"报成"坏了"。
+        let root = selftest_legacy_probe_root(&exe);
         let first = first_record_arg(&root);
         let mut bad: Vec<String> = Vec::new();
         let probe = |args: &[&str]| -> Option<(i32, String, String)> {
@@ -4558,4 +4566,30 @@ fn first_record_arg(root: &std::path::Path) -> String {
         }
     }
     "none".to_string()
+}
+
+/// 为旧布局专用检查准备一个临时两库根，里面有 2 条记录。
+///
+/// 为什么不用当前库：`export --format json/jsonl`、`cat`、旧 `describe` 参数面
+/// 都是旧两库布局的能力。拿六平面库去探测，命令会按设计拒绝，于是健康安装
+/// 得到一堆 FAIL——把"库格式不同"误报成"工具坏了"，这比不测更糟：用户会去
+/// 排查一个不存在的故障。用独立的临时旧库探测，检查的仍然是同一套契约。
+fn selftest_legacy_probe_root(exe: &std::path::Path) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("abook-selftest-legacy-{}", std::process::id()));
+    let records = root.join("canonical").join("records");
+    if std::fs::create_dir_all(&records).is_ok() {
+        for index in 1..=2 {
+            let id = format!("C-20260101T00000{index}-selftest{index}");
+            let body = format!(
+                "[CANONICAL_MEMORY]\nID={id}\nTITLE=selftest record {index}\nKIND=DECISION\nREAD_WHEN=selftest\n[/CANONICAL_MEMORY]\n[MEMORY_BODY]\nselftest body {index}\n[/MEMORY_BODY]\n"
+            );
+            let _ = std::fs::write(records.join(format!("{id}.md")), body);
+        }
+        // 地图与索引由工具生成；记录已在盘上，这一步只是让 export 有可导内容。
+        let _ = std::process::Command::new(exe)
+            .arg("refresh")
+            .args(["--root", &root.display().to_string()])
+            .output();
+    }
+    root
 }
