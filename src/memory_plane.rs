@@ -929,7 +929,7 @@ enum Quant {
 
 impl LiteRegex {
     pub fn new(pattern: &str) -> R<Self> {
-        let mut branches = Vec::new();
+        let mut branches: Vec<Vec<(Token, Quant)>> = Vec::new();
         for part in split_unescaped(pattern, '|') {
             branches.push(parse_branch(&part)?);
         }

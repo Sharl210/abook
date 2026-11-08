@@ -1542,21 +1542,27 @@ fn cmd_normalize(a: &Args) -> R<i32> {
 fn cmd_migrate(a: &Args) -> R<i32> {
     let root = resolve_root(a);
     if a.has("leftover") || a.has("leftovers") {
-        let report = migration::migration_write::leftover(&root)?;
+        let items = migration::migration_write::leftover(&root)?;
+        let removable = items.iter().filter(|i| i.removable).count();
+        let pending = items.len() - removable;
         if a.has("json") {
-            crate::say_line!("{}", crate::mcp_json::stringify(&report));
+            let rendered: Vec<String> = items
+                .iter()
+                .map(|i| {
+                    crate::mcp_json::stringify(&crate::mcp_json::object(vec![
+                        ("path", crate::mcp_json::Value::s(i.path.clone())),
+                        ("kind", crate::mcp_json::Value::s(i.kind.clone())),
+                        ("reason", crate::mcp_json::Value::s(i.reason.clone())),
+                        ("removable", crate::mcp_json::Value::b(i.removable)),
+                    ]))
+                })
+                .collect();
+            crate::say_line!("[{}]", rendered.join(","));
         } else {
-            let removable = report.get("removable").and_then(|v| match v { crate::mcp_json::Value::Array(items) => Some(items.len()), _ => None }).unwrap_or(0);
-            let pending = report.get("pending").and_then(|v| match v { crate::mcp_json::Value::Array(items) => Some(items.len()), _ => None }).unwrap_or(0);
             crate::say_line!("迁移残留：可安全删除 {} 项，需人工确认 {} 项", removable, pending);
-            for key in ["removable", "pending"] {
-                if let Some(crate::mcp_json::Value::Array(items)) = report.get(key) {
-                    for item in items {
-                        let path = item.get("path").and_then(|v| match v { crate::mcp_json::Value::String(s) => Some(s.as_str()), _ => None }).unwrap_or("");
-                        let reason = item.get("reason").and_then(|v| match v { crate::mcp_json::Value::String(s) => Some(s.as_str()), _ => None }).unwrap_or("");
-                        crate::say_line!("  [{}] {} — {}", key, path, reason);
-                    }
-                }
+            for item in &items {
+                let tag = if item.removable { "可删" } else { "待确认" };
+                crate::say_line!("  [{}] {} — {}", tag, item.path, item.reason);
             }
         }
         return Ok(0);
