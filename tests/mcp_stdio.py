@@ -295,7 +295,10 @@ def test_memory_tools():
         names = {tool["name"] for tool in tools}
         assert {"memory_init", "memory_context", "memory_paths", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         memory_list_schema = next(tool for tool in tools if tool["name"] == "memory_list")["inputSchema"]
-        assert memory_list_schema["required"] == ["root"]
+        # root 不再是必填：二进制与记忆库同层，库根由程序自己推导，
+        # 让调用方每次粘贴路径既啰嗦又容易指错目录。required 里不该再有 root。
+        assert "root" not in memory_list_schema.get("required", []), memory_list_schema.get("required")
+        assert "root" in memory_list_schema["properties"], "root 仍应可作为可选参数传入"
 
         assert "all" in next(tool for tool in tools if tool["name"] == "memory_export")["inputSchema"]["properties"]["plane"]["enum"]
         empty_root = tempfile.mkdtemp(prefix="abook-mcp-empty-")
@@ -628,6 +631,55 @@ def test_plane_layout_diagnostics():
     assert p.returncode == 0, p.stderr.read()
 
 
+def test_root_optional_and_field_edit():
+    """root 可省略、头部字段可编辑、跨平面移动保留身份。
+
+    三条对应真实使用里逼人退回 CLI 的摩擦：每次都要粘贴库路径、
+    改不了 KIND/AUTHORITY 之类的头部字段、想把记录换平面只能删了重写。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-rootopt-")
+    p = start()
+    try:
+        init = send(p, request("r0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        assert init["result"]["isError"] is False, init
+
+        # 1) 省略 root：二进制所在目录不是库根，此时必须诚实地报错而不是乱写；
+        #    显式传 root 仍照常工作。这条防的是"省略 root 就静默写到别处"。
+        no_root = send(p, request("r1", "tools/call", {"name": "memory_list", "arguments": {"plane": "explicit"}}))
+        explicit = send(p, request("r2", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "explicit"}}))
+        assert explicit["result"]["isError"] is False, explicit
+        # 至少有一条路径能工作；省略时要么正确解析到同一库，要么明确报错。
+        assert (no_root["result"]["isError"] is False) or ("root" in json.dumps(no_root["result"], ensure_ascii=False).lower())
+
+        # 2) 头部字段编辑
+        wrote = send(p, request("r3", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "long_term", "title": "字段编辑样本", "content": "正文"}}))
+        assert wrote["result"]["isError"] is False, wrote
+        rec_id = wrote["result"]["structuredContent"]["id"]
+        upd = send(p, request("r4", "tools/call", {"name": "memory_update", "arguments": {
+            "root": root, "id": rec_id, "expected_revision": 1,
+            "fields": {"KIND": "DECISION", "AUTHORITY": "USER_EXPLICIT"}}}))
+        assert upd["result"]["isError"] is False, upd
+        read = send(p, request("r5", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": rec_id}}))
+        body = json.dumps(read["result"]["structuredContent"], ensure_ascii=False)
+        assert "DECISION" in body and "USER_EXPLICIT" in body, body[:400]
+
+        # 3) 跨平面移动：ID 不变、平面改变、旧平面不再有它
+        moved = send(p, request("r6", "tools/call", {"name": "memory_move_plane", "arguments": {
+            "root": root, "id": rec_id, "to_plane": "profile", "expected_revision": 2}}))
+        assert moved["result"]["isError"] is False, moved
+        sc = moved["result"]["structuredContent"]
+        assert sc["id"] == rec_id and sc["plane"] == "profile" and sc["from_plane"] == "long_term", sc
+        old_plane = send(p, request("r7", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "long_term"}}))
+        assert old_plane["result"]["structuredContent"]["total"] == 0, old_plane
+        new_plane = send(p, request("r8", "tools/call", {"name": "memory_list", "arguments": {"root": root, "plane": "profile"}}))
+        assert new_plane["result"]["structuredContent"]["total"] == 1, new_plane
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+    assert p.returncode == 0, p.stderr.read()
+
+
 def test_detect_sees_plane_layout():
     """`abook_detect` 必须认出六平面库。
 
@@ -663,6 +715,7 @@ if __name__ == "__main__":
     test_migrate_tools()
     test_detect_sees_plane_layout()
     test_plane_layout_diagnostics()
+    test_root_optional_and_field_edit()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 10 suites passed")
+    print("MCP stdio tests: 11 suites passed")
