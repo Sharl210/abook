@@ -227,12 +227,16 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
         batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("id")]),
-        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![]),
-        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("query")]),
+        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], ("status", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该状态的记录：active 或 deleted"))])), ("kind", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该 KIND 的记录，如 DECISION"))])), ("include_deleted", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把软删记录一并列出，可当回收站用"))])), vec![]),
+        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], ("field", obj(vec![("type", Value::s("string")), ("description", Value::s("限定检索字段：all/title/content/read-when"))])), ("regex", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把 query 当正则，支持 . * + ? ^ $ [abc] [a-z] 转义与 |"))])), vec![Value::s("query")]),
         batch_tool("memory_recall", "memory_search 的历史事实召回入口。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("query")]),
         batch_tool("memory_update", "按 expected_revision 更新一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))])), ("fields", obj(vec![("type", Value::s("object")), ("description", Value::s("头部字段键值对对象，数组值按逗号拼接"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
         batch_tool("memory_delete", "按 expected_revision 软删除一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
         batch_tool("memory_move_plane", "按 expected_revision 把一条记录移到另一个平面，保留 ID 与关系链接。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("to_plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("to_plane"), Value::s("expected_revision")]),
+        batch_tool("memory_grep", "按行检索正文，返回命中行与行号（search 回答哪条记录，grep 回答哪一行）。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("pattern", obj(vec![("type", Value::s("string")), ("description", Value::s("要匹配的行内文本"))])), ("plane", obj(vec![("type", Value::s("string")), ("description", Value::s("限定平面；省略为全部六个"))])), ("context", obj(vec![("type", Value::s("integer")), ("description", Value::s("命中行前后各带几行，默认 0"))])), ("regex", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把 pattern 当正则"))]))], vec![Value::s("pattern")]),
+        batch_tool("memory_trash", "列出软删记录，可当回收站用；配合 memory_restore 恢复。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("description", Value::s("限定平面；省略为全部六个"))])), ("page", obj(vec![("type", Value::s("integer")), ("description", Value::s("页码，从 1 开始"))])), ("per_page", obj(vec![("type", Value::s("integer")), ("description", Value::s("每页条数"))]))], vec![]),
+        batch_tool("memory_history", "读取一条记录的当前快照与相关变更记录，用于回答这条为什么变成现在这样。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string")), ("description", Value::s("记录 ID"))])), ("per_page", obj(vec![("type", Value::s("integer")), ("description", Value::s("最多返回多少条，默认 50"))]))], vec![Value::s("id")]),
+        batch_tool("memory_merge", "把第二条记录并入第一条并软删第二条；正文并列保留、缺失字段补齐、关系取并集。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string")), ("description", Value::s("保留的主记录 ID"))])), ("into", obj(vec![("type", Value::s("string")), ("description", Value::s("被并入后软删的记录 ID"))])), ("title", obj(vec![("type", Value::s("string")), ("description", Value::s("合并后的标题；省略则保留主记录原标题"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("description", Value::s("主记录当前 revision，用于防覆盖"))])), ("expected_into_revision", obj(vec![("type", Value::s("integer")), ("description", Value::s("被并入记录当前 revision，用于防覆盖"))]))], vec![Value::s("id"), Value::s("into"), Value::s("expected_revision"), Value::s("expected_into_revision")]),
         batch_tool("memory_restore", "按 expected_revision 恢复一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
     ]
 }
@@ -291,13 +295,78 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                 let plane = scalar_text(args, "plane").unwrap_or_else(|| "all".to_string());
                 let limit = scalar_text(args, "limit").and_then(|s| s.parse().ok()).unwrap_or(100);
                 let offset = scalar_text(args, "offset").and_then(|s| s.parse().ok()).unwrap_or(0);
-                crate::memory_plane::list(&root, &plane, limit, offset).map_err(|e| e.msg().to_string())
+                let filter = crate::memory_plane::ListFilter {
+                    status: scalar_text(args, "status"),
+                    kind: scalar_text(args, "kind"),
+                    include_deleted: matches!(args.get("include_deleted"), Some(Value::Bool(true))),
+                };
+                crate::memory_plane::list_filtered(&root, &plane, limit, offset, &filter)
+                    .map_err(|e| e.msg().to_string())
             }
             "memory_search" | "memory_recall" => {
                 let query = scalar_text(args, "query").ok_or("memory_search 缺少 query")?;
                 let plane = scalar_text(args, "plane");
-                let limit = scalar_text(args, "limit").and_then(|s| s.parse().ok()).unwrap_or(20);
-                crate::memory_plane::search(&root, &query, plane.as_deref(), limit).map_err(|e| e.msg().to_string())
+                let limit = scalar_text(args, "limit")
+                    .or_else(|| scalar_text(args, "per_page"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20);
+                let fields = match scalar_text(args, "field").as_deref() {
+                    Some(v) if v.eq_ignore_ascii_case("title") => crate::memory_plane::SearchFields::Title,
+                    Some(v) if v.eq_ignore_ascii_case("content") || v.eq_ignore_ascii_case("body") => crate::memory_plane::SearchFields::Content,
+                    Some(v) if v.eq_ignore_ascii_case("read-when") || v.eq_ignore_ascii_case("read_when") => crate::memory_plane::SearchFields::ReadWhen,
+                    _ => crate::memory_plane::SearchFields::All,
+                };
+                let regex = matches!(args.get("regex"), Some(Value::Bool(true)));
+                crate::memory_plane::search_filtered(&root, &query, plane.as_deref(), limit, fields, regex)
+                    .map_err(|e| e.msg().to_string())
+            }
+            "memory_grep" => {
+                let pattern = scalar_text(args, "pattern")
+                    .or_else(|| scalar_text(args, "query"))
+                    .ok_or("memory_grep 缺少 pattern")?;
+                let plane = scalar_text(args, "plane");
+                let context = scalar_text(args, "context").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let regex = matches!(args.get("regex"), Some(Value::Bool(true)));
+                crate::memory_plane::grep(&root, &pattern, plane.as_deref(), context, regex)
+                    .map_err(|e| e.msg().to_string())
+            }
+            "memory_trash" => {
+                let plane = scalar_text(args, "plane");
+                let limit = scalar_text(args, "per_page")
+                    .or_else(|| scalar_text(args, "limit"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20);
+                let page = scalar_text(args, "page")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                crate::memory_plane::trash(&root, plane.as_deref(), limit, (page - 1) * limit)
+                    .map_err(|e| e.msg().to_string())
+            }
+            "memory_history" => {
+                let id = scalar_text(args, "id").ok_or("memory_history 缺少 id")?;
+                let limit = scalar_text(args, "per_page")
+                    .or_else(|| scalar_text(args, "limit"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(50);
+                crate::memory_plane::history(&root, &id, limit).map_err(|e| e.msg().to_string())
+            }
+            "memory_merge" => {
+                let id = scalar_text(args, "id").ok_or("memory_merge 缺少 id")?;
+                let into = scalar_text(args, "into").ok_or("memory_merge 缺少 into")?;
+                let primary = scalar_text(args, "expected_revision")
+                    .ok_or("memory_merge 缺少 expected_revision")?;
+                let secondary = scalar_text(args, "expected_into_revision")
+                    .ok_or("memory_merge 缺少 expected_into_revision")?;
+                crate::memory_plane::merge(
+                    &root,
+                    &id,
+                    &into,
+                    scalar_text(args, "title").as_deref(),
+                    &primary,
+                    &secondary,
+                )
+                .map_err(|e| e.msg().to_string())
             }
             "memory_update" => {
                 let id = scalar_text(args, "id").ok_or("memory_update 缺少 id")?;

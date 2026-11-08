@@ -429,10 +429,14 @@ pub fn verify_activated_root(root: &Path, staged: &StagedManifest) -> R<()> {
     for attachment in &staged.attachments {
         verify_hash(&root.join(&attachment.target_rel), &attachment.sha256, "激活附件")?;
     }
-    for (category, entries) in &staged.archives {
+    // `source_rel` already carries the category prefix (`commits/x.md`), so the
+    // category key must not be joined again: doing so looks for
+    // `commits/commits/x.md` and activation fails its own self-check against a
+    // perfectly good tree.
+    for entries in staged.archives.values() {
         for entry in entries {
             if let Some(expected) = &entry.sha256 {
-                verify_hash(&root.join(ARCHIVE_DIR).join(category).join(&entry.source_rel), expected, "激活归档")?;
+                verify_hash(&root.join(ARCHIVE_DIR).join(&entry.source_rel), expected, "激活归档")?;
             }
         }
     }
@@ -1742,4 +1746,78 @@ mod tests {
         assert!(!path_exists_any(&staging));
         let _ = fs::remove_dir_all(root);
     }
+}
+
+/// 列出可以安全删除的迁移残留。
+///
+/// 迁移会在 live 目录的兄弟位置留下两类东西：`.abook-migration-*.receipt`
+/// 标记（已正常完成的应被删掉，崩溃时留在原处）和 `--staging-root` 指定的
+/// 暂存树。此前没有任何入口能看见或清理它们——迁移失败一次，磁盘上就多一份
+/// 几百 MB 的完整副本，且没人知道它能不能删。
+///
+/// 判定刻意保守：只报告"明确无用"的，剩下的一律标为需人工确认。
+pub fn leftover(live_root: &Path) -> R<Value> {
+    let live = absolutize(live_root)?;
+    let parent = live.parent().ok_or_else(|| integrity_error("live 根目录没有父目录"))?;
+    let mut removable: Vec<Value> = Vec::new();
+    let mut pending: Vec<Value> = Vec::new();
+    if !parent.is_dir() {
+        return Ok(crate::mcp_json::object(vec![
+            ("removable", crate::mcp_json::Value::Array(removable)),
+            ("pending", crate::mcp_json::Value::Array(pending)),
+        ]));
+    }
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if !name.starts_with(".abook-migration-") {
+            continue;
+        }
+        if name.ends_with(".receipt") {
+            // receipt 存在 = 有一次迁移没有走完登记流程，不能自动删。
+            let info = match read_receipt(&path) {
+                Ok(receipt) => crate::mcp_json::object(vec![
+                    ("path", crate::mcp_json::Value::s(path.display().to_string())),
+                    ("kind", crate::mcp_json::Value::s("receipt")),
+                    ("phase", crate::mcp_json::Value::s(receipt.phase)),
+                    ("reason", crate::mcp_json::Value::s("上次迁移未正常收尾，先用 migrate recover 核对现场")),
+                ]),
+                Err(_) => crate::mcp_json::object(vec![
+                    ("path", crate::mcp_json::Value::s(path.display().to_string())),
+                    ("kind", crate::mcp_json::Value::s("receipt")),
+                    ("phase", crate::mcp_json::Value::s("unreadable")),
+                    ("reason", crate::mcp_json::Value::s("receipt 无法解析，保留供人工核对")),
+                ]),
+            };
+            pending.push(info);
+            continue;
+        }
+        if name.ends_with(".staging") {
+            // 暂存树：没有对应 receipt 说明这次迁移根本没进入激活阶段，
+            // 里面的内容从未对外生效，删除不影响现有库。
+            let live_receipt = parent
+                .read_dir()
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|other| other.file_name().to_string_lossy().starts_with(".abook-migration-")
+                    && other.file_name().to_string_lossy().ends_with(".receipt"));
+            let info = crate::mcp_json::object(vec![
+                ("path", crate::mcp_json::Value::s(path.display().to_string())),
+                ("kind", crate::mcp_json::Value::s("staging")),
+                ("reason", crate::mcp_json::Value::s(if live_receipt {
+                    "仍有未完成 receipt 指向该库，先处理 receipt"
+                } else {
+                    "未生效的暂存副本，可安全删除"
+                })),
+            ]);
+            if live_receipt { pending.push(info); } else { removable.push(info); }
+        }
+    }
+    Ok(crate::mcp_json::object(vec![
+        ("removable", crate::mcp_json::Value::Array(removable)),
+        ("pending", crate::mcp_json::Value::Array(pending)),
+    ]))
 }

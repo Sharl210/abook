@@ -63,7 +63,20 @@ abook recent       # 最近变更
 ```
 abook memory search --query 保险箱
 abook memory search --query 保险箱 --plane explicit
+abook memory search --query 保险箱 --field title        # 只搜标题
+abook memory search --query 'GATE[A-Z_]+' --regex       # 正则
+abook memory grep --pattern 记忆开关 --context 2        # 按行看命中，带前后文
 abook memory recall --query 保险箱 --plane long_term
+```
+
+维护与追溯：
+
+```
+abook memory list --status deleted      # 回收站
+abook memory trash                      # 同上，专用入口
+abook memory history --id ID            # 这条为什么变成现在这样
+abook memory merge --id A --into B --expect-revision 1 --expect-into-revision 1
+abook memory move-plane --id ID --to-plane profile --expect-revision 2
 ```
 
 下面的五级检索是**旧两库布局**的能力（`--fuzzy` / `--regex` / `--semantic`

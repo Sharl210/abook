@@ -1541,6 +1541,26 @@ fn cmd_normalize(a: &Args) -> R<i32> {
 
 fn cmd_migrate(a: &Args) -> R<i32> {
     let root = resolve_root(a);
+    if a.has("leftover") || a.has("leftovers") {
+        let report = migration::migration_write::leftover(&root)?;
+        if a.has("json") {
+            crate::say_line!("{}", crate::mcp_json::stringify(&report));
+        } else {
+            let removable = report.get("removable").and_then(|v| match v { crate::mcp_json::Value::Array(items) => Some(items.len()), _ => None }).unwrap_or(0);
+            let pending = report.get("pending").and_then(|v| match v { crate::mcp_json::Value::Array(items) => Some(items.len()), _ => None }).unwrap_or(0);
+            crate::say_line!("迁移残留：可安全删除 {} 项，需人工确认 {} 项", removable, pending);
+            for key in ["removable", "pending"] {
+                if let Some(crate::mcp_json::Value::Array(items)) = report.get(key) {
+                    for item in items {
+                        let path = item.get("path").and_then(|v| match v { crate::mcp_json::Value::String(s) => Some(s.as_str()), _ => None }).unwrap_or("");
+                        let reason = item.get("reason").and_then(|v| match v { crate::mcp_json::Value::String(s) => Some(s.as_str()), _ => None }).unwrap_or("");
+                        crate::say_line!("  [{}] {} — {}", key, path, reason);
+                    }
+                }
+            }
+        }
+        return Ok(0);
+    }
     if a.has("recover") {
         let receipt = migration::migration_write::recover_activation(&root)?;
         if a.has("json") {

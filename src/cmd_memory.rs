@@ -78,9 +78,57 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         "list" | "ls" => {
             let plane = a.get("plane").unwrap_or("all");
             let (limit, offset) = page_args(a);
-            emit(memory_plane::list(&root, plane, limit, offset)?)
+            let filter = memory_plane::ListFilter {
+                status: a.get("status").map(str::to_string),
+                kind: a.get("kind").map(str::to_string),
+                include_deleted: a.has("include-deleted") || a.has("deleted"),
+            };
+            emit(memory_plane::list_filtered(&root, plane, limit, offset, &filter)?)
         }
-        "search" | "recall" => emit(memory_plane::search(&root, required(a, "query")?, a.get("plane"), a.num("per-page").unwrap_or(20) as usize)?),
+        "search" | "recall" => {
+            let fields = match a.get("field").or_else(|| a.get("fields")) {
+                Some(name) if name.eq_ignore_ascii_case("title") => memory_plane::SearchFields::Title,
+                Some(name) if name.eq_ignore_ascii_case("content") || name.eq_ignore_ascii_case("body") => memory_plane::SearchFields::Content,
+                Some(name) if name.eq_ignore_ascii_case("read-when") || name.eq_ignore_ascii_case("read_when") => memory_plane::SearchFields::ReadWhen,
+                Some(name) if name.eq_ignore_ascii_case("all") => memory_plane::SearchFields::All,
+                Some(name) => return usage(format!("未知检索字段 `{name}`；可用 all/title/content/read-when")),
+                None => memory_plane::SearchFields::All,
+            };
+            emit(memory_plane::search_filtered(
+                &root,
+                required(a, "query")?,
+                a.get("plane"),
+                a.num("per-page").unwrap_or(20) as usize,
+                fields,
+                a.has("regex"),
+            )?)
+        }
+        "grep" => emit(memory_plane::grep(
+            &root,
+            required(a, "pattern").or_else(|_| required(a, "query"))?,
+            a.get("plane"),
+            a.num("context").unwrap_or(0) as usize,
+            a.has("regex"),
+        )?),
+        "trash" | "deleted" => emit(memory_plane::trash(
+            &root,
+            a.get("plane"),
+            page_args(a).0,
+            page_args(a).1,
+        )?),
+        "history" | "log" => emit(memory_plane::history(
+            &root,
+            required(a, "id")?,
+            a.num("per-page").unwrap_or(50) as usize,
+        )?),
+        "merge" => emit(memory_plane::merge(
+            &root,
+            required(a, "id")?,
+            required(a, "into")?,
+            a.get("title"),
+            required(a, "expect-revision")?,
+            required(a, "expect-into-revision")?,
+        )?),
         "update" | "edit" => {
             let content = if a.get("body-file").is_some() || a.has("stdin") {
                 Some(body(a)?)
@@ -92,7 +140,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         "delete" | "rm" => emit(memory_plane::delete(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "restore" => emit(memory_plane::restore(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "move-plane" | "move" => emit(memory_plane::move_plane(&root, required(a, "id")?, required(a, "to-plane")?, required(a, "expect-revision")?)?),
-        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/update/delete/restore/move-plane")),
+        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/grep/trash/history/merge/update/delete/restore/move-plane")),
     }
 }
 

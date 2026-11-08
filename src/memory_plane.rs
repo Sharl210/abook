@@ -10,7 +10,14 @@ pub const PLANES: &[&str] = &["soul", "rules", "profile", "explicit", "long_term
 pub const LAYOUT_MARKER: &str = "abook.memory.layout.v1";
 
 fn err(message: impl Into<String>) -> EE { match crate::util::integrity::<()>(message) { Err(e) => e, Ok(()) => unreachable!() } }
-fn plane_ok(plane: &str) -> bool { PLANES.contains(&plane) }
+/// 合法平面目录：六个普通平面，加上迁移器产生的墓碑目录。
+///
+/// `tombstones` 不是普通平面——它不参与检索、不出现在 PLANES 的枚举里，
+/// 但迁移器会把软删记录写到 `planes/tombstones/records/`。如果这里不认它，
+/// 含软删记录的库根本建不了迁移树，报"记录平面与目标路径不匹配"。
+pub const TOMBSTONE_PLANE: &str = "tombstones";
+
+fn plane_ok(plane: &str) -> bool { PLANES.contains(&plane) || plane == TOMBSTONE_PLANE }
 
 pub fn verify_layout(root: &Path) -> R<()> {
     let marker = root.join(LAYOUT_MARKER);
@@ -361,20 +368,119 @@ pub fn read(root: &str, id: &str) -> R<Value> {
     crate::util::notfound::<Value>(format!("没有找到记忆记录: {id}"))
 }
 
-pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<Value> {
+/// 检索字段选择。
+///
+/// 原先只能整条模糊比对，想只搜标题或只搜 KEYS 没有出口——那会逼调用方
+/// 先取全量再自己过滤，等于把检索成本转嫁出去。
+#[derive(Clone, Copy, PartialEq)]
+pub enum SearchFields {
+    All,
+    Title,
+    Content,
+    ReadWhen,
+}
+
+pub fn search_filtered(
+    root: &str,
+    query: &str,
+    plane: Option<&str>,
+    limit: usize,
+    fields: SearchFields,
+    regex: bool,
+) -> R<Value> {
     if query.trim().is_empty() { return Err(err("memory_search 需要非空 query")); }
     let root = root_path(root)?;
     let needle = query.to_lowercase();
+    let matcher = if regex { Some(compile_lite_regex(&needle)?) } else { None };
+    // 闭包只读捕获 matcher/needle，与 hits 的可变借用互不干扰。
+    let matches = |hay: &str| -> bool {
+        match &matcher {
+            Some(program) => program.is_match(hay),
+            None => hay.contains(&needle),
+        }
+    };
     let mut hits = Vec::new();
     for item in records(&root, plane)? {
-        let hay = [text(&item, "title"), text(&item, "content"), text(&item, "read_when")].into_iter().flatten().collect::<Vec<_>>().join("\n").to_lowercase();
-        if hay.contains(&needle) { hits.push(item); }
+        let hay = match fields {
+            SearchFields::All => [text(&item, "title"), text(&item, "content"), text(&item, "read_when")]
+                .into_iter().flatten().collect::<Vec<_>>().join("\n"),
+            SearchFields::Title => text(&item, "title").unwrap_or_default(),
+            SearchFields::Content => text(&item, "content").unwrap_or_default(),
+            SearchFields::ReadWhen => text(&item, "read_when").unwrap_or_default(),
+        };
+        if matches(&hay.to_lowercase()) { hits.push(item); }
     }
     hits.sort_by_key(|v| text(v, "id").unwrap_or_default());
+    // 说明：下面这段是 search_filtered 的公共尾部，旧 search 通过它复用。
     let total = hits.len();
     let size = limit.clamp(1, 500);
     hits.truncate(size);
     Ok(object(vec![("items", Value::Array(hits)), ("total", Value::n(total.to_string())), ("limit", Value::n(size.to_string()))]))
+}
+
+/// 兼容入口：不带字段/正则参数的检索。
+pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<Value> {
+    search_filtered(root, query, plane, limit, SearchFields::All, false)
+}
+
+/// 列表过滤条件。
+///
+/// `status` 缺省只看 active——这是原先的行为，但那时无法反过来查看软删记录，
+/// 于是"回收站"在 MCP 面等于不存在：`memory_restore` 有，却没有地方先看见
+/// 被删的条目。`include_deleted` 打开后即可当回收站用。
+#[derive(Default, Clone)]
+pub struct ListFilter {
+    pub status: Option<String>,
+    pub kind: Option<String>,
+    pub include_deleted: bool,
+}
+
+pub fn list_filtered(
+    root: &str,
+    plane: &str,
+    limit: usize,
+    offset: usize,
+    filter: &ListFilter,
+) -> R<Value> {
+    if plane != "all" && !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
+    let root = root_path(root)?;
+    let selected = if plane == "all" { None } else { Some(plane) };
+    let include_deleted = filter.include_deleted
+        || filter
+            .status
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("deleted"))
+            .unwrap_or(false);
+    let mut items = records_with_status(&root, selected, include_deleted)?;
+    if let Some(want) = &filter.status {
+        let want = want.to_ascii_lowercase();
+        items.retain(|item| {
+            text(item, "status")
+                .unwrap_or_else(|| "active".to_string())
+                .eq_ignore_ascii_case(&want)
+        });
+    }
+    if let Some(want) = &filter.kind {
+        let want = want.to_ascii_lowercase();
+        items.retain(|item| {
+            text(item, "kind")
+                .map(|k| k.eq_ignore_ascii_case(&want))
+                .unwrap_or(false)
+        });
+    }
+    items.sort_by(|a,b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "id").cmp(&text(b, "id"))));
+    let total = items.len();
+    let start = offset.min(total);
+    let size = limit.clamp(1, 500);
+    let page = items.into_iter().skip(start).take(size).collect();
+    Ok(object(vec![
+        ("items", Value::Array(page)),
+        ("planes", Value::arr(if plane == "all" { PLANES.iter().map(|p| Value::s(*p)).collect() } else { vec![Value::s(plane)] })),
+        ("total", Value::n(total.to_string())),
+        ("offset", Value::n(start.to_string())),
+        ("limit", Value::n(size.to_string())),
+        ("credentials", Value::s("vault")),
+    ]))
 }
 
 pub fn list(root: &str, plane: &str, limit: usize, offset: usize) -> R<Value> {
@@ -787,5 +893,520 @@ pub fn move_plane(root: &str, id: &str, to_plane: &str, expected_revision: &str)
         ("plane", Value::s(to_plane)),
         ("revision", Value::n(next.to_string())),
         ("status", Value::s(text(&moved, "status").unwrap_or_else(|| "active".to_string()))),
+    ]))
+}
+
+/// 轻量正则引擎：支持 `.`、`*`、`+`、`?`、`^`、`$`、字符类 `[abc]`、`[a-z]`、
+/// 转义 `\d \w \s \.`，以及 `|` 分支。
+///
+/// 为什么自己写而不引 crate：这个项目的硬约束是单二进制、零第三方依赖，
+/// 引 regex crate 会让产物和构建面都变大。而检索场景真正需要的是"够用的
+/// 模式匹配"，不是完整的 PCRE 语义——不支持反向引用和前瞻，遇到不支持的
+/// 语法直接报错，而不是静默给出错误结果（静默错配比不支持更糟）。
+pub struct LiteRegex {
+    branches: Vec<Vec<Token>>,
+}
+
+#[derive(Clone, Debug)]
+enum Token {
+    Literal(char),
+    Any,
+    Class { negated: bool, ranges: Vec<(char, char)> },
+    Digit(bool),
+    Word(bool),
+    Space(bool),
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Quant {
+    One,
+    ZeroOrMore,
+    OneOrMore,
+    Optional,
+}
+
+impl LiteRegex {
+    pub fn new(pattern: &str) -> R<Self> {
+        let mut branches = Vec::new();
+        for part in split_unescaped(pattern, '|') {
+            branches.push(parse_branch(&part)?);
+        }
+        Ok(LiteRegex { branches })
+    }
+
+    pub fn is_match(&self, text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        self.branches.iter().any(|branch| branch_matches(branch, &chars))
+    }
+}
+
+fn split_unescaped(pattern: &str, separator: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            current.push('\\');
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == separator {
+            out.push(std::mem::take(&mut current));
+            continue;
+        }
+        current.push(ch);
+    }
+    if escaped {
+        current.push('\\');
+    }
+    out.push(current);
+    out
+}
+
+fn parse_branch(pattern: &str) -> R<Vec<(Token, Quant)>> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut tokens: Vec<(Token, Quant)> = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        let token = match ch {
+            '.' => { index += 1; Token::Any }
+            '^' => { index += 1; Token::Start }
+            '$' => { index += 1; Token::End }
+            '\\' => {
+                let next = chars.get(index + 1).copied().ok_or_else(|| err("正则末尾的转义不完整"))?;
+                index += 2;
+                match next {
+                    'd' => Token::Digit(false),
+                    'D' => Token::Digit(true),
+                    'w' => Token::Word(false),
+                    'W' => Token::Word(true),
+                    's' => Token::Space(false),
+                    'S' => Token::Space(true),
+                    other => Token::Literal(other),
+                }
+            }
+            '[' => {
+                let (token, consumed) = parse_class(&chars[index..])?;
+                index += consumed;
+                token
+            }
+            '*' | '+' | '?' => {
+                return Err(err(format!("量词 {ch} 前面没有可重复的字符")));
+            }
+            other => { index += 1; Token::Literal(other) }
+        };
+        let quant = match chars.get(index).copied() {
+            Some('*') => { index += 1; Quant::ZeroOrMore }
+            Some('+') => { index += 1; Quant::OneOrMore }
+            Some('?') => { index += 1; Quant::Optional }
+            _ => Quant::One,
+        };
+        tokens.push((token, quant));
+    }
+    Ok(tokens)
+}
+
+fn parse_class(chars: &[char]) -> R<(Token, usize)> {
+    let mut index = 1;
+    let negated = matches!(chars.get(index), Some('^'));
+    if negated { index += 1; }
+    let mut ranges = Vec::new();
+    let mut first = true;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == ']' && !first {
+            return Ok((Token::Class { negated, ranges }, index + 1));
+        }
+        first = false;
+        let low = if ch == '\\' {
+            let next = chars.get(index + 1).copied().ok_or_else(|| err("字符类里转义不完整"))?;
+            index += 2;
+            match next {
+                'd' => { ranges.push(('0', '9')); continue; }
+                'w' => { ranges.push(('a', 'z')); ranges.push(('A', 'Z')); ranges.push(('0', '9')); ranges.push(('_', '_')); continue; }
+                's' => { ranges.push((' ', ' ')); ranges.push(('\t', '\t')); continue; }
+                other => other,
+            }
+        } else {
+            index += 1;
+            ch
+        };
+        if chars.get(index) == Some(&'-') && chars.get(index + 1).map(|c| *c != ']').unwrap_or(false) {
+            let high = chars[index + 1];
+            ranges.push((low, high));
+            index += 2;
+        } else {
+            ranges.push((low, low));
+        }
+    }
+    Err(err("字符类缺少右方括号"))
+}
+
+fn token_matches(token: &Token, ch: char) -> bool {
+    match token {
+        Token::Literal(want) => *want == ch,
+        Token::Any => ch != '\n',
+        Token::Class { negated, ranges } => {
+            let inside = ranges.iter().any(|(low, high)| ch >= *low && ch <= *high);
+            if *negated { !inside } else { inside }
+        }
+        Token::Digit(negated) => ch.is_ascii_digit() != *negated,
+        Token::Word(negated) => (ch.is_alphanumeric() || ch == '_') != *negated,
+        Token::Space(negated) => ch.is_whitespace() != *negated,
+        Token::Start | Token::End => false,
+    }
+}
+
+fn branch_matches(branch: &[(Token, Quant)], text: &[char]) -> bool {
+    // 从每个位置尝试：模式未以 ^ 锚定时等价于"任意起点可匹配"。
+    let anchored_start = matches!(branch.first().map(|(t, _)| t), Some(Token::Start));
+    let starts: Vec<usize> = if anchored_start { vec![0] } else { (0..=text.len()).collect() };
+    starts.into_iter().any(|start| match_from(branch, 0, text, start))
+}
+
+fn match_from(branch: &[(Token, Quant)], token_index: usize, text: &[char], position: usize) -> bool {
+    if token_index == branch.len() {
+        return true;
+    }
+    let (token, quant) = &branch[token_index];
+    match token {
+        Token::Start => return position == 0 && match_from(branch, token_index + 1, text, position),
+        Token::End => return position == text.len() && match_from(branch, token_index + 1, text, position),
+        _ => {}
+    }
+    match quant {
+        Quant::One => {
+            position < text.len()
+                && token_matches(token, text[position])
+                && match_from(branch, token_index + 1, text, position + 1)
+        }
+        Quant::Optional => {
+            (position < text.len()
+                && token_matches(token, text[position])
+                && match_from(branch, token_index + 1, text, position + 1))
+                || match_from(branch, token_index + 1, text, position)
+        }
+        Quant::ZeroOrMore | Quant::OneOrMore => {
+            let minimum = if *quant == Quant::OneOrMore { 1 } else { 0 };
+            let mut consumed = 0;
+            while position + consumed < text.len() && token_matches(token, text[position + consumed]) {
+                consumed += 1;
+            }
+            // 贪心回溯：先试最长，不行再退一个。`consumed + 1 > minimum`
+            // 与下面的 `if consumed == 0 break` 共同保证循环必然收敛——
+            // 少任何一个条件，最小匹配数为 0 时会在 consumed=0 处原地打转。
+            loop {
+                if consumed >= minimum && match_from(branch, token_index + 1, text, position + consumed) {
+                    return true;
+                }
+                if consumed == 0 || consumed <= minimum {
+                    return false;
+                }
+                consumed -= 1;
+            }
+        }
+    }
+}
+
+/// 编译失败要明确报错，不能退回子串匹配——静默降级会让调用方以为正则生效了。
+pub fn compile_lite_regex(pattern: &str) -> R<LiteRegex> {
+    LiteRegex::new(pattern)
+}
+
+/// grep 风格的行级检索：返回命中行与行号，而不是整条记录。
+///
+/// `search` 回答"哪条记录含这个词"，grep 回答"哪一行"，是不同的问题。
+/// 把两者混成一个工具会让返回结构随参数变化，调用方难以稳定解析。
+pub fn grep(root: &str, pattern: &str, plane: Option<&str>, context: usize, regex: bool) -> R<Value> {
+    if pattern.trim().is_empty() { return Err(err("memory_grep 需要非空 pattern")); }
+    let root = root_path(root)?;
+    let needle = pattern.to_lowercase();
+    let matcher = if regex { Some(compile_lite_regex(&needle)?) } else { None };
+    let matches = |line: &str| -> bool {
+        let lower = line.to_lowercase();
+        match &matcher {
+            Some(program) => program.is_match(&lower),
+            None => lower.contains(&needle),
+        }
+    };
+    let mut hits = Vec::new();
+    for item in records(&root, plane)? {
+        let content = text(&item, "content").unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !matches(line) { continue; }
+            let low = index.saturating_sub(context);
+            let high = (index + context + 1).min(lines.len());
+            let window: Vec<String> = (low..high)
+                .map(|i| {
+                    let marker = if i == index { ":" } else { "-" };
+                    format!("{i + 1}{marker}{}", lines[i])
+                })
+                .collect();
+            hits.push(object(vec![
+                ("id", Value::s(text(&item, "id").unwrap_or_default())),
+                ("plane", Value::s(text(&item, "plane").unwrap_or_default())),
+                ("line", Value::n((index + 1).to_string())),
+                ("lines", Value::arr(window.into_iter().map(Value::s).collect())),
+            ]));
+        }
+    }
+    let total = hits.len();
+    Ok(object(vec![
+        ("items", Value::Array(hits)),
+        ("total", Value::n(total.to_string())),
+        ("context", Value::n(context.to_string())),
+    ]))
+}
+
+/// 合并两条记录：保留 primary，把 secondary 的内容并入后软删 secondary。
+///
+/// 规范把合并当常规维护，但 MCP 面此前只能"软删一条"，等于丢了一半信息。
+/// 这里的合并策略是可解释的最小方案：
+/// - 正文：primary 正文 + 分隔线 + secondary 正文（不智能去重，避免把
+///   用户写下的两段相近但不同的判断悄悄消掉）；
+/// - 空字段：用 secondary 补齐 primary 缺失的头部字段；
+/// - 关系：两者的 relations 取并集去重；
+/// - secondary 软删而不是物理删除，可回溯。
+pub fn merge(
+    root: &str,
+    primary_id: &str,
+    secondary_id: &str,
+    title: Option<&str>,
+    expected_primary: &str,
+    expected_secondary: &str,
+) -> R<Value> {
+    if primary_id == secondary_id {
+        return Err(err("不能把一条记录与自身合并"));
+    }
+    let root_path_buf = resolve_memory_path(root)?;
+    let _lock = LibLock::acquire(&root_path_buf, 30)?;
+    verify_layout(&root_path_buf)?;
+    let primary = locate_record(&root_path_buf, primary_id)?.ok_or_else(|| err(format!("没有找到记忆记录: {primary_id}")))?;
+    let secondary = locate_record(&root_path_buf, secondary_id)?.ok_or_else(|| err(format!("没有找到记忆记录: {secondary_id}")))?;
+    if version_of(&primary.value) != expected_primary {
+        return Err(err(format!("记忆 revision 冲突: expected={expected_primary} actual={}", version_of(&primary.value))));
+    }
+    if version_of(&secondary.value) != expected_secondary {
+        return Err(err(format!("记忆 revision 冲突: expected={expected_secondary} actual={}", version_of(&secondary.value))));
+    }
+    if primary.legacy_raw.is_some() || secondary.legacy_raw.is_some() {
+        return Err(err("旧迁移记录暂不支持合并：它们的字段编码与平面映射需要单独处理，强行合并会丢 legacy_ids"));
+    }
+    let primary_plane = text(&primary.value, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
+    let mut map = match primary.value.clone() {
+        Value::Object(m) => m,
+        _ => return Err(err("记忆记录必须是对象")),
+    };
+
+    let primary_body = text(&primary.value, "content").unwrap_or_default();
+    let secondary_body = text(&secondary.value, "content").unwrap_or_default();
+    let merged_body = if secondary_body.trim().is_empty() {
+        primary_body
+    } else if primary_body.trim().is_empty() {
+        secondary_body
+    } else {
+        format!("{primary_body}\n\n---\n\n{secondary_body}")
+    };
+    map.insert("content".into(), Value::s(merged_body));
+
+    if let Some(value) = title {
+        map.insert("title".into(), Value::s(value));
+    }
+
+    // 补齐 primary 缺失的头部字段：不覆盖已有值，避免把主记录的信息冲掉。
+    let fill_keys = [
+        "read_when", "kind", "maturity", "authority", "summary", "brief", "not_for", "source",
+    ];
+    for key in fill_keys {
+        let has = map.get(key).map(|v| !matches!(v, Value::Null) && text(&primary.value, key).map(|s| !s.trim().is_empty()).unwrap_or(false)).unwrap_or(false);
+        if has {
+            continue;
+        }
+        if let Some(value) = text(&secondary.value, key) {
+            if !value.trim().is_empty() {
+                map.insert(key.to_string(), Value::s(value));
+            }
+        }
+    }
+
+    // 关系取并集去重
+    let mut relations: Vec<Value> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for source in [&primary.value, &secondary.value] {
+        if let Some(Value::Array(items)) = source.get("relations") {
+            for item in items {
+                let kind = text(item, "kind").unwrap_or_default();
+                let target = text(item, "target").unwrap_or_default();
+                if seen.insert((kind.clone(), target.clone())) {
+                    relations.push(item.clone());
+                }
+            }
+        }
+    }
+    map.insert("relations".into(), Value::Array(relations));
+
+    let mut legacy_ids: Vec<Value> = Vec::new();
+    let mut seen_ids: BTreeSet<String> = BTreeSet::new();
+    for source in [&primary.value, &secondary.value] {
+        for key in ["legacy_ids", "immutable"] {
+            if let Some(Value::Array(items)) = source.get(key) {
+                for item in items {
+                    let id = match item {
+                        Value::String(s) | Value::Number(s) => s.clone(),
+                        _ => continue,
+                    };
+                    if seen_ids.insert(id.clone()) {
+                        legacy_ids.push(Value::s(id));
+                    }
+                }
+            }
+        }
+        let own = text(source, "id").unwrap_or_default();
+        if seen_ids.insert(own.clone()) {
+            legacy_ids.push(Value::s(own));
+        }
+    }
+    map.insert("legacy_ids".into(), Value::Array(legacy_ids));
+    map.insert(
+        "merged_from".into(),
+        Value::arr(vec![Value::s(primary_id), Value::s(secondary_id)]),
+    );
+
+    let next = version_of(&primary.value).parse::<u64>().unwrap_or(1).saturating_add(1);
+    map.insert("revision".into(), Value::n(next.to_string()));
+    map.insert("updated_at".into(), Value::n(now().to_string()));
+    let merged = Value::Object(map);
+    let primary_path = record_path(&root_path_buf, &primary_plane, primary_id)?;
+    crate::util::write_atomic_cas(
+        &primary_path,
+        &mcp_json::stringify(&merged),
+        &mcp_json::stringify(&primary.value),
+    )?;
+
+    // 副记录软删，可恢复。
+    let secondary_plane = text(&secondary.value, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
+    let secondary_next = version_of(&secondary.value).parse::<u64>().unwrap_or(1).saturating_add(1);
+    let mut secondary_map = match secondary.value.clone() {
+        Value::Object(m) => m,
+        _ => return Err(err("记忆记录必须是对象")),
+    };
+    secondary_map.insert("status".into(), Value::s("deleted"));
+    secondary_map.insert("revision".into(), Value::n(secondary_next.to_string()));
+    secondary_map.insert("updated_at".into(), Value::n(now().to_string()));
+    secondary_map.insert("merged_into".into(), Value::s(primary_id));
+    let secondary_path = record_path(&root_path_buf, &secondary_plane, secondary_id)?;
+    crate::util::write_atomic_cas(
+        &secondary_path,
+        &mcp_json::stringify(&Value::Object(secondary_map)),
+        &mcp_json::stringify(&secondary.value),
+    )?;
+
+    Ok(object(vec![
+        ("id", Value::s(primary_id)),
+        ("plane", Value::s(primary_plane)),
+        ("revision", Value::n(next.to_string())),
+        ("merged", Value::s(secondary_id)),
+        ("status", Value::s("active")),
+    ]))
+}
+
+/// 单条记录的变更历史。
+///
+/// 记录本身只保留最新状态（`revision` + `updated_at`），演化过程写在
+/// 变更记录里。此前 MCP 面看不到某条是怎么变成现在这样的，而"这条为什么
+/// 被改成这样"恰恰是复查时最先要问的问题。
+pub fn history(root: &str, id: &str, limit: usize) -> R<Value> {
+    if !valid_id(id) { return Err(err("非法 memory record id")); }
+    let root_path_buf = resolve_memory_path(root)?;
+    verify_layout(&root_path_buf)?;
+    let located = locate_record(&root_path_buf, id)?
+        .ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+    let current = located.value.clone();
+    let mut entries: Vec<Value> = Vec::new();
+
+    // 记录自身的当前状态永远算一条。
+    entries.push(object(vec![
+        ("kind", Value::s("snapshot")),
+        ("revision", Value::s(version_of(&current))),
+        ("updated_at", Value::s(text(&current, "updated_at").unwrap_or_default())),
+        ("status", Value::s(text(&current, "status").unwrap_or_else(|| "active".to_string()))),
+        ("title", Value::s(text(&current, "title").unwrap_or_default())),
+    ]));
+
+    // 提交变更记录里凡是提到这个 ID 的都算历史线索。
+    let commits = root_path_buf.join("commits");
+    if commits.is_dir() {
+        let mut files: Vec<_> = fs::read_dir(&commits)?.collect::<Result<Vec<_>, _>>()?;
+        files.sort_by_key(|e| e.file_name());
+        for entry in files {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let raw = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+            if !raw.contains(id) {
+                continue;
+            }
+            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let summary = raw
+                .lines()
+                .find(|line| line.to_lowercase().starts_with("summary="))
+                .map(|line| line.splitn(2, '=').nth(1).unwrap_or("").trim().to_string())
+                .unwrap_or_default();
+            entries.push(object(vec![
+                ("kind", Value::s("commit")),
+                ("name", Value::s(name)),
+                ("summary", Value::s(summary)),
+            ]));
+        }
+    }
+
+    entries.reverse();
+    let total = entries.len();
+    let size = limit.clamp(1, 500);
+    entries.truncate(size);
+    Ok(object(vec![
+        ("id", Value::s(id)),
+        ("items", Value::Array(entries)),
+        ("total", Value::n(total.to_string())),
+        ("limit", Value::n(size.to_string())),
+    ]))
+}
+
+/// 回收站：明确只列软删记录。
+///
+/// 与 `list_filtered(status=deleted)` 等价，但单独给一个入口是因为
+/// "我删过什么"是一个稳定的用户问题，不该要求调用方记住过滤参数怎么拼。
+pub fn trash(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<Value> {
+    let root_path_buf = resolve_memory_path(root)?;
+    verify_layout(&root_path_buf)?;
+    let selected = plane.filter(|p| *p != "all");
+    if let Some(name) = selected {
+        if !plane_ok(name) { return Err(err(format!("未知记忆平面: {name}"))); }
+    }
+    let mut items = records_with_status(&root_path_buf, selected, true)?;
+    items.retain(|item| text(item, "status").as_deref() == Some("deleted"));
+    items.sort_by_key(|item| text(item, "id").unwrap_or_default());
+    let total = items.len();
+    let start = offset.min(total);
+    let size = limit.clamp(1, 500);
+    let page: Vec<Value> = items.into_iter().skip(start).take(size).collect();
+    Ok(object(vec![
+        ("items", Value::Array(page)),
+        ("total", Value::n(total.to_string())),
+        ("offset", Value::n(start.to_string())),
+        ("limit", Value::n(size.to_string())),
     ]))
 }
