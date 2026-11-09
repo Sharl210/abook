@@ -219,7 +219,14 @@ fn resolve_legacy_alias(root: &Path, alias: &str) -> R<Option<Value>> {
     Ok(Some(value))
 }
 fn records_with_status(root: &Path, plane: Option<&str>, include_deleted: bool) -> R<Vec<Value>> {
-    let planes: Vec<&str> = match plane { Some(p) => vec![p], None => PLANES.to_vec() };
+    // 要软删记录时得连墓碑平面一起扫：软删会把文件搬进 `planes/tombstones/`，
+    // 只扫六个普通平面就再也读不到它们，`index` 的 deleted 计数恒为 0、
+    // `memory_trash`（回收站）永远是空的。
+    let planes: Vec<&str> = match plane {
+        Some(p) => vec![p],
+        None if include_deleted => PLANES.iter().copied().chain(std::iter::once(TOMBSTONE_PLANE)).collect(),
+        None => PLANES.to_vec(),
+    };
     let mut out = Vec::new();
     for p in planes {
         if !plane_ok(p) { return Err(err(format!("未知记忆平面: {p}"))); }
