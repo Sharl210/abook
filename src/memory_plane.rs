@@ -339,7 +339,10 @@ struct LocatedRecord { plane: String, path: PathBuf, value: Value, legacy_raw: O
 
 fn locate_record(root: &Path, id: &str) -> R<Option<LocatedRecord>> {
     let mut found = Vec::new();
-    for plane in PLANES {
+    // 墓碑平面也要搜：软删会把记录搬进 `planes/tombstones/`，只遍历六个普通
+    // 平面就再也找不到它，`restore` 会报"没有找到记忆记录"——删得掉却恢复不了。
+    let searchable: Vec<&str> = PLANES.iter().copied().chain(std::iter::once(TOMBSTONE_PLANE)).collect();
+    for plane in searchable {
         let dir = ensure_plane_dirs(root, plane)?;
         if !dir.is_dir() { continue; }
         let mut entries: Vec<_> = fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
@@ -354,7 +357,7 @@ fn locate_record(root: &Path, id: &str) -> R<Option<LocatedRecord>> {
                 Some("md") => legacy_value(&path, plane, &raw)?,
                 _ => continue,
             };
-            if text(&value, "id").as_deref() == Some(id) { found.push(LocatedRecord { plane: (*plane).to_string(), path, value, legacy_raw: if entry.path().extension().and_then(|s| s.to_str()) == Some("md") { Some(raw) } else { None } }); }
+            if text(&value, "id").as_deref() == Some(id) { found.push(LocatedRecord { plane: plane.to_string(), path, value, legacy_raw: if entry.path().extension().and_then(|s| s.to_str()) == Some("md") { Some(raw) } else { None } }); }
         }
     }
     match found.len() { 0 => Ok(None), 1 => Ok(found.pop()), _ => Err(err(format!("记忆 ID 跨平面歧义: {id}"))) }
