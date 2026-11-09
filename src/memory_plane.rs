@@ -417,7 +417,7 @@ pub fn search_filtered(
     let size = limit.clamp(1, 500);
     hits.truncate(size);
     // 与列表同理：默认精简，`full` 才回整条。
-    let hits = if full { hits } else { hits.iter().map(slim_record).collect() };
+    let hits: Vec<Value> = if full { hits } else { hits.iter().map(slim_record).collect() };
     Ok(object(vec![("items", Value::Array(hits)), ("total", Value::n(total.to_string())), ("limit", Value::n(size.to_string()))]))
 }
 
@@ -478,7 +478,7 @@ pub fn list_filtered(
     let size = limit.clamp(1, 500);
     let page: Vec<Value> = items.into_iter().skip(start).take(size).collect();
     // 默认给精简视图；`full` 才回整条（含 legacy_fields 之类）。
-    let page = if full { page } else { page.iter().map(slim_record).collect() };
+    let page: Vec<Value> = if full { page } else { page.iter().map(slim_record).collect() };
     Ok(object(vec![
         ("items", Value::Array(page)),
         ("total", Value::n(total.to_string())),
@@ -785,8 +785,8 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // 于是报 `soul 盘上 1 条 / 可解析 0 条` 并 rc=5；`state` 的 total 也会偏。
     // 恢复时同理会搬回原平面（原平面名记在 `prev_plane`）。
     let source_path = record_path(&root, &plane, id)?;
-    let target_plane = match status {
-        "deleted" => TOMBSTONE_PLANE,
+    let target_plane: String = match status {
+        "deleted" => TOMBSTONE_PLANE.to_string(),
         // 从墓碑恢复：优先回到删除前记录的平面，没有记录就回 long_term。
         "active" => text(&next_value, "prev_plane").unwrap_or_else(|| "long_term".to_string()),
         _ => plane.clone(),
@@ -823,24 +823,29 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
 ///
 /// 要看全文用 `memory_read` 按 id 取，那才是该给全文的地方。
 fn slim_record(value: &Value) -> Value {
-    let mut out = vec![
-        ("id", Value::s(text(value, "id").unwrap_or_default())),
-        ("title", Value::s(text(value, "title").unwrap_or_default())),
-        ("plane", Value::s(text(value, "plane").unwrap_or_default())),
-        ("revision", Value::s(version_of(value))),
+    // 用 String 作键：键若取自循环里的数组字面量，借用生命周期会被判为过短。
+    let mut out: Vec<(String, Value)> = vec![
+        ("id".to_string(), Value::s(text(value, "id").unwrap_or_default())),
+        ("title".to_string(), Value::s(text(value, "title").unwrap_or_default())),
+        ("plane".to_string(), Value::s(text(value, "plane").unwrap_or_default())),
+        ("revision".to_string(), Value::s(version_of(value))),
     ];
     // 只补真正影响"要不要打开它"的字段，空的就不出现。
     for key in ["read_when", "status", "confidence", "kind"] {
         if let Some(v) = text(value, key) {
-            if !v.is_empty() { out.push((key, Value::s(v))); }
+            if !v.is_empty() { out.push((key.to_string(), Value::s(v))); }
         }
     }
     // 正文只给开头当引子，够判断就行；需要全文再按 id 读。
     if let Some(content) = text(value, "content") {
         let head: String = content.replace('\n', " ").chars().take(120).collect();
-        if !head.trim().is_empty() { out.push(("preview", Value::s(head))); }
+        if !head.trim().is_empty() { out.push(("preview".to_string(), Value::s(head))); }
     }
-    object(out)
+    // `object()` 只收 `Vec<(&str, Value)>`；这里的键是算出来的 String，
+    // 所以直接构造 BTreeMap，不绕道。
+    let mut map = std::collections::BTreeMap::new();
+    for (k, v) in out { map.insert(k, v); }
+    Value::Object(map)
 }
 
 fn compact_status(value: &Value) -> Value {

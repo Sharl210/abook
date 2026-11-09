@@ -101,6 +101,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
                 a.num("per-page").unwrap_or(20) as usize,
                 fields,
                 a.has("regex"),
+                a.has("full"),
             )?)
         }
         "grep" => emit(memory_plane::grep(
