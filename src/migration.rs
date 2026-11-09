@@ -328,7 +328,10 @@ pub enum TargetPlane {
 impl TargetPlane {
     pub fn as_str(self) -> &'static str {
         match self {
-            TargetPlane::Tombstone => "tombstone",
+            // 目录名是复数（`planes/tombstones/records/`）。这里必须与目录一致：
+            // 校验按 `target_rel` 是否以 `planes/<plane>/records/` 开头来判定平面，
+            // 单数会永远对不上，含软删记录的库因此根本建不了迁移树。
+            TargetPlane::Tombstone => "tombstones",
             TargetPlane::Rules => "rules",
             TargetPlane::Profile => "profile",
             TargetPlane::Explicit => "explicit",

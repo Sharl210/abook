@@ -1386,7 +1386,8 @@ fn plane_dir(plane: TargetPlane) -> &'static str {
 fn lib_from_target(plane: &str) -> Lib {
     // The parser only uses this as a hint.  Both source libraries use the same
     // structural format, and the staged tree intentionally has no old lib tag.
-    if plane == "tombstone" { Lib::Candidate } else { Lib::Canonical }
+    // 墓碑目录名是复数，与 `TargetPlane::Tombstone::as_str()` 一致。
+    if plane == "tombstones" || plane == "tombstone" { Lib::Candidate } else { Lib::Canonical }
 }
 
 fn record_stem(record: &Record) -> String {
@@ -1800,6 +1801,31 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn tombstoned_record_stages_into_tombstones_plane() {
+        // 含软删记录的库曾经根本建不了迁移树：墓碑平面用的是单数
+        // （`tombstone`），目录却是复数（`tombstones`），校验按
+        // `target_rel.starts_with("planes/<plane>/records/")` 判定，永远对不上。
+        // 这条测试锁住"软删记录必须能迁走"。
+        let root = temp_dir("tombstones");
+        fs::create_dir_all(root.join("candidate/records")).unwrap();
+        fs::write(
+            root.join("candidate/records/N-20260101T000000-dead.md"),
+            "[CANDIDATE_MEMORY]\nID=N-20260101T000000-dead\nTITLE=deleted sample\nSTATUS=deleted\n[/CANDIDATE_MEMORY]\n[MEMORY_BODY]\nbody\n[/MEMORY_BODY]\n",
+        )
+        .unwrap();
+        let manifest = migration::scan(&root).unwrap();
+        let staging = root.join("stage");
+        let staged = build_staged(&manifest, &staging).expect("含软删记录的库必须能建迁移树");
+        assert!(
+            staged.records.iter().any(|r| r.target_plane == "tombstones"),
+            "软删记录应落到 tombstones 平面，实得: {:?}",
+            staged.records.iter().map(|r| r.target_plane.clone()).collect::<Vec<_>>()
+        );
+        verify_staged(&staged).expect("暂存树自检必须通过");
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn staging_under_source_is_rejected_before_write() {
         let root = temp_dir("inside");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
