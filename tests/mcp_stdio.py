@@ -728,6 +728,81 @@ def test_attach_root_at_config_time():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_batch_preview_by_record_ids():
+    """批量预览要能按记录改，而不是只认文件名和整篇正文。
+
+    事务层原本只有文件粒度（path + 整篇 body），这对六平面记录模型并不合适：
+    要批量改十条，调用方得先知道每条的存储文件名、当前完整正文，再拼出整篇
+    记录文本。按 ID 改才是自然的表达，所以 memory_batch_preview 接受 records 数组。
+
+    这里同时锁住最要紧的一条：一批里有一条坏的，整批都不许暂存——
+    否则"批量"就成了"改一半"。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-batch-records-")
+    p = start()
+    try:
+        send(p, request("i0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        ids = []
+        for title in ("甲", "乙", "丙"):
+            w = send(p, request("w" + title, "tools/call", {
+                "name": "memory_write",
+                "arguments": {"root": root, "plane": "explicit", "title": title, "content": title + "正文"},
+            }))
+            ids.append(w["result"]["structuredContent"]["id"])
+
+        prev = send(p, request("p1", "tools/call", {
+            "name": "memory_batch_preview",
+            "arguments": {"root": root, "records": [
+                {"id": ids[0], "expected_revision": 1, "title": "甲改", "content": "新正文"},
+                {"id": ids[1], "expected_revision": 1, "status": "deleted"},
+                {"id": ids[2], "expected_revision": 1, "fields": {"kind": "DECISION"}},
+            ]},
+        }))["result"]
+        assert prev["isError"] is False, prev
+        sc = prev["structuredContent"]
+        assert sc["mode"] == "records", sc
+        assert sc["count"] == 3, sc
+
+        applied = send(p, request("p2", "tools/call", {
+            "name": "memory_batch_apply",
+            "arguments": {"root": root, "token": sc["token"], "expected_revision": sc["revision"]},
+        }))["result"]
+        assert applied["isError"] is False, applied
+
+        def read(rid):
+            return send(p, request("r" + rid, "tools/call", {
+                "name": "memory_read", "arguments": {"root": root, "id": rid},
+            }))["result"]["structuredContent"]
+
+        a = read(ids[0])
+        assert a["title"] == "甲改" and a["content"] == "新正文", a
+        assert str(a["revision"]) == "2", a
+        assert read(ids[1])["status"] == "deleted"
+        assert read(ids[2]).get("kind") == "DECISION"
+
+        # 一批里有一条坏的：整批拒绝，好那条一个字都不能动。
+        bad = send(p, request("b1", "tools/call", {
+            "name": "memory_batch_preview",
+            "arguments": {"root": root, "records": [
+                {"id": ids[0], "expected_revision": 2, "title": "本该不生效"},
+                {"id": ids[2], "expected_revision": 99, "title": "坏的"},
+            ]},
+        }))["result"]
+        assert bad["isError"] is True, bad
+        a2 = read(ids[0])
+        assert a2["title"] == "甲改", a2
+        assert str(a2["revision"]) == "2", a2
+
+        status = send(p, request("b3", "tools/call", {
+            "name": "memory_batch_status", "arguments": {"root": root},
+        }))["result"]
+        assert not (status.get("structuredContent") or {}).get("pending"), status
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+
+
 def test_detect_ready_when_binary_outside_root():
     """库已初始化就该 ready，不管二进制放在哪。
 
@@ -788,8 +863,9 @@ if __name__ == "__main__":
     test_detect_sees_plane_layout()
     test_plane_layout_diagnostics()
     test_detect_ready_when_binary_outside_root()
+    test_batch_preview_by_record_ids()
     test_root_optional_and_field_edit()
     test_attach_root_at_config_time()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 13 suites passed")
+    print("MCP stdio tests: 14 suites passed")
