@@ -728,6 +728,30 @@ def test_attach_root_at_config_time():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_detect_ready_when_binary_outside_root():
+    """库已初始化就该 ready，不管二进制放在哪。
+
+    原先 detect 把就绪判成 `in_root && initialized`，要求二进制必须和库同目录。
+    MCP 服务本就是客户端按配置拉起的，库根写在启动参数里（`mcp stdio --root`）
+    才是推荐形态，此时二进制在别处完全正常。旧判定会让这种用法一直
+    ready=false，然后被当成环境没装好去排查。
+    """
+    root = tempfile.mkdtemp(prefix="abook-mcp-detect-ready-")
+    p = start()
+    try:
+        init = send(p, request("d0", "tools/call", {"name": "memory_init", "arguments": {"root": root}}))
+        assert init["result"]["isError"] is False, init
+        det = send(p, request("d1", "tools/call", {"name": "abook_detect", "arguments": {"root": root}}))
+        sc = det["result"].get("structuredContent") or {}
+        # 测试二进制在 target/release 下，与临时库不同目录 —— 正是要覆盖的形态。
+        assert sc.get("initialized") is True, sc
+        assert sc.get("ready") is True, sc
+    finally:
+        p.stdin.close()
+        p.wait(timeout=5)
+        shutil.rmtree(root)
+
+
 def test_detect_sees_plane_layout():
     """`abook_detect` 必须认出六平面库。
 
@@ -763,8 +787,9 @@ if __name__ == "__main__":
     test_migrate_tools()
     test_detect_sees_plane_layout()
     test_plane_layout_diagnostics()
+    test_detect_ready_when_binary_outside_root()
     test_root_optional_and_field_edit()
     test_attach_root_at_config_time()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 12 suites passed")
+    print("MCP stdio tests: 13 suites passed")

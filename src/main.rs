@@ -379,6 +379,13 @@ fn cmd_detect(a: &Args) -> R<i32> {
         || root.join("Index.md").is_file()
         || root.join(crate::memory_plane::LAYOUT_MARKER).is_file()
         || root.join("planes").is_dir();
+    // `in_root` 只作诊断信息，不再当就绪前提。
+    //
+    // 原先把就绪判成 `in_root && initialized`，等于要求二进制必须和库放在同一
+    // 目录。但 MCP 服务是由客户端按配置拉起的，库根完全可以写在启动参数里
+    // （`mcp stdio --root <库根>`），这时二进制放在哪里都无所谓。把 in_root
+    // 当硬条件会让"配置期固定库根"这种本就该支持的用法一直报 ready=false，
+    // 然后被当成环境没装好去排查。
     let in_root = me
         .as_ref()
         .and_then(|p| p.parent())
@@ -402,12 +409,12 @@ fn cmd_detect(a: &Args) -> R<i32> {
             jstr(&root.to_string_lossy()),
             initialized,
             in_root,
-            in_root && initialized,
+            initialized,
             jstr(guard.os),
             guard.functional,
             jstr(guard.detail)
         );
-        return Ok(if in_root && initialized { 0 } else { 4 });
+        return Ok(if initialized { 0 } else { 4 });
     }
 
     println!("平台        {os}/{arch}");
