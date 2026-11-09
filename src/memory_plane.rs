@@ -1534,7 +1534,7 @@ pub fn split(
             Value::Array(created.iter().filter_map(|v| text(v, "id")).map(Value::s).collect()),
         );
         let source_path = record_path(&root_path_buf, &source_plane, id)?;
-        write_atomic_cas(&source_path, &mcp_json::stringify(&Value::Object(map)), &source_snapshot)?;
+        crate::util::write_atomic_cas(&source_path, &mcp_json::stringify(&Value::Object(map)), &source_snapshot)?;
     }
 
     let first_id = created.first().and_then(|v| text(v, "id")).unwrap_or_default();

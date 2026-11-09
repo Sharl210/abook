@@ -373,7 +373,8 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                     &expected,
                     separator.as_deref(),
                     plane.as_deref(),
-                )?
+                )
+                .map_err(|e| e.msg().to_string())
             }
             "memory_merge" => {
                 let id = scalar_text(args, "id").ok_or("memory_merge 缺少 id")?;
