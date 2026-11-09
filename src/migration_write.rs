@@ -1804,7 +1804,7 @@ mod tests {
         assert!(build_staged(&manifest, &staging).is_err());
         assert!(!path_exists_any(&staging));
         assert!(source.is_file());
-        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(staging);
     }
 
@@ -1837,7 +1837,7 @@ mod tests {
         );
         verify_staged(&staged).expect("暂存树自检必须通过");
         let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn staging_under_source_is_rejected_before_write() {
@@ -1850,6 +1850,6 @@ mod tests {
         let staging = root.join("nested-staging");
         assert!(build_staged(&manifest, &staging).is_err());
         assert!(!path_exists_any(&staging));
-        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(root);
     }
 }
