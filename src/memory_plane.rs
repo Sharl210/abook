@@ -1547,3 +1547,101 @@ pub fn split(
         ("first", Value::s(first_id)),
     ]))
 }
+
+/// 把一组"按记录"的修改翻译成事务暂存，不落盘。
+///
+/// 事务层原本只有文件粒度（`path` + 整篇 `body`），这对六平面记录模型不合适：
+/// 调用方要批量改十条记录，就得先知道每条的存储文件名、当前完整正文，再拼出整篇
+/// 记录文本——这些正是工具该替他做的事。按 ID 改才是自然的表达。
+///
+/// 这里只负责"算"：定位、校验 revision、套用改动、渲染成文本，然后交给
+/// `stage_file` 暂存。真正的原子提交仍由事务层完成，所以批量要么全成要么全不成。
+pub struct StagedRecordChange {
+    pub id: String,
+    pub path: String,
+    pub revision: String,
+    pub body: String,
+}
+
+pub fn plan_record_updates(
+    root: &str,
+    requests: &[crate::mcp_json::Value],
+) -> R<Vec<StagedRecordChange>> {
+    let root_path_buf = resolve_memory_path(root)?;
+    verify_layout(&root_path_buf)?;
+    if requests.is_empty() { return Err(err("批量记录改动不能为空")); }
+    let _lock = LibLock::acquire(&root_path_buf, 30)?;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for request in requests {
+        let id = text(request, "id").ok_or_else(|| err("每条批量记录都需要 id"))?;
+        if !seen.insert(id.clone()) {
+            return Err(err(format!("批量里同一条记录出现两次: {id}")));
+        }
+        let expected = text(request, "expected_revision")
+            .ok_or_else(|| err(format!("记录 {id} 缺少 expected_revision")))?;
+        let located = locate_record(&root_path_buf, &id)?
+            .ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+        if located.legacy_raw.is_some() {
+            return Err(err(format!("记录 {id} 是旧迁移记录，暂不支持批量改动")));
+        }
+        let current = located.value.clone();
+        if version_of(&current) != expected {
+            return Err(err(format!(
+                "记录 {id} 的 revision 冲突: expected={expected} actual={}",
+                version_of(&current)
+            )));
+        }
+        let plane = text(&current, "plane").ok_or_else(|| err(format!("记录 {id} 缺少 plane")))?;
+        let mut map = match current.clone() {
+            Value::Object(m) => m,
+            _ => return Err(err("记忆记录必须是对象")),
+        };
+        if let Some(v) = text(request, "title") { map.insert("title".into(), Value::s(v)); }
+        if let Some(v) = text(request, "read_when") { map.insert("read_when".into(), Value::s(v)); }
+        if let Some(v) = text(request, "content") { map.insert("content".into(), Value::s(v)); }
+        // 状态改动走同一条通道：批量软删/恢复是最常见的维护动作。
+        if let Some(v) = text(request, "status") {
+            if !matches!(v.as_str(), "active" | "deleted") {
+                return Err(err(format!("记录 {id} 的 status 只能是 active 或 deleted")));
+            }
+            map.insert("status".into(), Value::s(v));
+        }
+        if let Some(Value::Object(fields)) = request.get("fields") {
+            for (key, value) in fields {
+                let normalized = key.trim().to_ascii_lowercase();
+                if normalized.is_empty() || normalized == "id" {
+                    return Err(err("字段编辑不接受 id；改身份请用迁移工具"));
+                }
+                if matches!(normalized.as_str(), "revision" | "updated_at" | "created_at") {
+                    return Err(err(format!("字段 {normalized} 由工具维护，不接受直接编辑")));
+                }
+                let rendered = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => return Err(err(format!("字段 {normalized} 只接受字符串或数字"))),
+                };
+                map.insert(normalized, Value::s(rendered));
+            }
+        }
+        let next = version_of(&current).parse::<u64>().unwrap_or(1).saturating_add(1);
+        map.insert("revision".into(), Value::n(next.to_string()));
+        map.insert("updated_at".into(), Value::n(now().to_string()));
+        let next_value = Value::Object(map);
+        let path = record_path(&root_path_buf, &plane, &id)?;
+        let rel = path
+            .strip_prefix(&root_path_buf)
+            .map_err(|_| err("记录路径越出库根"))?
+            .to_string_lossy()
+            .to_string();
+        out.push(StagedRecordChange {
+            id,
+            path: rel,
+            revision: next.to_string(),
+            body: mcp_json::stringify(&next_value),
+        });
+    }
+    Ok(out)
+}

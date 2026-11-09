@@ -422,7 +422,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
 
 fn batch_tools() -> Vec<Value> {
     vec![
-        batch_tool("memory_batch_preview", "预览单批次文件变更并写入 durable preview journal，不修改目标文件。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("path", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string"))]))], vec![Value::s("path"), Value::s("body")]),
+        batch_tool("memory_batch_preview", "预览一批改动并写入 durable preview journal，不修改目标文件。两种用法二选一：给 records 按记录改（推荐），或给 path+body 按文件改。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("records", obj(vec![("type", Value::s("array")), ("description", Value::s("按记录批量改：每项含 id、expected_revision，以及要改的 title/read_when/content/status/fields。给这个就不用给 path+body")), ("items", obj(vec![("type", Value::s("object"))]))])), ("path", obj(vec![("type", Value::s("string")), ("description", Value::s("按文件改时用：相对库根的路径"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("按文件改时用：整篇文本"))]))], vec![]),
         batch_tool("memory_batch_apply", "按 preview token 和 expected revision 原子应用暂存变更。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("token", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![Value::s("token"), Value::s("expected_revision")]),
         batch_tool("memory_batch_rollback", "回滚已提交事务并推进新的库 revision。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("token", obj(vec![("type", Value::s("string"))]))], vec![Value::s("token")]),
         batch_tool("memory_batch_status", "读取未完成事务的恢复状态，不改目标文件。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
@@ -481,7 +481,7 @@ fn validate_batch_args(args: &Value, allowed: &[&str]) -> Result<(), String> {
 fn direct_batch_call(name: &str, args: &Value) -> Value {
     let result = (|| -> Result<Value, String> {
         let allowed = match name {
-            "memory_batch_preview" => &["root", "path", "body"][..],
+            "memory_batch_preview" => &["root", "path", "body", "records"][..],
             "memory_batch_apply" => &["root", "token", "expected_revision"][..],
             "memory_batch_rollback" => &["root", "token"][..],
             "memory_batch_status" => &["root"][..],
@@ -494,16 +494,55 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
             .unwrap_or_default();
         match name {
             "memory_batch_preview" => {
-                let path = scalar_text(args, "path").ok_or("preview 缺少 path")?;
-                let body = scalar_text(args, "body").ok_or("preview 缺少 body")?;
-                // 落在 `planes/<平面>/records/` 下的内容必须是可解析的记录。
-                // 不校验的后果不是"多一个文件"，而是整库读不了：records() 是
-                // list/context/search/export 的共同入口，一条坏文件让它报错退出。
-                crate::memory_plane::validate_record_path_and_body(std::path::Path::new(&root), &path, &body)
-                    .map_err(|e| e.msg().to_string())?;
-                let mut tx = crate::txn::Transaction::prepare(&root).map_err(|e| e.msg().to_string())?;
-                tx.stage_file(crate::txn::Selector::new(path), &body).map_err(|e| e.msg().to_string())?;
-                Ok(obj(vec![("token", Value::s(tx.token().to_string())), ("revision", Value::n(tx.revision.to_string()))]))
+                // 两种用法二选一：records 按记录改（推荐），path+body 按文件改。
+                //
+                // 事务层本身只有文件粒度，但六平面是记录模型——调用方要批量改十条
+                // 记录，不该被迫先查出存储文件名再拼整篇记录文本。records 这一层
+                // 就是把"按 ID 改"翻译成"按文件改"，落盘仍走同一套原子提交。
+                let records = args.get("records").cloned();
+                let path = scalar_text(args, "path");
+                let body = scalar_text(args, "body");
+                match (records, path, body) {
+                    (Some(Value::Array(items)), None, None) => {
+                        if items.is_empty() { return Err("records 不能是空数组".to_string()); }
+                        let planned = crate::memory_plane::plan_record_updates(&root, &items)
+                            .map_err(|e| e.msg().to_string())?;
+                        let mut tx = crate::txn::Transaction::prepare(&root).map_err(|e| e.msg().to_string())?;
+                        let mut changes = Vec::new();
+                        for change in &planned {
+                            tx.stage_file(crate::txn::Selector::new(change.path.clone()), &change.body)
+                                .map_err(|e| e.msg().to_string())?;
+                            changes.push(obj(vec![
+                                ("id", Value::s(change.id.clone())),
+                                ("path", Value::s(change.path.clone())),
+                                ("revision", Value::s(change.revision.clone())),
+                            ]));
+                        }
+                        Ok(obj(vec![
+                            ("token", Value::s(tx.token().to_string())),
+                            ("revision", Value::n(tx.revision.to_string())),
+                            ("mode", Value::s("records")),
+                            ("count", Value::n(changes.len().to_string())),
+                            ("changes", Value::Array(changes)),
+                        ]))
+                    }
+                    (None, Some(path), Some(body)) => {
+                        // 落在 `planes/<平面>/records/` 下的内容必须是可解析的记录。
+                        // 不校验的后果不是"多一个文件"，而是整库读不了：records() 是
+                        // list/context/search/export 的共同入口，一条坏文件让它报错退出。
+                        crate::memory_plane::validate_record_path_and_body(std::path::Path::new(&root), &path, &body)
+                            .map_err(|e| e.msg().to_string())?;
+                        let mut tx = crate::txn::Transaction::prepare(&root).map_err(|e| e.msg().to_string())?;
+                        tx.stage_file(crate::txn::Selector::new(path), &body).map_err(|e| e.msg().to_string())?;
+                        Ok(obj(vec![
+                            ("token", Value::s(tx.token().to_string())),
+                            ("revision", Value::n(tx.revision.to_string())),
+                            ("mode", Value::s("file")),
+                        ]))
+                    }
+                    (Some(_), _, _) => Err("records 必须是对象数组；用 records 时不要再给 path/body".to_string()),
+                    _ => Err("preview 需要 records 数组，或同时给 path 和 body".to_string()),
+                }
             }
             "memory_batch_apply" => {
                 let token = scalar_text(args, "token").ok_or("apply 缺少 token")?;
