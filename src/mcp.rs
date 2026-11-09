@@ -249,8 +249,14 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_init" | "memory_paths" | "memory_context" => &["root"][..],
             "memory_write" => &["root", "plane", "title", "read_when", "content", "body"][..],
             "memory_read" => &["root", "id"][..],
-            "memory_list" => &["root", "plane", "limit", "offset"][..],
-            "memory_search" | "memory_recall" => &["root", "query", "plane", "limit"][..],
+            "memory_list" => &["root", "plane", "limit", "offset", "status", "kind", "include_deleted"][..],
+            "memory_search" | "memory_recall" => &["root", "query", "plane", "limit", "per_page", "field", "regex"][..],
+            "memory_grep" => &["root", "pattern", "query", "plane", "context", "regex"][..],
+            "memory_trash" => &["root", "plane", "page", "per_page", "limit"][..],
+            "memory_history" => &["root", "id", "per_page", "limit"][..],
+            "memory_merge" => &[
+                "root", "id", "into", "title", "expected_revision", "expected_into_revision",
+            ][..],
             "memory_update" => &[
                 "root", "id", "expected_revision", "title", "read_when", "content", "body", "fields",
             ][..],
