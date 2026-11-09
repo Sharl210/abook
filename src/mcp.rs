@@ -771,7 +771,19 @@ fn tool_argv(name: &str, args: Option<&Value>) -> Result<(Vec<String>, Option<St
     }
     if name == "system_update" { return Ok((vec!["upgrade".into(), "--json".into()], None)); }
     if name.starts_with("abook_") {
-        return match crate::mcp_registry::build_argv(name, &a) {
+        // 配置期固定的库根要落到每个走 CLI 子进程的工具上。
+        // `build_argv` 只认参数里的 root，如果这里不补，所有 `abook_*` 工具
+        // （附件、vault、spec、skill…）在"配置期 --root"模式下都会去猜库根，
+        // 猜错就报"没有找到附件记录"这种看着像数据问题的错误。
+        let mut effective = a.clone();
+        if effective.str("root").map(|v| v.trim().is_empty()).unwrap_or(true) {
+            if let Some(attached) = attached_root() {
+                if let Value::Object(ref mut map) = effective {
+                    map.insert("root".into(), Value::s(attached.to_string()));
+                }
+            }
+        }
+        return match crate::mcp_registry::build_argv(name, &effective) {
             Ok(argv) => Ok((argv, None)),
             Err(e) => Err(e),
         };
