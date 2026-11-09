@@ -148,14 +148,14 @@ pub fn other<T>(m: impl Into<String>) -> R<T> {
 pub const KNOWN_PARAMS: &[&str] = &[
     "after", "and", "at", "authority", "backup-root", "body", "body-file", "branch", "by",
     "card", "concepts", "confidence", "content", "context", "depth", "dest", "dir",
-    "distance", "edits", "entities", "evidence", "expect-revision", "field", "file", "for", "format",
+    "distance", "edits", "entities", "evidence", "expect-into-revision", "expect-revision", "field", "file", "for", "format",
     "from", "id", "ids", "in", "into", "json-depth", "kb", "keep",
     "keys", "kind", "level", "lib", "library", "match", "maturity", "max",
     "min-score", "mode", "name", "new", "next", "not-for", "old", "operation",
-    "out", "page", "path", "per", "per-page", "plane", "preview-token", "project", "purpose", "q",
+    "out", "page", "path", "pattern", "per", "per-page", "plane", "preview-token", "project", "purpose", "q",
     "query", "read-when", "reason", "related", "root", "scope", "session", "show",
     "since", "size", "slug", "source", "staging-root", "status", "stdin", "summary", "supersedes",
-    "tag", "target", "task", "text", "tier", "title", "to", "token",
+    "tag", "target", "task", "text", "tier", "title", "to", "to-plane", "token",
     "uncertainty", "url", "value", "with", "within",
 ];
 
