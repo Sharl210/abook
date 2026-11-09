@@ -1645,7 +1645,8 @@ mod tests {
 
     #[test]
     fn recovery_receipt_rolls_back_when_live_was_moved_but_stage_not_installed() {
-        let root = temp_dir("recovery");
+        let holder = temp_dir("recovery-holder");
+        let root = holder.join("AgentsBook");
         fs::create_dir_all(root.join("canonical/records")).unwrap();
         fs::create_dir_all(root.join("candidate/records")).unwrap();
         let source = root.join("canonical/records/C-20261101T120000-aaaaaaaa.md");
@@ -1668,13 +1669,18 @@ mod tests {
         assert_eq!(recovered.phase, "RECOVERED_ROLLED_BACK");
         assert!(root.join("canonical/records/C-20261101T120000-aaaaaaaa.md").is_file());
         assert!(!marker.exists());
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(backup);
     }
 
     #[test]
     fn recovery_cleans_prepared_receipt_when_live_remains_old_and_backup_missing() {
-        let root = temp_dir("recovery-prepared");
+        // live 目录要放在自己独占的父目录里：`recover_activation` 会遍历父目录
+        // 找 `.abook-migration-*.receipt`，并要求恰好命中一个。如果直接放在系统
+        // 临时目录顶层，任何一个残留 receipt（别的测试、上一次失败运行）都会
+        // 让这条测试莫名其妙地失败——它看起来像回归，其实是环境污染。
+        let holder = temp_dir("recovery-prepared-holder");
+        let root = holder.join("AgentsBook");
         fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
         fs::write(root.join("planes/long_term/records/old.md"), "old").unwrap();
         let parent = root.parent().unwrap().to_path_buf();
@@ -1693,11 +1699,12 @@ mod tests {
         assert_eq!(recovered.phase, "RECOVERED_NOT_STARTED");
         assert!(!marker.exists());
         assert!(root.join("planes/long_term/records/old.md").is_file());
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
     }
     #[test]
     fn recovery_accepts_only_matching_committed_tree_pair() {
-        let root = temp_dir("recovery-committed");
+        let holder = temp_dir("recovery-committed-holder");
+        let root = holder.join("AgentsBook");
         let parent = root.parent().unwrap().to_path_buf();
         let backup = parent.join(".abook-test-recovery-committed-backup");
         fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
@@ -1719,13 +1726,14 @@ mod tests {
         assert_eq!(recovered.phase, "RECOVERED_COMMITTED");
         assert!(!marker.exists());
         assert!(root.join("planes/long_term/records/new.md").is_file());
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(backup);
     }
 
     #[test]
     fn recovery_rejects_digest_mismatch_and_keeps_receipt() {
-        let root = temp_dir("recovery-mismatch");
+        let holder = temp_dir("recovery-mismatch-holder");
+        let root = holder.join("AgentsBook");
         let parent = root.parent().unwrap().to_path_buf();
         let backup = parent.join(".abook-test-recovery-mismatch-backup");
         fs::create_dir_all(root.join("planes/long_term/records")).unwrap();
@@ -1746,7 +1754,7 @@ mod tests {
         assert!(recover_activation(&root).is_err());
         assert!(marker.is_file());
         let _ = fs::remove_file(marker);
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(backup);
     }
     #[cfg(unix)]
@@ -1796,7 +1804,7 @@ mod tests {
         assert!(build_staged(&manifest, &staging).is_err());
         assert!(!path_exists_any(&staging));
         assert!(source.is_file());
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(staging);
     }
 
@@ -1829,7 +1837,7 @@ mod tests {
         );
         verify_staged(&staged).expect("暂存树自检必须通过");
         let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
     }
 
     fn staging_under_source_is_rejected_before_write() {
@@ -1842,6 +1850,6 @@ mod tests {
         let staging = root.join("nested-staging");
         assert!(build_staged(&manifest, &staging).is_err());
         assert!(!path_exists_any(&staging));
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(&holder);
     }
 }
