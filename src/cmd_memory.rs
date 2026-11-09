@@ -83,7 +83,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
                 kind: a.get("kind").map(str::to_string),
                 include_deleted: a.has("include-deleted") || a.has("deleted"),
             };
-            emit(memory_plane::list_filtered(&root, plane, limit, offset, &filter)?)
+            emit(memory_plane::list_filtered(&root, plane, limit, offset, &filter, a.has("full"))?)
         }
         "search" | "recall" => {
             let fields = match a.get("field").or_else(|| a.get("fields")) {
