@@ -782,21 +782,15 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // "活动记录在原平面、已删记录在 tombstones"对账，两边算不一致，报
     // `soul 盘上 1 条 / 可解析 0 条` 并 rc=5。
     let source_path = record_path(&root, &plane, id)?;
-    let target_plane: String = match status {
-        "deleted" => TOMBSTONE_PLANE.to_string(),
-        "active" => text(&next_value, "prev_plane").unwrap_or_else(|| "long_term".to_string()),
-        _ => plane.clone(),
+    let target_plane: String = if status == "deleted" {
+        TOMBSTONE_PLANE.to_string()
+    } else {
+        plane.clone()
     };
-    let mut final_value = next_value;
+    // `plane` 字段不改：它是逻辑归属，物理目录只是存放位置。改字段会让
+    // `index` 按平面过滤时漏掉这条记录、total 少算。
+    let final_value = next_value;
     if target_plane != plane {
-        if let Value::Object(ref mut m) = final_value {
-            if status == "deleted" {
-                m.insert("prev_plane".into(), Value::s(plane.clone()));
-            } else {
-                m.remove("prev_plane");
-            }
-            m.insert("plane".into(), Value::s(target_plane.clone()));
-        }
         let target_path = record_path(&root, &target_plane, id)?;
         if let Some(parent) = target_path.parent() { fs::create_dir_all(parent)?; }
         crate::util::write_atomic(&target_path, &mcp_json::stringify(&final_value))?;
