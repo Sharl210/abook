@@ -788,7 +788,11 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // 否则库里会出现"status=deleted 但躺在 soul/ 里"的记录：`reconcile` 按
     // "活动记录在原平面、已删记录在 tombstones"对账，两边算不一致，报
     // `soul 盘上 1 条 / 可解析 0 条` 并 rc=5。
-    let source_path = record_path(&root, &plane, id)?;
+    // 源路径取记录**实际所在**位置（`located.plane`），不是 `plane` 字段。
+    // 软删过的记录躺在 tombstones/ 里，而 plane 字段仍写着 explicit；用字段去
+    // 拼源路径会指向一个不存在的文件，`write_atomic_cas` 于是拒绝写入。
+    let source_path = located.path.clone();
+    let source_plane = located.plane.clone();
     let target_plane: String = if status == "deleted" {
         TOMBSTONE_PLANE.to_string()
     } else {
@@ -797,12 +801,13 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // `plane` 字段不改：它是逻辑归属，物理目录只是存放位置。改字段会让
     // `index` 按平面过滤时漏掉这条记录、total 少算。
     let final_value = next_value;
-    if target_plane != plane {
+    if target_plane != source_plane {
         let target_path = record_path(&root, &target_plane, id)?;
         if let Some(parent) = target_path.parent() { fs::create_dir_all(parent)?; }
+        // 先写新位置、再删旧文件：中途失败最多留两份，不会两头都没有。
+        // 写用 write_atomic 而不是 CAS——这是新位置，没有"旧内容"可比对。
         crate::util::write_atomic(&target_path, &mcp_json::stringify(&final_value))?;
-        // 先确保新位置落盘成功再删旧文件：中途失败最多留两份，不会两头都没有。
-        fs::remove_file(&source_path)?;
+        if source_path.exists() { fs::remove_file(&source_path)?; }
     } else {
         crate::util::write_atomic_cas(&source_path, &mcp_json::stringify(&final_value), &mcp_json::stringify(&current))?;
     }
