@@ -237,6 +237,7 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_trash", "列出软删记录，可当回收站用；配合 memory_restore 恢复。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("description", Value::s("限定平面；省略为全部六个"))])), ("page", obj(vec![("type", Value::s("integer")), ("description", Value::s("页码，从 1 开始"))])), ("per_page", obj(vec![("type", Value::s("integer")), ("description", Value::s("每页条数"))]))], vec![]),
         batch_tool("memory_history", "读取一条记录的当前快照与相关变更记录，用于回答这条为什么变成现在这样。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string")), ("description", Value::s("记录 ID"))])), ("per_page", obj(vec![("type", Value::s("integer")), ("description", Value::s("最多返回多少条，默认 50"))]))], vec![Value::s("id")]),
         batch_tool("memory_merge", "把第二条记录并入第一条并软删第二条；正文并列保留、缺失字段补齐、关系取并集。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string")), ("description", Value::s("保留的主记录 ID"))])), ("into", obj(vec![("type", Value::s("string")), ("description", Value::s("被并入后软删的记录 ID"))])), ("title", obj(vec![("type", Value::s("string")), ("description", Value::s("合并后的标题；省略则保留主记录原标题"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("description", Value::s("主记录当前 revision，用于防覆盖"))])), ("expected_into_revision", obj(vec![("type", Value::s("integer")), ("description", Value::s("被并入记录当前 revision，用于防覆盖"))]))], vec![Value::s("id"), Value::s("into"), Value::s("expected_revision"), Value::s("expected_into_revision")]),
+        batch_tool("memory_split", "按分隔符把一条记录拆成多条，原记录软删并记下派生关系；合并的反向操作。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按配置期 --root → 二进制所在目录 → ABOOK_ROOT → ~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string")), ("description", Value::s("要拆的记录 ID"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("description", Value::s("该记录当前 revision，用于防覆盖"))])), ("separator", obj(vec![("type", Value::s("string")), ("description", Value::s("切分分隔符；默认空行加 --- 加空行，即合并时插入的那个分隔线"))])), ("plane", obj(vec![("type", Value::s("string")), ("description", Value::s("拆到哪个平面；省略则沿用原记录的平面"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
         batch_tool("memory_restore", "按 expected_revision 恢复一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
     ]
 }
@@ -256,6 +257,9 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_history" => &["root", "id", "per_page", "limit"][..],
             "memory_merge" => &[
                 "root", "id", "into", "title", "expected_revision", "expected_into_revision",
+            ][..],
+            "memory_split" => &[
+                "root", "id", "expected_revision", "separator", "plane",
             ][..],
             "memory_update" => &[
                 "root", "id", "expected_revision", "title", "read_when", "content", "body", "fields",
@@ -356,6 +360,20 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(50);
                 crate::memory_plane::history(&root, &id, limit).map_err(|e| e.msg().to_string())
+            }
+            "memory_split" => {
+                let id = scalar_text(args, "id").ok_or("memory_split 缺少 id")?;
+                let expected = scalar_text(args, "expected_revision")
+                    .ok_or("memory_split 缺少 expected_revision")?;
+                let separator = scalar_text(args, "separator");
+                let plane = scalar_text(args, "plane");
+                crate::memory_plane::split(
+                    &root,
+                    &id,
+                    &expected,
+                    separator.as_deref(),
+                    plane.as_deref(),
+                )?
             }
             "memory_merge" => {
                 let id = scalar_text(args, "id").ok_or("memory_merge 缺少 id")?;

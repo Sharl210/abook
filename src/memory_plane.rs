@@ -1421,3 +1421,129 @@ pub fn trash(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
         ("limit", Value::n(size.to_string())),
     ]))
 }
+
+/// 拆分：把一条记录按分隔切成多条，原记录软删并记下派生关系。
+///
+/// 这是 `MEMORY_RECLASSIFY_GATE` 认可的直接维护动作之一，但此前 MCP 面没有
+/// 对应工具，于是规范里点名的 `memory_split` 在工具面上并不存在——读了规范
+/// 去调用只会报未知工具。合并有 `memory_merge`，拆分就必须有对称的入口，
+/// 否则"整理"这件事只做了一半。
+///
+/// 拆分规则刻意简单可解释：按 `separator`（默认 `\n\n---\n\n`，即合并时插入
+/// 的那个分隔线）切段，每段成为一条新记录，标题依次加 `[1]` `[2]` 后缀。
+/// 段数少于 2 时明确报错而不是产出零条——那多数是分隔符选错了。
+pub fn split(
+    root: &str,
+    id: &str,
+    expected_revision: &str,
+    separator: Option<&str>,
+    plane: Option<&str>,
+) -> R<Value> {
+    if !valid_id(id) { return Err(err("非法 memory record id")); }
+    let root_path_buf = resolve_memory_path(root)?;
+
+    // 读取与校验在锁内完成，随后立刻释放。
+    //
+    // 库锁是独占文件锁且不可重入：`write()` 内部会自己再加一次锁，若在这里
+    // 一直持有再调 `write()`，同进程会等满 30 秒然后报超时——那不是并发，
+    // 是自己把自己锁死。所以这里只取"要写什么"，落盘交给 `write()` 各自加锁。
+    let (source_plane, target_plane, base_title, read_when, parts, source_snapshot, source_version) = {
+        let _lock = LibLock::acquire(&root_path_buf, 30)?;
+        verify_layout(&root_path_buf)?;
+        let located = locate_record(&root_path_buf, id)?
+            .ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+        if version_of(&located.value) != expected_revision {
+            return Err(err(format!(
+                "记忆 revision 冲突: expected={expected_revision} actual={}",
+                version_of(&located.value)
+            )));
+        }
+        if located.legacy_raw.is_some() {
+            return Err(err("旧迁移记录暂不支持拆分：其字段编码与平面映射需单独处理"));
+        }
+        let source_plane = text(&located.value, "plane").ok_or_else(|| err("记忆记录缺少 plane"))?;
+        let target_plane = plane.unwrap_or(&source_plane).to_string();
+        if !plane_ok(&target_plane) { return Err(err(format!("未知记忆平面: {target_plane}"))); }
+        if target_plane == TOMBSTONE_PLANE {
+            return Err(err("不能把记录拆到墓碑平面"));
+        }
+        let content = text(&located.value, "content").unwrap_or_default();
+        let sep = separator.unwrap_or("\n\n---\n\n");
+        if sep.is_empty() { return Err(err("拆分分隔符不能为空")); }
+        let parts: Vec<String> = content
+            .split(sep)
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if parts.len() < 2 {
+            return Err(err(format!(
+                "正文按该分隔符切出 {} 段，至少需要 2 段才能拆分；请确认 separator 是否正确",
+                parts.len()
+            )));
+        }
+        let base_title = text(&located.value, "title").unwrap_or_else(|| id.to_string());
+        let read_when = text(&located.value, "read_when").unwrap_or_default();
+        (
+            source_plane,
+            target_plane,
+            base_title,
+            read_when,
+            parts,
+            mcp_json::stringify(&located.value),
+            version_of(&located.value),
+        )
+    };
+
+    let mut created = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let title = format!("{base_title}[{}]", index + 1);
+        // 逐条走 write，复用同一套临时文件/原子改名/索引同步逻辑。
+        let record = write(
+            &root_path_buf.to_string_lossy(),
+            &target_plane,
+            &title,
+            &read_when,
+            part,
+        )?;
+        created.push(object(vec![
+            ("id", Value::s(text(&record, "id").unwrap_or_default())),
+            ("title", Value::s(title)),
+            ("plane", Value::s(target_plane.clone())),
+        ]));
+    }
+
+    // 原记录软删，让搜索不再命中它，同时留下指回派生记录的线索。
+    {
+        let _lock = LibLock::acquire(&root_path_buf, 30)?;
+        let located = locate_record(&root_path_buf, id)?
+            .ok_or_else(|| err(format!("没有找到记忆记录: {id}")))?;
+        // 并发防线：这期间若别人改过它，就不再按旧快照覆盖。
+        if version_of(&located.value) != source_version {
+            return Err(err("拆分过程中原记录被修改，已保留新派生记录，原记录未动；请核后重试"));
+        }
+        let mut map = match located.value.clone() {
+            Value::Object(m) => m,
+            _ => return Err(err("记忆记录必须是对象")),
+        };
+        let next = source_version.parse::<u64>().unwrap_or(1).saturating_add(1);
+        map.insert("status".into(), Value::s("deleted"));
+        map.insert("revision".into(), Value::n(next.to_string()));
+        map.insert("updated_at".into(), Value::n(now().to_string()));
+        map.insert(
+            "split_into".into(),
+            Value::Array(created.iter().filter_map(|v| text(v, "id")).map(Value::s).collect()),
+        );
+        let source_path = record_path(&root_path_buf, &source_plane, id)?;
+        write_atomic_cas(&source_path, &mcp_json::stringify(&Value::Object(map)), &source_snapshot)?;
+    }
+
+    let first_id = created.first().and_then(|v| text(v, "id")).unwrap_or_default();
+    Ok(object(vec![
+        ("id", Value::s(id)),
+        ("plane", Value::s(source_plane)),
+        ("status", Value::s("deleted")),
+        ("parts", Value::n(created.len().to_string())),
+        ("created", Value::Array(created)),
+        ("first", Value::s(first_id)),
+    ]))
+}

@@ -129,6 +129,13 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             required(a, "expect-revision")?,
             required(a, "expect-into-revision")?,
         )?),
+        "split" => emit(memory_plane::split(
+            &root,
+            required(a, "id")?,
+            required(a, "expect-revision")?,
+            a.get("separator").as_deref(),
+            a.get("to-plane").or_else(|| a.get("plane")).as_deref(),
+        )?),
         "update" | "edit" => {
             let content = if a.get("body-file").is_some() || a.has("stdin") {
                 Some(body(a)?)
