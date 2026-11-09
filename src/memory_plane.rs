@@ -387,7 +387,6 @@ pub fn search_filtered(
     limit: usize,
     fields: SearchFields,
     regex: bool,
-    full: bool,
 ) -> R<Value> {
     if query.trim().is_empty() { return Err(err("memory_search 需要非空 query")); }
     let root = root_path(root)?;
@@ -416,14 +415,12 @@ pub fn search_filtered(
     let total = hits.len();
     let size = limit.clamp(1, 500);
     hits.truncate(size);
-    // 与列表同理：默认精简，`full` 才回整条。
-    let hits: Vec<Value> = if full { hits } else { hits.iter().map(slim_record).collect() };
     Ok(object(vec![("items", Value::Array(hits)), ("total", Value::n(total.to_string())), ("limit", Value::n(size.to_string()))]))
 }
 
 /// 兼容入口：不带字段/正则参数的检索。
 pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<Value> {
-    search_filtered(root, query, plane, limit, SearchFields::All, false, false)
+    search_filtered(root, query, plane, limit, SearchFields::All, false)
 }
 
 /// 列表过滤条件。
@@ -444,7 +441,6 @@ pub fn list_filtered(
     limit: usize,
     offset: usize,
     filter: &ListFilter,
-    full: bool,
 ) -> R<Value> {
     if plane != "all" && !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
     let root = root_path(root)?;
@@ -476,14 +472,14 @@ pub fn list_filtered(
     let total = items.len();
     let start = offset.min(total);
     let size = limit.clamp(1, 500);
-    let page: Vec<Value> = items.into_iter().skip(start).take(size).collect();
-    // 默认给精简视图；`full` 才回整条（含 legacy_fields 之类）。
-    let page: Vec<Value> = if full { page } else { page.iter().map(slim_record).collect() };
+    let page = items.into_iter().skip(start).take(size).collect();
     Ok(object(vec![
         ("items", Value::Array(page)),
+        ("planes", Value::arr(if plane == "all" { PLANES.iter().map(|p| Value::s(*p)).collect() } else { vec![Value::s(plane)] })),
         ("total", Value::n(total.to_string())),
         ("offset", Value::n(start.to_string())),
         ("limit", Value::n(size.to_string())),
+        ("credentials", Value::s("vault")),
     ]))
 }
 
@@ -779,15 +775,12 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     let next_value = Value::Object(map);
 
     // 软删要真的搬到墓碑平面，不能只改 status 留在原平面。
-    //
-    // 这两件事必须一起做，否则库里会出现"status=deleted 但躺在 soul/ 里"的记录：
-    // `reconcile` 按"活动记录在原平面、已删记录在 tombstones"对账，两边算不一致，
-    // 于是报 `soul 盘上 1 条 / 可解析 0 条` 并 rc=5；`state` 的 total 也会偏。
-    // 恢复时同理会搬回原平面（原平面名记在 `prev_plane`）。
+    // 否则库里会出现"status=deleted 但躺在 soul/ 里"的记录：`reconcile` 按
+    // "活动记录在原平面、已删记录在 tombstones"对账，两边算不一致，报
+    // `soul 盘上 1 条 / 可解析 0 条` 并 rc=5。
     let source_path = record_path(&root, &plane, id)?;
     let target_plane: String = match status {
         "deleted" => TOMBSTONE_PLANE.to_string(),
-        // 从墓碑恢复：优先回到删除前记录的平面，没有记录就回 long_term。
         "active" => text(&next_value, "prev_plane").unwrap_or_else(|| "long_term".to_string()),
         _ => plane.clone(),
     };
@@ -804,7 +797,7 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
         let target_path = record_path(&root, &target_plane, id)?;
         if let Some(parent) = target_path.parent() { fs::create_dir_all(parent)?; }
         crate::util::write_atomic(&target_path, &mcp_json::stringify(&final_value))?;
-        // 先确保新位置落盘成功，再删旧文件：中途失败最多留两份，不会两头都没有。
+        // 先确保新位置落盘成功再删旧文件：中途失败最多留两份，不会两头都没有。
         fs::remove_file(&source_path)?;
     } else {
         crate::util::write_atomic_cas(&source_path, &mcp_json::stringify(&final_value), &mcp_json::stringify(&current))?;
@@ -813,39 +806,6 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // 批量删 20 条就吃掉 70KB 上下文，而调用方真正需要知道的只是"改成了什么状态、
     // 新版本号多少"。要全量再显式要。
     Ok(compact_status(&final_value))
-}
-
-/// 列表视图：只留"哪条"，不塞整条正文与迁移元数据。
-///
-/// 以前 list 每条都带 `content` 全文、`legacy_fields`（整份原文字段）、
-/// `legacy_raw_sha256`、一堆空数组与 null。实测单条 2320 字节里只有约 347 字节
-/// 对"我要挑哪一条"有用，其余 85% 是纯浪费——列表一次返回 20 条就是四万多字节。
-///
-/// 要看全文用 `memory_read` 按 id 取，那才是该给全文的地方。
-fn slim_record(value: &Value) -> Value {
-    // 用 String 作键：键若取自循环里的数组字面量，借用生命周期会被判为过短。
-    let mut out: Vec<(String, Value)> = vec![
-        ("id".to_string(), Value::s(text(value, "id").unwrap_or_default())),
-        ("title".to_string(), Value::s(text(value, "title").unwrap_or_default())),
-        ("plane".to_string(), Value::s(text(value, "plane").unwrap_or_default())),
-        ("revision".to_string(), Value::s(version_of(value))),
-    ];
-    // 只补真正影响"要不要打开它"的字段，空的就不出现。
-    for key in ["read_when", "status", "confidence", "kind"] {
-        if let Some(v) = text(value, key) {
-            if !v.is_empty() { out.push((key.to_string(), Value::s(v))); }
-        }
-    }
-    // 正文只给开头当引子，够判断就行；需要全文再按 id 读。
-    if let Some(content) = text(value, "content") {
-        let head: String = content.replace('\n', " ").chars().take(120).collect();
-        if !head.trim().is_empty() { out.push(("preview".to_string(), Value::s(head))); }
-    }
-    // `object()` 只收 `Vec<(&str, Value)>`；这里的键是算出来的 String，
-    // 所以直接构造 BTreeMap，不绕道。
-    let mut map = std::collections::BTreeMap::new();
-    for (k, v) in out { map.insert(k, v); }
-    Value::Object(map)
 }
 
 fn compact_status(value: &Value) -> Value {

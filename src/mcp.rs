@@ -227,8 +227,8 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
         batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("id")]),
-        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))])), ("status", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该状态的记录：active 或 deleted"))])), ("kind", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该 KIND 的记录，如 DECISION"))])), ("include_deleted", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把软删记录一并列出，可当回收站用"))]), ("full", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时返回完整记录（含 legacy_fields 等迁移元数据）；默认只给 id/title/plane/revision/preview，省 85% 体积"))])))], vec![]),
-        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("field", obj(vec![("type", Value::s("string")), ("description", Value::s("限定检索字段：all/title/content/read-when"))])), ("regex", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把 query 当正则"))]), ("full", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时返回完整记录（含 legacy_fields 等迁移元数据）；默认只给 id/title/plane/revision/preview，省 85% 体积"))])))], vec![Value::s("query")]),
+        batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))])), ("status", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该状态的记录：active 或 deleted"))])), ("kind", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该 KIND 的记录，如 DECISION"))])), ("include_deleted", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把软删记录一并列出，可当回收站用"))]))], vec![]),
+        batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("field", obj(vec![("type", Value::s("string")), ("description", Value::s("限定检索字段：all/title/content/read-when"))])), ("regex", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把 query 当正则"))]))], vec![Value::s("query")]),
         batch_tool("memory_recall", "memory_search 的历史事实召回入口。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("query")]),
         batch_tool("memory_update", "按 expected_revision 更新一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))])), ("fields", obj(vec![("type", Value::s("object")), ("description", Value::s("头部字段键值对对象，数组值按逗号拼接"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
         batch_tool("memory_delete", "按 expected_revision 软删除一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))])), ("expected_revision", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))]))], vec![Value::s("id"), Value::s("expected_revision")]),
@@ -250,8 +250,8 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             "memory_init" | "memory_paths" | "memory_context" => &["root"][..],
             "memory_write" => &["root", "plane", "title", "read_when", "content", "body"][..],
             "memory_read" => &["root", "id"][..],
-            "memory_list" => &["root", "plane", "limit", "offset", "status", "kind", "include_deleted", "full"][..],
-            "memory_search" | "memory_recall" => &["root", "query", "plane", "limit", "per_page", "field", "regex", "full"][..],
+            "memory_list" => &["root", "plane", "limit", "offset", "status", "kind", "include_deleted"][..],
+            "memory_search" | "memory_recall" => &["root", "query", "plane", "limit", "per_page", "field", "regex"][..],
             "memory_grep" => &["root", "pattern", "query", "plane", "context", "regex"][..],
             "memory_trash" => &["root", "plane", "page", "per_page", "limit"][..],
             "memory_history" => &["root", "id", "per_page", "limit"][..],
@@ -310,7 +310,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                     kind: scalar_text(args, "kind"),
                     include_deleted: matches!(args.get("include_deleted"), Some(Value::Bool(true))),
                 };
-                crate::memory_plane::list_filtered(&root, &plane, limit, offset, &filter, matches!(args.get("full"), Some(Value::Bool(true))))
+                crate::memory_plane::list_filtered(&root, &plane, limit, offset, &filter)
                     .map_err(|e| e.msg().to_string())
             }
             "memory_search" | "memory_recall" => {
@@ -327,7 +327,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
                     _ => crate::memory_plane::SearchFields::All,
                 };
                 let regex = matches!(args.get("regex"), Some(Value::Bool(true)));
-                crate::memory_plane::search_filtered(&root, &query, plane.as_deref(), limit, fields, regex, matches!(args.get("full"), Some(Value::Bool(true))))
+                crate::memory_plane::search_filtered(&root, &query, plane.as_deref(), limit, fields, regex)
                     .map_err(|e| e.msg().to_string())
             }
             "memory_grep" => {
@@ -415,7 +415,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
         }
     })();
     match result {
-        Ok(data) => complete(success_result(data)),
+        Ok(data) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(mcp_json::stringify(&data)))])])), ("structuredContent", data), ("isError", Value::b(false))])),
         Err(message) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(message))])])), ("isError", Value::b(true))])),
     }
 }
@@ -565,7 +565,7 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
         }
     })();
     match result {
-        Ok(data) => complete(success_result(data)),
+        Ok(data) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(mcp_json::stringify(&data)))])])), ("structuredContent", data), ("isError", Value::b(false))])),
         Err(message) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(message))])])), ("isError", Value::b(true))])),
     }
 }
@@ -742,37 +742,14 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         && code == 3
         && matches!(attachment_json.as_ref().and_then(|v| v.get("count")), Some(Value::Number(n)) if n == "0")
         && matches!(attachment_json.as_ref().and_then(|v| v.get("items")), Some(Value::Array(items)) if items.is_empty());
-    // 与直连内核同样只保留一份数据：`content.text` 与 `structuredContent` 过去
-    // 是同一份输出的两个完整副本，附件列表这种大结果等于凭空翻倍。
-    let payload = mcp_json::parse(&out).unwrap_or_else(|_| {
-        obj(vec![
-            ("stdout", Value::s(out)),
-            ("stderr", Value::s(err)),
-            ("exit", Value::n(code.to_string())),
-        ])
-    });
     let mut result = obj(vec![
-        ("content", Value::arr(vec![])),
-        ("structuredContent", payload),
+        ("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(if out.is_empty() { err.clone() } else { out.clone() }))])])),
         ("isError", Value::b(code != 0 && !empty_attachment_list)),
     ]);
+    if let Value::Object(ref mut m) = result {
+        m.insert("structuredContent".into(), mcp_json::parse(&out).unwrap_or_else(|_| obj(vec![("stdout", Value::s(out)), ("stderr", Value::s(err)), ("exit", Value::n(code.to_string()))])));
+    }
     complete(result)
-}
-
-/// 工具成功的统一返回。
-///
-/// 以前每个结果都同时给 `content.text` 与 `structuredContent`，而两者是同一份
-/// 数据的两个完整副本——一次 `memory_search` 返回三万字，其中一半是重复的。
-/// 列表类结果尤其严重：每条记录的完整正文出现两次。
-///
-/// 现在只给 `structuredContent` 一份。MCP 客户端两种都能读，给一份就够；
-/// `content` 仅在调用方明确需要纯文本时才有值。
-fn success_result(data: Value) -> Value {
-    obj(vec![
-        ("content", Value::arr(vec![])),
-        ("structuredContent", data),
-        ("isError", Value::b(false)),
-    ])
 }
 
 fn legacy_readonly_command(name: &str) -> bool {
