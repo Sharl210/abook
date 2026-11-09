@@ -415,7 +415,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
         }
     })();
     match result {
-        Ok(data) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(mcp_json::stringify(&data)))])])), ("structuredContent", data), ("isError", Value::b(false))])),
+        Ok(data) => complete(tool_ok(data)),
         Err(message) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(message))])])), ("isError", Value::b(true))])),
     }
 }
@@ -565,7 +565,7 @@ fn direct_batch_call(name: &str, args: &Value) -> Value {
         }
     })();
     match result {
-        Ok(data) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(mcp_json::stringify(&data)))])])), ("structuredContent", data), ("isError", Value::b(false))])),
+        Ok(data) => complete(tool_ok(data)),
         Err(message) => complete(obj(vec![("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(message))])])), ("isError", Value::b(true))])),
     }
 }
@@ -742,14 +742,10 @@ fn tools_call(req: &Value, _legacy: bool) -> Value {
         && code == 3
         && matches!(attachment_json.as_ref().and_then(|v| v.get("count")), Some(Value::Number(n)) if n == "0")
         && matches!(attachment_json.as_ref().and_then(|v| v.get("items")), Some(Value::Array(items)) if items.is_empty());
-    let mut result = obj(vec![
-        ("content", Value::arr(vec![obj(vec![("type", Value::s("text")), ("text", Value::s(if out.is_empty() { err.clone() } else { out.clone() }))])])),
-        ("isError", Value::b(code != 0 && !empty_attachment_list)),
-    ]);
-    if let Value::Object(ref mut m) = result {
-        m.insert("structuredContent".into(), mcp_json::parse(&out).unwrap_or_else(|_| obj(vec![("stdout", Value::s(out)), ("stderr", Value::s(err)), ("exit", Value::n(code.to_string()))])));
-    }
-    complete(result)
+    let payload = mcp_json::parse(&out).unwrap_or_else(|_| {
+        obj(vec![("stdout", Value::s(out)), ("stderr", Value::s(err)), ("exit", Value::n(code.to_string()))])
+    });
+    complete(tool_result(payload, code != 0 && !empty_attachment_list))
 }
 
 fn legacy_readonly_command(name: &str) -> bool {
@@ -908,6 +904,21 @@ fn write_body_temp(text: &str) -> std::io::Result<std::path::PathBuf> {
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "临时文件名冲突重试达到上限"))
 }
 fn as_string(v: &Value) -> Option<&str> { match v { Value::String(s) => Some(s), _ => None } }
+/// 工具成功返回：**只给一份数据**。
+///
+/// 以前每个结果同时给 `content.text` 与 `structuredContent`，两者是同一份输出的
+/// 两个完整副本——一次 memory_search 三万字，其中一半纯属重复；列表类更糟，每条
+/// 记录的完整正文都出现两次。MCP 客户端读哪个都行，给一份就够。
+fn tool_ok(data: Value) -> Value { tool_result(data, false) }
+
+fn tool_result(payload: Value, is_error: bool) -> Value {
+    obj(vec![
+        ("content", Value::arr(vec![])),
+        ("structuredContent", payload),
+        ("isError", Value::b(is_error)),
+    ])
+}
+
 fn complete(v: Value) -> Value {
     match v {
         Value::Object(mut m) => {
