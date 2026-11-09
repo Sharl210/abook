@@ -1001,6 +1001,14 @@ fn parse_branch(pattern: &str) -> R<Vec<(Token, Quant)>> {
             '*' | '+' | '?' => {
                 return Err(err(format!("量词 {ch} 前面没有可重复的字符")));
             }
+            // 孤立的右括号/右方括号是写错了，静默当成普通字符会让人以为
+            // 正则生效了却永远匹配不到——静默错配比明确报错糟得多。
+            ')' | ']' => {
+                return Err(err(format!("正则里有多余的 `{ch}`")));
+            }
+            '{' | '}' => {
+                return Err(err(format!("正则不支持 `{ch}` 计数语法；需要重复请用 * + ?")));
+            }
             other => { index += 1; Token::Literal(other) }
         };
         let quant = match chars.get(index).copied() {
