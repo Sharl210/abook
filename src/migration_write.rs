@@ -1815,7 +1815,12 @@ mod tests {
         )
         .unwrap();
         let manifest = migration::scan(&root).unwrap();
-        let staging = root.join("stage");
+        // 暂存树不能落在源库内（工具会拒绝，这是正确的保护），
+        // 所以放到同一父目录下的兄弟位置。
+        let staging = root.parent().unwrap().join(format!(
+            "{}-stage",
+            root.file_name().unwrap().to_string_lossy()
+        ));
         let staged = build_staged(&manifest, &staging).expect("含软删记录的库必须能建迁移树");
         assert!(
             staged.records.iter().any(|r| r.target_plane == "tombstones"),
@@ -1823,6 +1828,7 @@ mod tests {
             staged.records.iter().map(|r| r.target_plane.clone()).collect::<Vec<_>>()
         );
         verify_staged(&staged).expect("暂存树自检必须通过");
+        let _ = fs::remove_dir_all(&staging);
         let _ = fs::remove_dir_all(root);
     }
 
