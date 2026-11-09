@@ -451,6 +451,7 @@ pub fn list_filtered(
     limit: usize,
     offset: usize,
     filter: &ListFilter,
+    full: bool,
 ) -> R<Value> {
     if plane != "all" && !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
     let root = root_path(root)?;
@@ -482,14 +483,13 @@ pub fn list_filtered(
     let total = items.len();
     let start = offset.min(total);
     let size = limit.clamp(1, 500);
-    let page = items.into_iter().skip(start).take(size).collect();
+    let page: Vec<Value> = items.into_iter().skip(start).take(size).collect();
+    let page: Vec<Value> = if full { page } else { page.iter().map(slim_record).collect() };
     Ok(object(vec![
         ("items", Value::Array(page)),
-        ("planes", Value::arr(if plane == "all" { PLANES.iter().map(|p| Value::s(*p)).collect() } else { vec![Value::s(plane)] })),
         ("total", Value::n(total.to_string())),
         ("offset", Value::n(start.to_string())),
         ("limit", Value::n(size.to_string())),
-        ("credentials", Value::s("vault")),
     ]))
 }
 
@@ -815,6 +815,32 @@ fn update_status(root: &str, id: &str, expected_revision: &str, status: &str) ->
     // 批量删 20 条就吃掉 70KB 上下文，而调用方真正需要知道的只是"改成了什么状态、
     // 新版本号多少"。要全量再显式要。
     Ok(compact_status(&final_value))
+}
+
+/// 列表视图：只留"哪条值得打开"，不塞整条正文与迁移元数据。
+///
+/// 以前每项都带 `content` 全文、`legacy_fields`（整份原文字段）、
+/// `legacy_raw_sha256` 和一堆空数组。实测单条 2320 字节里只有约 347 字节对
+/// "我要挑哪一条"有用，其余 85% 是纯浪费——一页 20 条就是四万多字节。
+/// 要看全文用 `memory_read` 按 id 取，那里才该给全文。
+fn slim_record(value: &Value) -> Value {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("id".to_string(), Value::s(text(value, "id").unwrap_or_default()));
+    map.insert("title".to_string(), Value::s(text(value, "title").unwrap_or_default()));
+    map.insert("plane".to_string(), Value::s(text(value, "plane").unwrap_or_default()));
+    map.insert("revision".to_string(), Value::s(version_of(value)));
+    // 只补真正影响"要不要打开它"的字段，空的就不出现。
+    for key in ["read_when", "status", "confidence", "kind"] {
+        if let Some(v) = text(value, key) {
+            if !v.is_empty() { map.insert(key.to_string(), Value::s(v)); }
+        }
+    }
+    // 正文只给开头当引子，够判断就行。
+    if let Some(content) = text(value, "content") {
+        let head: String = content.replace('\n', " ").chars().take(120).collect();
+        if !head.trim().is_empty() { map.insert("preview".to_string(), Value::s(head)); }
+    }
+    Value::Object(map)
 }
 
 fn compact_status(value: &Value) -> Value {
