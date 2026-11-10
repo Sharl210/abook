@@ -365,7 +365,7 @@ def test_memory_tools():
         assert "不应进入第一步正文" not in json.dumps(outline, ensure_ascii=False)
         listed_all = send(p, request("m1-list-all", "tools/call", {"name": "memory_list", "arguments": {"root": root, "limit": 10, "offset": 0}}))
         assert listed_all["result"]["isError"] is False, listed_all
-        assert listed_all["result"]["structuredContent"]["total"] == 4
+        assert listed_all["result"]["structuredContent"]["total"] == 5
         bad_index_args = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
         assert bad_index_args["result"]["isError"] is True, bad_index_args
         bad_outline_args = send(p, request("m1-outline-bad", "tools/call", {"name": "memory_outline", "arguments": {"root": root, "unexpected": True}}))
@@ -380,9 +380,9 @@ def test_memory_tools():
         exported = send(p, request("m4b", "tools/call", {"name": "memory_export", "arguments": {"root": root}}))
         assert exported["result"]["isError"] is False, exported
         assert exported["result"]["structuredContent"]["format"] == "abook.memory.export.v1"
-        assert exported["result"]["structuredContent"]["total"] == 4
+        assert exported["result"]["structuredContent"]["total"] == 5
         assert exported["result"]["structuredContent"]["credentials"] == "vault"
-        assert len(exported["result"]["structuredContent"]["items"]) == 4
+        assert len(exported["result"]["structuredContent"]["items"]) == 5
         explicit_export = send(p, request("m4c", "tools/call", {"name": "memory_export", "arguments": {"root": root, "plane": "explicit"}}))
         assert explicit_export["result"]["structuredContent"]["planes"]["explicit"] == 4
         assert explicit_export["result"]["structuredContent"]["total"] == 4
