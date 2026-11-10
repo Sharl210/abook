@@ -59,6 +59,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             emit(mcp_json::Value::obj([("layout", mcp_json::Value::s(memory_plane::LAYOUT_MARKER))].into_iter().map(|(k,v)| (k.to_string(),v)).collect()))
         }
         "index" => { let (limit, offset) = page_args(a); emit(memory_plane::index(&root, a.get("plane"), limit, offset)?) },
+        "outline" => emit(memory_plane::outline(&root)?),
         "context" => emit(memory_plane::context(&root)?),
         "paths" => emit(memory_plane::paths(&root)?),
         "export" => emit(memory_plane::export(&root, a.get("plane"))?),

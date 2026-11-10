@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 谈那个话题时才需要。
 pub const RESIDENT_PLANES: &[&str] = &["soul", "explicit", "profile"];
 
+/// 按需召回层：`index` 不给正文，只在 `outline` 里出标题。
+pub const RECALL_PLANES: &[&str] = &["rules", "long_term", "episodic"];
+
 pub const PLANES: &[&str] = &["soul", "rules", "profile", "explicit", "long_term", "episodic"];
 pub const LAYOUT_MARKER: &str = "abook.memory.layout.v1";
 
@@ -269,76 +272,93 @@ fn preview(content: &str, max_chars: usize) -> (String, usize, bool) {
     (value, total_chars, total_chars > max_chars)
 }
 
-pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<Value> {
+/// 预载第一步：三个常驻平面的**全量正文**。
+///
+/// 这三层是 AI 的身份与风格、用户画像与环境事实、用户明确要求记住的约定。
+/// 它们与话题无关，某轮没提到不代表不生效；用处恰恰在于"不用去找就知道"，
+/// 所以只能一次给完，不能分页、不能靠按需召回。
+///
+/// 字段只保留 `plane`/`title`/`content` 三个。第一版额外塞了
+/// `updated_at`/`revision`/`status`/`tier`/`content_bytes`/`preview_*`，
+/// 光这些元信息就占了六成体积——读的人一个都用不上，代价是响应被撑到超限、
+/// 转存成文件、然后没人肯读。列表里多一个没人用的字段，就是让别人少读一段正文。
+///
+/// `plane` 参数只用于把结果收窄到某一个常驻平面（例如只想重读 profile）；
+/// `limit`/`offset` 保留只为兼容调用方，**实际不分页**——常驻层漏掉一条
+/// 就等于这轮读了个不完整的自己。
+pub fn index(root: &str, plane: Option<&str>, _limit: usize, _offset: usize) -> R<Value> {
     let root = root_path(root)?;
     let selected: Vec<&str> = match plane {
-        Some("all") | None => PLANES.to_vec(),
-        Some(p) if plane_ok(p) => vec![p],
+        Some("all") | None => RESIDENT_PLANES.to_vec(),
+        Some(p) if RESIDENT_PLANES.contains(&p.as_str()) => vec![p],
+        Some(p) if plane_ok(p) => {
+            return Err(err(format!(
+                "{p} 属于按需召回层，不在预载第一步里；它的标题用 `abook memory outline` 看，正文用 memory_search 找"
+            )));
+        }
         Some(p) => return Err(err(format!("未知记忆平面: {p}"))),
     };
-    let all = records_with_status(&root, plane.filter(|p| *p != "all"), true)?;
-    // 预载分两步，两步的形状不一样，因为它们的用途不一样：
-    //
-    //   第一步 常驻层 soul/explicit/profile —— **必须一次读全**。这些是 AI 的身份
-    //   与风格、用户画像与环境事实、用户明确要求记住的约定。它们与话题无关，
-    //   某轮没提到不代表不生效；而且它们的用处恰恰在于"不用去找就知道"，
-    //   所以只能一次给完，不能靠分页或按需召回。
-    //
-    //   第二步 按需层 rules/long_term/episodic —— **只给标题**。这三层的正文是
-    //   长期知识库，动辄几十万字，全铺进来没人读得完。给标题是为了建立
-    //   "库里有哪些东西可找回"的初步印象，让后续 recall 有方向。
-    //
-    // 字段只留"读者真会用到的"。第一版把 updated_at/revision/status/tier/
-    // content_bytes/preview_* 全塞进每一条，光这些就占了二十多万字节的六成——
-    // 没有一个字段是读的人需要的。列表里塞冗余字段的代价不是磁盘，是
-    // 响应被撑到超限、转成文件、然后没人肯读完。
+    let all = records_with_status(&root, None, false)?;
     let mut resident: Vec<Value> = Vec::new();
-    let mut recall: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for p in &selected {
-        recall.insert((*p).to_string(), Vec::new());
-    }
     for v in all.iter() {
         let plane = text(v, "plane").unwrap_or_default();
         if !selected.contains(&plane.as_str()) { continue; }
-        // 已软删的既不该读正文，也不该进召回清单——把死记录混进标题列表，
-        // 只会让后来人以为还有内容可查。
-        if text(v, "status").as_deref() == Some("deleted") { continue; }
-        let title = text(v, "title").unwrap_or_default();
-        if RESIDENT_PLANES.contains(&plane.as_str()) {
-            // 常驻层：平面 + 标题 + 正文。不加 id——读它的人不需要 id 才能读正文，
-            // 而 id 是条几十字节的哈希，攒起来就是几万字节。
-            resident.push(object(vec![
-                ("plane", Value::s(plane.clone())),
-                ("title", Value::s(title)),
-                ("content", Value::s(text(v, "content").unwrap_or_default())),
-            ]));
-        } else {
-            // 按需层：只给标题。调用方想读某条时用 memory_search 按关键词找，
-            // 不需要先拿到 id。
-            recall.entry(plane).or_default().push(Value::s(title));
-        }
+        resident.push(object(vec![
+            ("plane", Value::s(plane)),
+            ("title", Value::s(text(v, "title").unwrap_or_default())),
+            ("content", Value::s(text(v, "content").unwrap_or_default())),
+        ]));
     }
-    // 常驻层按平面归组后排序，读的时候一条平面内是连续的。
     resident.sort_by(|a, b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "title").cmp(&text(b, "title"))));
-    recall.retain(|_, titles| {
-        titles.sort_by(|a, b| text_of(a).cmp(&text_of(b)));
-        !titles.is_empty()
-    });
-    // 第一步**不分页**：常驻层必须一次读全，分页就意味着"这一页之前那些你可能没看到"，
-    // 而常驻层恰恰是不能漏的。它的体积由字段纪律保证（每条只有 plane/title/content），
-    // 不靠 limit 兜底。`limit`/`offset` 只影响第二步的标题列表。
-    let _ = (limit, offset);
-    let recall_total: usize = recall.values().map(|v| v.len()).sum();
+    let total = resident.len();
+    let bytes: usize = resident.iter().map(|r| match r.get("content") {
+        Some(Value::String(t)) => t.len(), _ => 0
+    }).sum();
     Ok(object(vec![
         ("format", Value::s("abook.memory.index.v2")),
-        // 第一步：全量正文，读的人不需要再发起任何调用。
-        ("resident", Value::Array(resident)),
-        // 第二步：按平面分组的标题，建立"有哪些可找回"的印象。
-        ("recall", Value::Object(recall.into_iter().map(|(k, v)| (k, Value::Array(v))).collect())),
-        ("total", Value::n((resident.len() + recall_total).to_string())),
+        ("planes", Value::arr(selected.iter().map(|p| Value::s(*p)).collect())),
+        ("items", Value::Array(resident)),
+        ("total", Value::n(total.to_string())),
+        ("content_bytes", Value::n(bytes.to_string())),
         ("credentials", Value::s("vault")),
     ]))
 }
+
+/// 预载第二步：按需层的**标题清单**，只为建立"库里有哪些东西可找回"的印象。
+///
+/// 为什么不给正文：`rules`/`long_term`/`episodic` 是长期知识库，正文动辄几十万字。
+/// 全铺进来没人读得完，而且会把第一步那三个真正该读的平面挤出通道。标题的作用
+/// 是让后续 `memory_search`/`memory_recall` 有方向，不是替代读正文。
+///
+/// 为什么不给 id 和摘要：一条 40 字节的 id 乘以六百条就是 24KB，摘要更贵；
+/// 而读者此刻只需要"知道有这么一件事存在"。
+pub fn outline(root: &str) -> R<Value> {
+    let root = root_path(root)?;
+    let all = records_with_status(&root, None, false)?;
+    let mut titles: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for p in RECALL_PLANES {
+        titles.insert((*p).to_string(), Vec::new());
+    }
+    for v in all.iter() {
+        let plane = text(v, "plane").unwrap_or_default();
+        if !RECALL_PLANES.contains(&plane.as_str()) { continue; }
+        let title = text(v, "title").unwrap_or_default();
+        if title.is_empty() { continue; }
+        titles.entry(plane).or_default().push(Value::s(title));
+    }
+    for list in titles.values_mut() {
+        list.sort_by(|a, b| text_of(a).cmp(&text_of(b)));
+    }
+    titles.retain(|_, list| !list.is_empty());
+    let total: usize = titles.values().map(|v| v.len()).sum();
+    Ok(object(vec![
+        ("format", Value::s("abook.memory.outline.v1")),
+        ("planes", Value::Object(titles.into_iter().map(|(k, v)| (k, Value::Array(v))).collect())),
+        ("total", Value::n(total.to_string())),
+        ("hint", Value::s("这些只是标题，正文用 memory_search 或 memory_recall 按话题取")),
+    ]))
+}
+
 
 pub fn write(root: &str, plane: &str, title: &str, read_when: &str, content: &str) -> R<Value> {
     if !plane_ok(plane) { return Err(err(format!("未知记忆平面: {plane}"))); }
