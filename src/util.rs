@@ -1292,13 +1292,30 @@ impl Drop for TmpGuard {
     }
 }
 
+/// 进程内单调递增的临时文件序号。原子递增，不做加锁：
+/// 只要求同一个进程里每次调用拿到不同的值，溢出回绕不影响正确性
+/// （相邻两次撞上的概率在一次调用窗口内可以忽略）。
+fn next_tmp_seq() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn write_atomic(p: &Path, data: &str) -> R<()> {
     if let Some(dir) = p.parent() {
         fs::create_dir_all(dir)?;
     }
+    // 临时文件名必须做到"同一进程内的并发写也不相撞"。
+    //
+    // 原来只用 `pid % 100000` 做后缀，这是按进程唯一的，不是按调用唯一的：
+    // 同一个进程里两个线程同时写同一个目标，会算出同一个临时路径，先写的
+    // 内容被后写的覆盖，复读校验要么失败要么把别人的内容当成自己的。
+    // CLI 每次调用是新进程，所以这个问题只在长驻进程里暴露——MCP 就是长驻的。
+    //
+    // 补一个进程内单调递增的序号，让每次调用拿到不同的后缀。
     let tmp = p.with_extension(format!(
-        "tmp{}",
-        std::process::id() as u64 % 100000
+        "tmp{}_{}",
+        std::process::id() as u64 % 100000,
+        next_tmp_seq()
     ));
     // 从这里开始，任何路径退出都会删掉临时文件。
     let mut guard = TmpGuard::new(tmp.clone());

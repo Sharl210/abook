@@ -307,7 +307,7 @@ fn compatibility_exposure(command: &str) -> Exposure {
     // 以及 search/list/show/export 这些同样已有 memory_* 对应入口的。
     const LEGACY_MEMORY_ROUTES: &[&str] = &[
         "recall", "index-search", "show", "cat",
-        "index", "search", "find", "grep", "list", "ls", "history",
+        "search", "find", "grep", "list", "ls", "history",
         // 下面几条虽然名字看着像"导航"，实际都依赖旧两库的文件结构，六平面库
         // 上没有对应物，放出来只会稳定报"地图不存在"或"找不到记录"：
         //   identity — 读 Global.md 的凭据身份索引（凭据请用 vault_*）
@@ -776,7 +776,7 @@ mod tests {
         }
         // 库维护与只读导航必须公开：它们与旧记录模型无关，而提示词要求"能用 MCP
         // 就必须用"——工具面上没有，模型就只能退回 CLI。
-        for name in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_get"] {
+        for name in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_get", "abook_index"] {
             assert!(public.iter().any(|tool| tool.name == name), "maintenance/navigation tool {name} must be public");
         }
         for name in ["abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan", "abook_commands", "abook_describe", "abook_help", "abook_version", "abook_detect", "abook_upgrade"] {

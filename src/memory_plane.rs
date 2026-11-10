@@ -6,6 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// 常驻层：不知道就会做错的平面。`index` 对这几个平面给正文，其余只给标题。
+///
+/// 分界不是"重要程度"，而是"能不能按话题决定要不要读"。身份与用户画像无法按话题
+/// 切分——某轮没提到它不代表它不生效；而 `long_term` 里的某条协议条款，确实只有
+/// 谈那个话题时才需要。
+pub const RESIDENT_PLANES: &[&str] = &["soul", "explicit", "profile"];
+
 pub const PLANES: &[&str] = &["soul", "rules", "profile", "explicit", "long_term", "episodic"];
 pub const LAYOUT_MARKER: &str = "abook.memory.layout.v1";
 
@@ -284,20 +291,44 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
             ("deleted", Value::n(deleted.to_string())),
         ]));
     }
+    // 六平面分两层，`index` 是唯一的预载入口，两层在同一份输出里一次给全：
+    //
+    //   常驻层 soul/explicit/profile —— 不知道就会做错，与话题无关，给**正文**。
+    //     这些是身份、用户长期偏好、用户明确要求记住的事实。它们的价值不在于
+    //     "某个话题相关时才查"，而在于每轮都该知道；只给标题等于没读到。
+    //
+    //   按需层 rules/long_term/episodic —— 由话题触发，只给**标题与触发条件**。
+    //     正文可能几十万字，全文铺进上下文会挤掉真正要干的事；标题写准了，
+    //     recall 才有方向。
+    //
+    // 因此 `items` 里常驻层带 content，按需层不带。调用方不需要先判断"哪些平面该
+    // 全读"，工具按平面职责直接给对了。
     let mut items: Vec<Value> = all.iter().filter(|v| selected.contains(&text(v, "plane").as_deref().unwrap_or(""))).map(|v| {
-        let (text_preview, chars, truncated) = preview(&text(v, "content").unwrap_or_default(), 160);
-        object(vec![
+        let plane = text(v, "plane").unwrap_or_default();
+        let resident = RESIDENT_PLANES.contains(&plane.as_str());
+        let body = text(v, "content").unwrap_or_default();
+        let mut out = vec![
             ("id", Value::s(text(v, "id").unwrap_or_default())),
-            ("plane", Value::s(text(v, "plane").unwrap_or_default())),
+            ("plane", Value::s(plane.clone())),
+            ("tier", Value::s(if resident { "resident" } else { "recall" })),
             ("title", Value::s(text(v, "title").unwrap_or_default())),
             ("read_when", Value::s(text(v, "read_when").unwrap_or_default())),
             ("updated_at", Value::s(text(v, "updated_at").unwrap_or_default())),
             ("revision", Value::s(text(v, "revision").unwrap_or_else(|| "1".into()))),
             ("status", Value::s(text(v, "status").unwrap_or_else(|| "active".into()))),
-            ("preview", Value::s(text_preview)),
-            ("preview_chars", Value::n(chars.to_string())),
-            ("preview_truncated", Value::b(truncated)),
-        ])
+        ];
+        if resident {
+            // 常驻层给全文。budget 用来告诉调用方这一条有多大，便于它决定是否
+            // 分批读；不是限制，只是让代价可见。
+            out.push(("content", Value::s(body.clone())));
+            out.push(("content_bytes", Value::n(body.len().to_string())));
+        } else {
+            let (text_preview, chars, truncated) = preview(&body, 160);
+            out.push(("preview", Value::s(text_preview)));
+            out.push(("preview_chars", Value::n(chars.to_string())));
+            out.push(("preview_truncated", Value::b(truncated)));
+        }
+        object(out)
     }).collect();
     items.sort_by(|a,b| text(a,"plane").cmp(&text(b,"plane")).then_with(|| text(a,"id").cmp(&text(b,"id"))));
     let total = items.len();
