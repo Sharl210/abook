@@ -305,12 +305,18 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
     // 全读"，工具按平面职责直接给对了。
     let mut items: Vec<Value> = all.iter().filter(|v| selected.contains(&text(v, "plane").as_deref().unwrap_or(""))).map(|v| {
         let plane = text(v, "plane").unwrap_or_default();
-        let resident = RESIDENT_PLANES.contains(&plane.as_str());
+        // 已软删的记录虽然还列在 index 里（调用方要能看出"这条已删"），
+        // 但正文不再给：它已经失效，把 47 条墓碑的全文铺进来既浪费上下文，
+        // 又把真正该读的活动记录挤出第一页。
+        let deleted = text(v, "status").as_deref() == Some("deleted");
+        let resident = RESIDENT_PLANES.contains(&plane.as_str()) && !deleted;
         let body = text(v, "content").unwrap_or_default();
         let mut out = vec![
             ("id", Value::s(text(v, "id").unwrap_or_default())),
             ("plane", Value::s(plane.clone())),
-            ("tier", Value::s(if resident { "resident" } else { "recall" })),
+            // 三个取值而非两个：墓碑既不是"该常驻读"的，也不是"按话题召回"的，
+            // 它只是让调用方看到"这条已删"。混进 recall 会让召回清单里躺着死记录。
+            ("tier", Value::s(if deleted { "deleted" } else if resident { "resident" } else { "recall" })),
             ("title", Value::s(text(v, "title").unwrap_or_default())),
             ("read_when", Value::s(text(v, "read_when").unwrap_or_default())),
             ("updated_at", Value::s(text(v, "updated_at").unwrap_or_default())),
