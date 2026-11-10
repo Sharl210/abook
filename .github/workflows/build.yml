@@ -162,7 +162,20 @@ jobs:
       - name: MCP 并发响应完整性
         # 多个 tools/call 同时进行时，响应必须各归各的：线程各写半条 JSON
         # 客户端就会拿到坏数据。这个测试既查数量也查每行能否单独 parse。
-        run: python3 tests/mcp_concurrency.py target/release/abook
+        run: |
+          set +e
+          python3 tests/mcp_concurrency.py target/release/abook > /tmp/conc.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            python3 -c "
+          import sys
+          log = open('/tmp/conc.log', encoding='utf-8', errors='replace').read()
+          print('::error::' + log.replace(chr(10), ' | ')[:2500])
+          "
+          else
+            cat /tmp/conc.log
+          fi
+          exit $rc
       - name: 本地 fixture 更新与坏包保护回归
         run: |
           set +e
