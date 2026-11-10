@@ -2030,8 +2030,28 @@ fn reconcile_planes(root: &std::path::Path, a: &Args) -> R<i32> {
             if !meta.is_file() {
                 continue;
             }
+            // 只数"活动记录"。`list` 口径排除软删，若这里连软删文件一起数，
+            // 两个数字永远对不上——旧两库迁移带过来的 STATUS=deleted 记录会让
+            // reconcile 长期报"盘上多、解析少"，看着像库坏了，其实数据是好的。
             match path.extension().and_then(|s| s.to_str()) {
-                Some("json") | Some("md") => on_disk += 1,
+                Some("json") => {
+                    let raw = std::fs::read_to_string(&path)?;
+                    let deleted = crate::mcp_json::parse(&raw)
+                        .ok()
+                        .and_then(|v| v.str("status").map(|s| s == "deleted"))
+                        .unwrap_or(false);
+                    if !deleted { on_disk += 1; }
+                }
+                Some("md") => {
+                    // 旧格式的 STATUS 写在正文头部；缺失时按活动记录算。
+                    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+                    let deleted = raw
+                        .lines()
+                        .find_map(|line| line.strip_prefix("STATUS="))
+                        .map(|v| v.trim().eq_ignore_ascii_case("deleted"))
+                        .unwrap_or(false);
+                    if !deleted { on_disk += 1; }
+                }
                 _ => continue,
             }
         }
