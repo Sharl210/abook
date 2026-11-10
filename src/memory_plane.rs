@@ -278,7 +278,7 @@ pub fn index(root: &str) -> R<Value> {
     let root = root_path(root)?;
     let mut items = Vec::new();
     for plane in RESIDENT_PLANES {
-        let records = records_with_status(&root, Some(plane), false)?;
+        let records = records_with_status(&root, Some(*plane), false)?;
         for v in &records {
             items.push(object(vec![
                 ("plane", Value::s(*plane)),
@@ -297,7 +297,7 @@ pub fn outline(root: &str) -> R<Value> {
     let root = root_path(root)?;
     let mut titles: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for p in RECALL_PLANES {
-        let records = records_with_status(&root, Some(p), false)?;
+        let records = records_with_status(&root, Some(*p), false)?;
         let mut plane_titles = Vec::new();
         for v in &records {
             let title = text(v, "title").unwrap_or_default();
