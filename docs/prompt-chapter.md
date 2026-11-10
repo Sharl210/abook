@@ -211,12 +211,14 @@ abook budget <记录>                读这条要多少字节（对照规则上�
 ```text
 memory_write / memory_read / memory_update
 memory_delete / memory_restore
-memory_search / memory_recall / memory_context / memory_index
+memory_search / memory_recall / memory_context / memory_index / memory_outline
 memory_batch_preview / memory_batch_apply / memory_batch_status / memory_batch_rollback
 memory_export
 ```
 
 普通记忆平面为 `soul`、`rules`、`profile`、`explicit`、`long_term`、`episodic`；凭据独立存放在 vault，不进入普通记忆导出。`expected_revision` 用于更新、软删除和恢复的冲突保护。
+
+预载分两条命令：`memory_index` 只完整返回 `soul`、`profile`、`explicit` 正文，每条仅有 `plane`、`title`、`content`；`memory_outline` 只返回 `rules`、`long_term`、`episodic` 的标题，供后续按话题召回。两者分开，避免常驻正文被标题清单撑大后截断。
 
 旧 `promote`、`demote`、`candidate`、`canonical` 命令仅保留给旧库迁移和兼容脚本；新 MCP 不使用候选/正式晋升生命周期。
 
