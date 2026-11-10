@@ -730,10 +730,24 @@ mod legacy_migration_tests {
         assert_eq!(indexed.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
         let items = indexed.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(text(&items[0], "preview_chars").as_deref(), Some("200"));
-        assert_eq!(items[0].get("preview_truncated"), Some(&Value::b(true)));
+        // 剩下这条在 profile，属常驻层：`index` 给它正文而不是 preview。
+        // 常驻层的意义就是"每轮都该知道"，只给预览等于没读到。
+        assert_eq!(text(&items[0], "tier").as_deref(), Some("resident"));
+        assert!(items[0].get("content").is_some(), "常驻层必须给正文");
+        assert!(items[0].get("preview").is_none(), "常驻层不该只给预览");
         let profile = index(root.to_string_lossy().as_ref(), Some("profile"), 10, 0).unwrap();
         assert_eq!(text(&profile, "total").as_deref(), Some("1"));
+        // 按需层（long_term）只给标题与触发条件：正文可能有几十万字，全铺进上下文
+        // 会挤掉真正要干的事。这里放一条长正文，确认它没有被带出来。
+        let long_body = "L".repeat(500);
+        write(root.to_string_lossy().as_ref(), "long_term", "LongOne", "recall test", long_body.as_str()).unwrap();
+        let recall = index(root.to_string_lossy().as_ref(), Some("long_term"), 10, 0).unwrap();
+        let ri = recall.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
+        assert_eq!(ri.len(), 1);
+        assert_eq!(text(&ri[0], "tier").as_deref(), Some("recall"));
+        assert!(ri[0].get("content").is_none(), "按需层不该带正文");
+        let prev = text(&ri[0], "preview").unwrap_or_default();
+        assert!(prev.chars().count() < 500, "预览必须短于正文");
         assert!(index(root.to_string_lossy().as_ref(), Some("bogus"), 10, 0).is_err());
         assert_eq!(text(&second, "plane").as_deref(), Some("profile"));
         let _ = fs::remove_dir_all(root);
