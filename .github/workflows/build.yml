@@ -130,20 +130,11 @@ jobs:
             # 失败原因必须能看见：日志下载接口对无 admin 权的 token 是 403，
             # 所以把判定性与非判定性两段都回显成 annotation。
             echo "::error::cargo test rc=$rc"
-            # 错误行里有换行/缩进，逐行 echo 会丢关键片段。压成一段再输出。
-            python3 - <<'PYERR'
-          import re
-          log = open('/tmp/ut.log', encoding='utf-8', errors='replace').read()
-          # 只取 error 行与它后面的三行（--> 位置和原因常分几行）。
-          lines = log.splitlines()
-          out = []
-          for i, l in enumerate(lines):
-              if re.search(r'\berror(\[E\d+\])?:', l):
-                  out.extend(x.strip() for x in lines[i:i+4])
-          print("::error::" + " || ".join(out[:30]).replace('\n', ' ')[:3000])
-          PYERR
-            # 同时留一份 artifact 供事后查看。
-            cp /tmp/ut.log ut-failure.log 2>/dev/null || true
+            # 错误行里有换行/缩进，逐行 echo 会丢关键片段。用 tr 压成一行再输出。
+            ERRORS=$(grep -E "error(\[E[0-9]+\])?:" /tmp/ut.log | head -8 | tr '\n' ' ')
+            echo "::error::${ERRORS:-无 error 行，看 rc=$rc}"
+            LOCS=$(grep -E "^\s+-->" /tmp/ut.log | head -8 | tr '\n' ' ')
+            echo "::error::位置：${LOCS}"
           fi
           exit $rc
       - name: 上传失败日志
