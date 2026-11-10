@@ -330,7 +330,17 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
         }
         object(out)
     }).collect();
-    items.sort_by(|a,b| text(a,"plane").cmp(&text(b,"plane")).then_with(|| text(a,"id").cmp(&text(b,"id"))));
+    // 常驻层必须排在最前：`index` 有分页（默认 100 条一页），而按需层动辄几百条。
+    // 若按 plane 字典序排，episodic/rules 会占满第一页，常驻层被挤到后面——
+    // 调用方取一页就永远看不到"不知道就会做错"的那些内容。分层如果不能保证
+    // 常驻层先出现，这个机制等于没有。
+    items.sort_by(|a, b| {
+        let ra = text(a, "tier").as_deref() == Some("resident");
+        let rb = text(b, "tier").as_deref() == Some("resident");
+        rb.cmp(&ra)
+            .then_with(|| text(a, "plane").cmp(&text(b, "plane")))
+            .then_with(|| text(a, "id").cmp(&text(b, "id")))
+    });
     let total = items.len();
     let limit = limit.clamp(1, 500);
     let effective_offset = offset.min(total);
@@ -742,6 +752,12 @@ mod legacy_migration_tests {
         assert!(live[0].get("preview").is_none(), "常驻层不该只给预览");
         let profile = index(root.to_string_lossy().as_ref(), Some("profile"), 10, 0).unwrap();
         assert_eq!(text(&profile, "total").as_deref(), Some("1"));
+        // 常驻层必须排在前面：index 分页，若按需层占满第一页，调用方就永远
+        // 看不到"不知道就会做错"的内容。这一条防的是排序被改坏。
+        let paged = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
+        let first = paged.get("items").and_then(|v| match v { Value::Array(a) => a.first().cloned(), _ => None }).unwrap();
+        assert_eq!(text(&first, "tier").as_deref(), Some("resident"), "第一页首条必须来自常驻层");
+
         // 按需层（long_term）只给标题与触发条件：正文可能有几十万字，全铺进上下文
         // 会挤掉真正要干的事。这里放一条长正文，确认它没有被带出来。
         let long_body = "L".repeat(500);
