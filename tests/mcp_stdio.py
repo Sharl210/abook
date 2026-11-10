@@ -353,7 +353,7 @@ def test_memory_tools():
         assert isinstance(resident, list) and len(resident) == 4, resident
         assert all(set(item) == {"plane", "title", "content"} for item in resident), resident
         assert all(item["plane"] in {"soul", "profile", "explicit"} for item in resident), resident
-        assert any(item["content"] == "第一行\\n第二行 😀" for item in resident), resident
+        assert any(item["content"] == "第一行\n第二行 😀" for item in resident), resident
         assert len(json.dumps(resident, ensure_ascii=False).encode("utf-8")) < 10000, "预载首步只带常驻层正文且不夹带冗余字段"
         recall_write = send(p, request("m1-recall-write", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "long_term", "title": "回归测试可召回标题", "read_when": "index outline 测试", "content": "不应进入第一步正文"}}))
         assert recall_write["result"]["isError"] is False, recall_write
@@ -582,8 +582,9 @@ def test_default_stdio_and_cli_prefix():
         assert listing["total"] == 1
         indexed = subprocess.run([BIN, "index", "--root", root, "--plane", "all", "--limit", "1", "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
         index_value = json.loads(indexed.stdout)
-        assert index_value["format"] == "abook.memory.index.v1"
-        assert index_value["total"] == 1
+        assert index_value == [{"plane": "explicit", "title": "CLI prefix", "content": "prefix body"}]
+        outlined = subprocess.run([BIN, "memory", "outline", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
+        assert json.loads(outlined.stdout) == {}
         shown = subprocess.run([BIN, "get", value["id"], "TITLE", "--root", root, "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
         assert json.loads(shown.stdout) == "CLI prefix"
         paged = subprocess.run([BIN, "list", "--root", root, "--plane", "explicit", "--page", "2", "--per-page", "1", "--json"], text=True, encoding="utf-8", capture_output=True, check=True)
