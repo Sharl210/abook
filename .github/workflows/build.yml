@@ -159,6 +159,10 @@ jobs:
         run: python3 tests/mcp_stdio.py target/release/abook
       - name: 事务回滚原子性回归
         run: python3 tests/txn_rollback_atomicity.py target/release/abook
+      - name: MCP 并发响应完整性
+        # 多个 tools/call 同时进行时，响应必须各归各的：线程各写半条 JSON
+        # 客户端就会拿到坏数据。这个测试既查数量也查每行能否单独 parse。
+        run: python3 tests/mcp_concurrency.py target/release/abook
       - name: 本地 fixture 更新与坏包保护回归
         run: |
           set +e
