@@ -127,13 +127,26 @@ jobs:
           cargo test --release 2>&1 | tee /tmp/ut.log
           rc=${PIPESTATUS[0]}
           if [ $rc -ne 0 ]; then
-            echo "::error::cargo test 失败，末尾输出："
-            grep -E "^(test .* FAILED|failures:|---- .* stdout|thread .* panicked|assertion)" /tmp/ut.log | tail -40 | while IFS= read -r line; do
+            # 失败原因必须能看见：日志下载接口对无 admin 权的 token 是 403，
+            # 所以把判定性与非判定性两段都回显成 annotation。
+            echo "::error::cargo test rc=$rc"
+            grep -n "FAILED\|panicked\|assertion\|left:\|right:\|^failures:\|^test result" /tmp/ut.log | tail -60 | while IFS= read -r line; do
               echo "::error::$line"
             done
-            tail -60 /tmp/ut.log | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::group::完整测试输出"
+            cat /tmp/ut.log
+            echo "::endgroup::"
+            # 同时留一份 artifact 供事后查看。
+            cp /tmp/ut.log ut-failure.log 2>/dev/null || true
           fi
           exit $rc
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ut-failure-log
+          path: ut-failure.log
+          if-no-files-found: ignore
       - name: 构建 smoke 二进制
         run: cargo build --release
       - name: MCP stdio smoke
