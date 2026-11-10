@@ -728,13 +728,18 @@ mod legacy_migration_tests {
         assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
         assert_eq!(text(&indexed, "total").as_deref(), Some("2"));
         assert_eq!(indexed.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
-        let items = indexed.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
-        assert_eq!(items.len(), 1);
-        // 剩下这条在 profile，属常驻层：`index` 给它正文而不是 preview。
+        // items 里同时含活动记录与墓碑（index 的 total 要把 deleted 算进去，
+        // 否则调用方看不出"这条已删"）。按 plane 找，不能假定第一条是谁。
+        let all_items = index(root.to_string_lossy().as_ref(), None, 10, 0).unwrap();
+        let each = all_items.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
+        let live: Vec<_> = each.iter().filter(|v| text(v, "status").as_deref() != Some("deleted")).collect();
+        assert_eq!(live.len(), 1, "只该剩 profile 那条活动记录");
+        // profile 属常驻层：`index` 给它正文而不是 preview。
         // 常驻层的意义就是"每轮都该知道"，只给预览等于没读到。
-        assert_eq!(text(&items[0], "tier").as_deref(), Some("resident"));
-        assert!(items[0].get("content").is_some(), "常驻层必须给正文");
-        assert!(items[0].get("preview").is_none(), "常驻层不该只给预览");
+        assert_eq!(text(live[0], "plane").as_deref(), Some("profile"));
+        assert_eq!(text(live[0], "tier").as_deref(), Some("resident"));
+        assert!(live[0].get("content").is_some(), "常驻层必须给正文");
+        assert!(live[0].get("preview").is_none(), "常驻层不该只给预览");
         let profile = index(root.to_string_lossy().as_ref(), Some("profile"), 10, 0).unwrap();
         assert_eq!(text(&profile, "total").as_deref(), Some("1"));
         // 按需层（long_term）只给标题与触发条件：正文可能有几十万字，全铺进上下文
