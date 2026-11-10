@@ -121,6 +121,9 @@ fn root_path(root: &str) -> R<PathBuf> {
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
 fn text(value: &Value, key: &str) -> Option<String> { value.get(key).and_then(|v| match v { Value::String(s) => Some(s.clone()), Value::Number(n) => Some(n.clone()), _ => None }) }
+fn text_of(v: &Value) -> String {
+    match v { Value::String(s) => s.clone(), _ => String::new() }
+}
 fn object(mut values: Vec<(&str, Value)>) -> Value { let mut map = BTreeMap::new(); for (k, v) in values.drain(..) { map.insert(k.to_string(), v); } Value::Object(map) }
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 160 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -274,91 +277,65 @@ pub fn index(root: &str, plane: Option<&str>, limit: usize, offset: usize) -> R<
         Some(p) => return Err(err(format!("未知记忆平面: {p}"))),
     };
     let all = records_with_status(&root, plane.filter(|p| *p != "all"), true)?;
-    let mut counts = BTreeMap::new();
+    // 预载分两步，两步的形状不一样，因为它们的用途不一样：
+    //
+    //   第一步 常驻层 soul/explicit/profile —— **必须一次读全**。这些是 AI 的身份
+    //   与风格、用户画像与环境事实、用户明确要求记住的约定。它们与话题无关，
+    //   某轮没提到不代表不生效；而且它们的用处恰恰在于"不用去找就知道"，
+    //   所以只能一次给完，不能靠分页或按需召回。
+    //
+    //   第二步 按需层 rules/long_term/episodic —— **只给标题**。这三层的正文是
+    //   长期知识库，动辄几十万字，全铺进来没人读得完。给标题是为了建立
+    //   "库里有哪些东西可找回"的初步印象，让后续 recall 有方向。
+    //
+    // 字段只留"读者真会用到的"。第一版把 updated_at/revision/status/tier/
+    // content_bytes/preview_* 全塞进每一条，光这些就占了二十多万字节的六成——
+    // 没有一个字段是读的人需要的。列表里塞冗余字段的代价不是磁盘，是
+    // 响应被撑到超限、转成文件、然后没人肯读完。
+    let mut resident: Vec<Value> = Vec::new();
+    let mut recall: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for p in &selected {
-        let mut total = 0usize;
-        let mut active = 0usize;
-        let mut deleted = 0usize;
-        for value in &all {
-            if text(value, "plane").as_deref() == Some(*p) {
-                total += 1;
-                if text(value, "status").as_deref() == Some("deleted") { deleted += 1; } else { active += 1; }
-            }
-        }
-        counts.insert((*p).to_string(), object(vec![
-            ("total", Value::n(total.to_string())),
-            ("active", Value::n(active.to_string())),
-            ("deleted", Value::n(deleted.to_string())),
-        ]));
+        recall.insert((*p).to_string(), Vec::new());
     }
-    // 六平面分两层，`index` 是唯一的预载入口，两层在同一份输出里一次给全：
-    //
-    //   常驻层 soul/explicit/profile —— 不知道就会做错，与话题无关，给**正文**。
-    //     这些是身份、用户长期偏好、用户明确要求记住的事实。它们的价值不在于
-    //     "某个话题相关时才查"，而在于每轮都该知道；只给标题等于没读到。
-    //
-    //   按需层 rules/long_term/episodic —— 由话题触发，只给**标题与触发条件**。
-    //     正文可能几十万字，全文铺进上下文会挤掉真正要干的事；标题写准了，
-    //     recall 才有方向。
-    //
-    // 因此 `items` 里常驻层带 content，按需层不带。调用方不需要先判断"哪些平面该
-    // 全读"，工具按平面职责直接给对了。
-    let mut items: Vec<Value> = all.iter().filter(|v| selected.contains(&text(v, "plane").as_deref().unwrap_or(""))).map(|v| {
+    for v in all.iter() {
         let plane = text(v, "plane").unwrap_or_default();
-        // 已软删的记录虽然还列在 index 里（调用方要能看出"这条已删"），
-        // 但正文不再给：它已经失效，把 47 条墓碑的全文铺进来既浪费上下文，
-        // 又把真正该读的活动记录挤出第一页。
-        let deleted = text(v, "status").as_deref() == Some("deleted");
-        let resident = RESIDENT_PLANES.contains(&plane.as_str()) && !deleted;
-        let body = text(v, "content").unwrap_or_default();
-        let mut out = vec![
-            ("id", Value::s(text(v, "id").unwrap_or_default())),
-            ("plane", Value::s(plane.clone())),
-            // 三个取值而非两个：墓碑既不是"该常驻读"的，也不是"按话题召回"的，
-            // 它只是让调用方看到"这条已删"。混进 recall 会让召回清单里躺着死记录。
-            ("tier", Value::s(if deleted { "deleted" } else if resident { "resident" } else { "recall" })),
-            ("title", Value::s(text(v, "title").unwrap_or_default())),
-            ("read_when", Value::s(text(v, "read_when").unwrap_or_default())),
-            ("updated_at", Value::s(text(v, "updated_at").unwrap_or_default())),
-            ("revision", Value::s(text(v, "revision").unwrap_or_else(|| "1".into()))),
-            ("status", Value::s(text(v, "status").unwrap_or_else(|| "active".into()))),
-        ];
-        if resident {
-            // 常驻层给全文。budget 用来告诉调用方这一条有多大，便于它决定是否
-            // 分批读；不是限制，只是让代价可见。
-            out.push(("content", Value::s(body.clone())));
-            out.push(("content_bytes", Value::n(body.len().to_string())));
+        if !selected.contains(&plane.as_str()) { continue; }
+        // 已软删的既不该读正文，也不该进召回清单——把死记录混进标题列表，
+        // 只会让后来人以为还有内容可查。
+        if text(v, "status").as_deref() == Some("deleted") { continue; }
+        let title = text(v, "title").unwrap_or_default();
+        if RESIDENT_PLANES.contains(&plane.as_str()) {
+            // 常驻层：平面 + 标题 + 正文。不加 id——读它的人不需要 id 才能读正文，
+            // 而 id 是条几十字节的哈希，攒起来就是几万字节。
+            resident.push(object(vec![
+                ("plane", Value::s(plane.clone())),
+                ("title", Value::s(title)),
+                ("content", Value::s(text(v, "content").unwrap_or_default())),
+            ]));
         } else {
-            let (text_preview, chars, truncated) = preview(&body, 160);
-            out.push(("preview", Value::s(text_preview)));
-            out.push(("preview_chars", Value::n(chars.to_string())));
-            out.push(("preview_truncated", Value::b(truncated)));
+            // 按需层：只给标题。调用方想读某条时用 memory_search 按关键词找，
+            // 不需要先拿到 id。
+            recall.entry(plane).or_default().push(Value::s(title));
         }
-        object(out)
-    }).collect();
-    // 常驻层必须排在最前：`index` 有分页（默认 100 条一页），而按需层动辄几百条。
-    // 若按 plane 字典序排，episodic/rules 会占满第一页，常驻层被挤到后面——
-    // 调用方取一页就永远看不到"不知道就会做错"的那些内容。分层如果不能保证
-    // 常驻层先出现，这个机制等于没有。
-    items.sort_by(|a, b| {
-        let ra = text(a, "tier").as_deref() == Some("resident");
-        let rb = text(b, "tier").as_deref() == Some("resident");
-        rb.cmp(&ra)
-            .then_with(|| text(a, "plane").cmp(&text(b, "plane")))
-            .then_with(|| text(a, "id").cmp(&text(b, "id")))
+    }
+    // 常驻层按平面归组后排序，读的时候一条平面内是连续的。
+    resident.sort_by(|a, b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "title").cmp(&text(b, "title"))));
+    recall.retain(|_, titles| {
+        titles.sort_by(|a, b| text_of(a).cmp(&text_of(b)));
+        !titles.is_empty()
     });
-    let total = items.len();
-    let limit = limit.clamp(1, 500);
-    let effective_offset = offset.min(total);
-    let page: Vec<Value> = items.into_iter().skip(effective_offset).take(limit).collect();
+    // 第一步**不分页**：常驻层必须一次读全，分页就意味着"这一页之前那些你可能没看到"，
+    // 而常驻层恰恰是不能漏的。它的体积由字段纪律保证（每条只有 plane/title/content），
+    // 不靠 limit 兜底。`limit`/`offset` 只影响第二步的标题列表。
+    let _ = (limit, offset);
+    let recall_total: usize = recall.values().map(|v| v.len()).sum();
     Ok(object(vec![
-        ("format", Value::s("abook.memory.index.v1")),
-        ("planes", Value::arr(selected.iter().map(|p| Value::s(*p)).collect())),
-        ("counts", Value::Object(counts)),
-        ("items", Value::Array(page)),
-        ("total", Value::n(total.to_string())),
-        ("offset", Value::n(effective_offset.to_string())),
-        ("limit", Value::n(limit.to_string())),
+        ("format", Value::s("abook.memory.index.v2")),
+        // 第一步：全量正文，读的人不需要再发起任何调用。
+        ("resident", Value::Array(resident)),
+        // 第二步：按平面分组的标题，建立"有哪些可找回"的印象。
+        ("recall", Value::Object(recall.into_iter().map(|(k, v)| (k, Value::Array(v))).collect())),
+        ("total", Value::n((resident.len() + recall_total).to_string())),
         ("credentials", Value::s("vault")),
     ]))
 }
