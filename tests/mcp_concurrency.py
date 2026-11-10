@@ -15,10 +15,15 @@ META = {
 
 
 def main(binary):
-    root = sys.argv[2] if len(sys.argv) > 2 else None
-    argv = [binary, "mcp", "stdio"]
-    if root:
-        argv += ["--root", root]
+    # 自己建一个临时库：CI 上没有 ~/AgentsBook，直接跑会拿到
+    # "六平面 memory 根不存在"。测试不该依赖宿主机已有状态。
+    import tempfile, pathlib
+    td = tempfile.mkdtemp(prefix="abook-conc-")
+    root = sys.argv[2] if len(sys.argv) > 2 else td
+    if not pathlib.Path(root, "abook.memory.layout.v1").exists():
+        subprocess.run([binary, "memory", "init", "--root", root],
+                       check=True, capture_output=True, text=True)
+    argv = [binary, "mcp", "stdio", "--root", root]
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
     n = 16
