@@ -185,7 +185,11 @@ jobs:
           assert value["total"] == 1
           assert len(value["planes"]) == 6
           assert value["items"][0]["id"]
-          assert value["items"][0]["preview_truncated"] is False
+          # explicit 属常驻层：`index` 直接给正文，不给 preview。
+          # 常驻层的意义是"每轮都该知道"，给预览等于没读到。
+          assert value["items"][0]["tier"] == "resident"
+          assert value["items"][0]["content"] == "第一行\n第二行 😀"
+          assert "preview" not in value["items"][0]
           PY
           test -f "$ROOT/abook.memory.layout.v1"
           LEGACY="$(mktemp -d)"
