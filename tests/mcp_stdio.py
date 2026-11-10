@@ -303,7 +303,7 @@ def test_memory_tools():
     try:
         tools = send(p, request("mt", "tools/list"))["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"memory_init", "memory_context", "memory_paths", "memory_index", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
+        assert {"memory_init", "memory_context", "memory_paths", "memory_index", "memory_outline", "memory_export", "memory_write", "memory_read", "memory_list", "memory_search", "memory_recall", "memory_update", "memory_delete", "memory_restore", "abook_attach_add", "abook_attach_list", "abook_attach_get", "abook_attach_rm"} <= names
         memory_list_schema = next(tool for tool in tools if tool["name"] == "memory_list")["inputSchema"]
         # root 不再是必填：二进制与记忆库同层，库根由程序自己推导，
         # 让调用方每次粘贴路径既啰嗦又容易指错目录。required 里不该再有 root。
@@ -317,10 +317,12 @@ def test_memory_tools():
         vault_probe = send(p, request("m0-vault", "tools/call", {"name": "abook_vault_put", "arguments": {"root": empty_root, "ident": "marker-regression", "purpose": "test only", "body": "dummy"}}))
         assert vault_probe["result"]["isError"] is False, vault_probe
         assert not os.path.exists(os.path.join(empty_root, ".numbers")), "vault write must not contaminate six-plane root"
-        empty_index = send(p, request("m0-index", "tools/call", {"name": "memory_index", "arguments": {"root": empty_root, "plane": "all"}}))
+        empty_index = send(p, request("m0-index", "tools/call", {"name": "memory_index", "arguments": {"root": empty_root}}))
         assert empty_index["result"]["isError"] is False, empty_index
-        assert empty_index["result"]["structuredContent"]["total"] == 0
-        assert len(empty_index["result"]["structuredContent"]["planes"]) == 6
+        assert empty_index["result"]["structuredContent"] == []
+        empty_outline = send(p, request("m0-outline", "tools/call", {"name": "memory_outline", "arguments": {"root": empty_root}}))
+        assert empty_outline["result"]["isError"] is False, empty_outline
+        assert empty_outline["result"]["structuredContent"] == {}
         empty_paths = send(p, request("m0-paths", "tools/call", {"name": "memory_paths", "arguments": {"root": empty_root}}))
         assert empty_paths["result"]["isError"] is False, empty_paths
         assert empty_paths["result"]["structuredContent"]["format"] == "abook.memory.paths.v1"
@@ -345,16 +347,29 @@ def test_memory_tools():
         record = written["result"]["structuredContent"]
         extra = send(p, request("m1b", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "explicit", "title": "第二条", "read_when": "分页验收", "content": "另一条记录"}}))
         assert extra["result"]["isError"] is False, extra
-        indexed = send(p, request("m1-index", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "all", "limit": 1, "offset": 0}}))
+        indexed = send(p, request("m1-index", "tools/call", {"name": "memory_index", "arguments": {"root": root}}))
         assert indexed["result"]["isError"] is False, indexed
-        assert indexed["result"]["structuredContent"]["format"] == "abook.memory.index.v1"
-        assert indexed["result"]["structuredContent"]["total"] == 4
-        assert len(indexed["result"]["structuredContent"]["planes"]) == 6
+        resident = indexed["result"]["structuredContent"]
+        assert isinstance(resident, list) and len(resident) == 4, resident
+        assert all(set(item) == {"plane", "title", "content"} for item in resident), resident
+        assert all(item["plane"] in {"soul", "profile", "explicit"} for item in resident), resident
+        assert any(item["content"] == "第一行\\n第二行 😀" for item in resident), resident
+        assert len(json.dumps(resident, ensure_ascii=False).encode("utf-8")) < 10000, "预载首步只带常驻层正文且不夹带冗余字段"
+        recall_write = send(p, request("m1-recall-write", "tools/call", {"name": "memory_write", "arguments": {"root": root, "plane": "long_term", "title": "回归测试可召回标题", "read_when": "index outline 测试", "content": "不应进入第一步正文"}}))
+        assert recall_write["result"]["isError"] is False, recall_write
+        assert len(indexed["result"]["structuredContent"]) == 4, "按需层不应混进 index"
+        outlined = send(p, request("m1-outline", "tools/call", {"name": "memory_outline", "arguments": {"root": root}}))
+        assert outlined["result"]["isError"] is False, outlined
+        outline = outlined["result"]["structuredContent"]
+        assert outline == {"long_term": ["回归测试可召回标题"]}, outline
+        assert "不应进入第一步正文" not in json.dumps(outline, ensure_ascii=False)
         listed_all = send(p, request("m1-list-all", "tools/call", {"name": "memory_list", "arguments": {"root": root, "limit": 10, "offset": 0}}))
         assert listed_all["result"]["isError"] is False, listed_all
         assert listed_all["result"]["structuredContent"]["total"] == 4
-        bad_index_plane = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
-        assert bad_index_plane["result"]["isError"] is True, bad_index_plane
+        bad_index_args = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
+        assert bad_index_args["result"]["isError"] is True, bad_index_args
+        bad_outline_args = send(p, request("m1-outline-bad", "tools/call", {"name": "memory_outline", "arguments": {"root": root, "unexpected": True}}))
+        assert bad_outline_args["result"]["isError"] is True, bad_outline_args
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
         assert read["result"]["structuredContent"]["content"] == "第一行\n第二行 😀"
         search = send(p, request("m3", "tools/call", {"name": "memory_search", "arguments": {"root": root, "query": "第二行", "plane": "explicit"}}))

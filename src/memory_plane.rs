@@ -272,91 +272,41 @@ fn preview(content: &str, max_chars: usize) -> (String, usize, bool) {
     (value, total_chars, total_chars > max_chars)
 }
 
-/// 预载第一步：三个常驻平面的**全量正文**。
-///
-/// 这三层是 AI 的身份与风格、用户画像与环境事实、用户明确要求记住的约定。
-/// 它们与话题无关，某轮没提到不代表不生效；用处恰恰在于"不用去找就知道"，
-/// 所以只能一次给完，不能分页、不能靠按需召回。
-///
-/// 字段只保留 `plane`/`title`/`content` 三个。第一版额外塞了
-/// `updated_at`/`revision`/`status`/`tier`/`content_bytes`/`preview_*`，
-/// 光这些元信息就占了六成体积——读的人一个都用不上，代价是响应被撑到超限、
-/// 转存成文件、然后没人肯读。列表里多一个没人用的字段，就是让别人少读一段正文。
-///
-/// `plane` 参数只用于把结果收窄到某一个常驻平面（例如只想重读 profile）；
-/// `limit`/`offset` 保留只为兼容调用方，**实际不分页**——常驻层漏掉一条
-/// 就等于这轮读了个不完整的自己。
-pub fn index(root: &str, plane: Option<&str>, _limit: usize, _offset: usize) -> R<Value> {
+/// 预载第一步：soul/profile/explicit 三个常驻平面的全量正文。
+/// 仅返回阅读所需的 plane/title/content，绝不分页，避免漏读。
+pub fn index(root: &str) -> R<Value> {
     let root = root_path(root)?;
-    let selected: Vec<&str> = match plane {
-        Some("all") | None => RESIDENT_PLANES.to_vec(),
-        Some(p) if RESIDENT_PLANES.contains(&p.as_str()) => vec![p],
-        Some(p) if plane_ok(p) => {
-            return Err(err(format!(
-                "{p} 属于按需召回层，不在预载第一步里；它的标题用 `abook memory outline` 看，正文用 memory_search 找"
-            )));
+    let mut items = Vec::new();
+    for plane in RESIDENT_PLANES {
+        let records = records_with_status(&root, Some(plane), false)?;
+        for v in &records {
+            items.push(object(vec![
+                ("plane", Value::s(*plane)),
+                ("title", Value::s(text(v, "title").unwrap_or_default())),
+                ("content", Value::s(text(v, "content").unwrap_or_default())),
+            ]));
         }
-        Some(p) => return Err(err(format!("未知记忆平面: {p}"))),
-    };
-    let all = records_with_status(&root, None, false)?;
-    let mut resident: Vec<Value> = Vec::new();
-    for v in all.iter() {
-        let plane = text(v, "plane").unwrap_or_default();
-        if !selected.contains(&plane.as_str()) { continue; }
-        resident.push(object(vec![
-            ("plane", Value::s(plane)),
-            ("title", Value::s(text(v, "title").unwrap_or_default())),
-            ("content", Value::s(text(v, "content").unwrap_or_default())),
-        ]));
     }
-    resident.sort_by(|a, b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "title").cmp(&text(b, "title"))));
-    let total = resident.len();
-    let bytes: usize = resident.iter().map(|r| match r.get("content") {
-        Some(Value::String(t)) => t.len(), _ => 0
-    }).sum();
-    Ok(object(vec![
-        ("format", Value::s("abook.memory.index.v2")),
-        ("planes", Value::arr(selected.iter().map(|p| Value::s(*p)).collect())),
-        ("items", Value::Array(resident)),
-        ("total", Value::n(total.to_string())),
-        ("content_bytes", Value::n(bytes.to_string())),
-        ("credentials", Value::s("vault")),
-    ]))
+    items.sort_by(|a, b| text(a, "plane").cmp(&text(b, "plane")).then_with(|| text(a, "title").cmp(&text(b, "title"))));
+    Ok(Value::Array(items))
 }
 
-/// 预载第二步：按需层的**标题清单**，只为建立"库里有哪些东西可找回"的印象。
-///
-/// 为什么不给正文：`rules`/`long_term`/`episodic` 是长期知识库，正文动辄几十万字。
-/// 全铺进来没人读得完，而且会把第一步那三个真正该读的平面挤出通道。标题的作用
-/// 是让后续 `memory_search`/`memory_recall` 有方向，不是替代读正文。
-///
-/// 为什么不给 id 和摘要：一条 40 字节的 id 乘以六百条就是 24KB，摘要更贵；
-/// 而读者此刻只需要"知道有这么一件事存在"。
+/// 预载第二步：rules/long_term/episodic 的标题清单，仅供建立可召回内容的初步印象。
+/// 不返回正文、ID、摘要、计数或其他元信息，避免响应膨胀。
 pub fn outline(root: &str) -> R<Value> {
     let root = root_path(root)?;
-    let all = records_with_status(&root, None, false)?;
     let mut titles: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for p in RECALL_PLANES {
-        titles.insert((*p).to_string(), Vec::new());
+        let records = records_with_status(&root, Some(p), false)?;
+        let mut plane_titles = Vec::new();
+        for v in &records {
+            let title = text(v, "title").unwrap_or_default();
+            if !title.is_empty() { plane_titles.push(Value::s(title)); }
+        }
+        plane_titles.sort_by(|a, b| text_of(a).cmp(&text_of(b)));
+        if !plane_titles.is_empty() { titles.insert((*p).to_string(), plane_titles); }
     }
-    for v in all.iter() {
-        let plane = text(v, "plane").unwrap_or_default();
-        if !RECALL_PLANES.contains(&plane.as_str()) { continue; }
-        let title = text(v, "title").unwrap_or_default();
-        if title.is_empty() { continue; }
-        titles.entry(plane).or_default().push(Value::s(title));
-    }
-    for list in titles.values_mut() {
-        list.sort_by(|a, b| text_of(a).cmp(&text_of(b)));
-    }
-    titles.retain(|_, list| !list.is_empty());
-    let total: usize = titles.values().map(|v| v.len()).sum();
-    Ok(object(vec![
-        ("format", Value::s("abook.memory.outline.v1")),
-        ("planes", Value::Object(titles.into_iter().map(|(k, v)| (k, Value::Array(v))).collect())),
-        ("total", Value::n(total.to_string())),
-        ("hint", Value::s("这些只是标题，正文用 memory_search 或 memory_recall 按话题取")),
-    ]))
+    Ok(Value::Object(titles.into_iter().map(|(p, v)| (p, Value::Array(v))).collect()))
 }
 
 
@@ -685,9 +635,11 @@ mod legacy_migration_tests {
         initialize_layout(root.to_string_lossy().as_ref()).unwrap();
         let record_dir = root.join("planes/explicit/records");
         let record = crate::memory_plane::write(root.to_string_lossy().as_ref(), "explicit", "附件测试", "查附件", "正文").unwrap();
-        let indexed = index(root.to_string_lossy().as_ref(), Some("explicit"), 10, 0).unwrap();
-        assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
-        assert_eq!(text(&indexed, "total").as_deref(), Some("1"));
+        let indexed = index(root.to_string_lossy().as_ref()).unwrap();
+        let records = match &indexed { Value::Array(a) => a, _ => panic!("index 必须返回数组") };
+        assert_eq!(records.len(), 1);
+        assert_eq!(text(&records[0], "plane").as_deref(), Some("explicit"));
+        assert_eq!(text(&records[0], "content").as_deref(), Some("正文"));
         assert!(root.join(LAYOUT_MARKER).is_file());
         assert!(!root.join("canonical").exists());
         let record_path = record_dir.join(format!("{}.json", text(&record, "id").unwrap()));
@@ -731,48 +683,33 @@ mod legacy_migration_tests {
     }
 
     #[test]
-    fn layout_marker_and_index_report_six_planes_and_tombstones() {
+    fn layout_marker_and_index_report_resident_and_outline_layers() {
         let root = temp_root();
-        let first = write(root.to_string_lossy().as_ref(), "explicit", "First", "index test", "x".repeat(200).as_str()).unwrap();
-        let second = write(root.to_string_lossy().as_ref(), "profile", "Second", "index test", "body").unwrap();
+        let first = write(root.to_string_lossy().as_ref(), "explicit", "First", "index test", "explicit body").unwrap();
+        let second = write(root.to_string_lossy().as_ref(), "profile", "Second", "index test", "profile body").unwrap();
         delete(root.to_string_lossy().as_ref(), &text(&first, "id").unwrap(), "1").unwrap();
         assert!(root.join(LAYOUT_MARKER).is_file());
-        let indexed = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
-        assert_eq!(text(&indexed, "format").as_deref(), Some("abook.memory.index.v1"));
-        assert_eq!(text(&indexed, "total").as_deref(), Some("2"));
-        assert_eq!(indexed.get("planes").and_then(|v| match v { Value::Array(a) => Some(a.len()), _ => None }), Some(6));
-        // items 里同时含活动记录与墓碑（index 的 total 要把 deleted 算进去，
-        // 否则调用方看不出"这条已删"）。按 plane 找，不能假定第一条是谁。
-        let all_items = index(root.to_string_lossy().as_ref(), None, 10, 0).unwrap();
-        let each = all_items.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
-        let live: Vec<_> = each.iter().filter(|v| text(v, "status").as_deref() != Some("deleted")).collect();
-        assert_eq!(live.len(), 1, "只该剩 profile 那条活动记录");
-        // profile 属常驻层：`index` 给它正文而不是 preview。
-        // 常驻层的意义就是"每轮都该知道"，只给预览等于没读到。
-        assert_eq!(text(live[0], "plane").as_deref(), Some("profile"));
-        assert_eq!(text(live[0], "tier").as_deref(), Some("resident"));
-        assert!(live[0].get("content").is_some(), "常驻层必须给正文");
-        assert!(live[0].get("preview").is_none(), "常驻层不该只给预览");
-        let profile = index(root.to_string_lossy().as_ref(), Some("profile"), 10, 0).unwrap();
-        assert_eq!(text(&profile, "total").as_deref(), Some("1"));
-        // 常驻层必须排在前面：index 分页，若按需层占满第一页，调用方就永远
-        // 看不到"不知道就会做错"的内容。这一条防的是排序被改坏。
-        let paged = index(root.to_string_lossy().as_ref(), None, 1, 0).unwrap();
-        let first = paged.get("items").and_then(|v| match v { Value::Array(a) => a.first().cloned(), _ => None }).unwrap();
-        assert_eq!(text(&first, "tier").as_deref(), Some("resident"), "第一页首条必须来自常驻层");
 
-        // 按需层（long_term）只给标题与触发条件：正文可能有几十万字，全铺进上下文
-        // 会挤掉真正要干的事。这里放一条长正文，确认它没有被带出来。
+        let indexed = index(root.to_string_lossy().as_ref()).unwrap();
+        let records = match &indexed { Value::Array(a) => a, _ => panic!("index 必须返回数组") };
+        assert_eq!(records.len(), 1);
+        assert_eq!(text(&records[0], "plane").as_deref(), Some("profile"));
+        assert_eq!(text(&records[0], "title").as_deref(), Some("Second"));
+        assert_eq!(text(&records[0], "content").as_deref(), Some("profile body"));
+        assert!(records[0].get("id").is_none());
+        assert!(records[0].get("revision").is_none());
+        assert!(records[0].get("preview").is_none());
+
         let long_body = "L".repeat(500);
         write(root.to_string_lossy().as_ref(), "long_term", "LongOne", "recall test", long_body.as_str()).unwrap();
-        let recall = index(root.to_string_lossy().as_ref(), Some("long_term"), 10, 0).unwrap();
-        let ri = recall.get("items").and_then(|v| match v { Value::Array(a) => Some(a), _ => None }).unwrap();
-        assert_eq!(ri.len(), 1);
-        assert_eq!(text(&ri[0], "tier").as_deref(), Some("recall"));
-        assert!(ri[0].get("content").is_none(), "按需层不该带正文");
-        let prev = text(&ri[0], "preview").unwrap_or_default();
-        assert!(prev.chars().count() < 500, "预览必须短于正文");
-        assert!(index(root.to_string_lossy().as_ref(), Some("bogus"), 10, 0).is_err());
+        let outline_value = outline(root.to_string_lossy().as_ref()).unwrap();
+        let long_titles = outline_value.get("long_term").and_then(|v| match v {
+            Value::Array(a) => Some(a), _ => None
+        }).unwrap();
+        assert_eq!(long_titles.len(), 1);
+        assert_eq!(text_of(&long_titles[0]), "LongOne");
+        assert!(outline_value.get("content").is_none());
+        assert!(outline_value.get("id").is_none());
         assert_eq!(text(&second, "plane").as_deref(), Some("profile"));
         let _ = fs::remove_dir_all(root);
     }

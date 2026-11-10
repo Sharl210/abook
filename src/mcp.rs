@@ -271,11 +271,8 @@ fn instructions() -> &'static str {
     "这是当前 Agent 的结构化记忆服务。普通记忆平面为 soul、rules、profile、explicit、long_term、episodic；credentials 由独立 vault 存储。功能面包括分层记忆读写检索、批量预览与应用、Skill、spec、附件、审计迁移和一键更新。\n\
      优先用这里提供的工具：凡本服务已把某项能力暴露为工具，任务与执行就走工具调用，不要退回命令行 `abook`。命令行只用于工具未覆盖的场合、以及历史库兼容与迁移。同一件事有工具也有命令时，工具是默认路径。\n\
      如果当前环境还没有接入本服务的 MCP，那么拿到可执行文件之后紧接着要做的第一件事就是为本环境配置它，配好再开始干活，不要用命令行代跑完事。配置时把记忆库根一并写进启动参数——`args` 里给出 `mcp stdio --root <库根>`——这样库定位在配置期就固定下来，之后每次工具调用都不必再传 root，也不会因为运行目录或环境变量变化而指到别的库。库根用 `detect` 或 `memory_paths` 查一次即可。怎么配取决于你所在的环境：宿主文档、现有配置文件和你的探查都能告诉你答案，按当前环境的实际机制配，不必套用别的宿主的写法。\n\
-      开工前先预载一次：调用不带 plane 的 memory_index，它一次覆盖六个平面，不要逐平面重复调——那是同一批数据重复取。它按平面职责分两层给：\n\
-     常驻层 soul/explicit/profile 直接给 content 正文。这三层是身份、用户偏好与用户明确要求记住的事实，与话题无关；某一轮没提到它不代表它不生效，只给标题等于没读到，所以每轮开工都该真的读进去。\n\
-     按需层 rules/long_term/episodic 只给 title/read_when/preview。这些正文可能有几十万字，靠话题召回再取：先 memory_search 或 memory_recall 找到候选，再用 memory_read 读正文，读前可用 abook_budget 看单条代价。\n\
-     每条结果带 tier（resident/recall/deleted）：resident 是常驻层已给正文，recall 需按话题召回，deleted 是软删记录（只给标题，不要再当有效信息用）。常驻层排在最前，所以取一页就能拿到必读部分。\n\
-     遇到可能依赖历史事实时先调用 memory_context 或 memory_recall；用户明确要求记住时在本轮调用 memory_write；多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。用户说整理记忆时先取回 abook spec curation，按它执行。新 MCP 直接维护平面记录，不使用 candidate/canonical 晋升生命周期。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
+      预载固定分两步，但不是两轮随意读取：第一步调用一次不带 plane 的 memory_index，只返回 soul/profile/explicit 三个常驻平面的全量正文，每条只有 plane/title/content；第二步调用一次 memory_outline，只返回 rules/long_term/episodic 的标题清单，让模型知道有哪些历史可召回。不要逐平面重复 index，也不要把 outline 的标题当正文；需要历史内容时再用 memory_search 或 memory_recall，然后 memory_read 取命中正文。\n\
+     遇到可能依赖历史事实时先调用 memory_index 与 memory_outline；用户明确要求记住时在本轮调用 memory_write；多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。用户说整理记忆时先取回 abook spec curation，按它执行。新 MCP 直接维护平面记录，不使用 candidate/canonical 晋升生命周期。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
 }
 
 fn tools_list(_legacy: bool) -> Value {
@@ -307,9 +304,9 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_init", "在不包含旧布局的目录中初始化并锁定六平面记忆布局。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
         batch_tool("memory_context", "读取六个普通记忆平面的计数与凭据域边界。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
         batch_tool("memory_paths", "读取已验证六平面布局的目录路径，不暴露旧模型路径或凭据值。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
-        batch_tool("memory_index", "六平面预载入口（一次调用覆盖全部平面，不要逐平面重复调）。按平面职责分两层输出：常驻层 soul/explicit/profile 带 content 正文——这些是身份、用户偏好与用户明确要求记住的事实，与话题无关，不知道就会做错；按需层 rules/long_term/episodic 只给 title/read_when/preview——正文可能有几十万字，靠话题召回再取。每条带 tier(resident/recall/deleted)，常驻层排在最前，所以取一页就能拿到必读部分；tier=deleted 的只给标题不给正文。credentials 不出值。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))]))], vec![]),
-
-        batch_tool("memory_outline", "预载第二步：按需层（rules/long_term/episodic）的标题清单，只为建立“库里有哪些东西可找回”的印象。不给正文、不给 id、不给摘要——正文用 memory_search 或 memory_recall 按话题取。和 memory_index 配合使用：先 memory_index 读全三个常驻平面，再 memory_outline 看有哪些标题可召回。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→配置期 --root→ABOOK_ROOT→~/AgentsBook 推导"))]))], vec![]),        batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
+        batch_tool("memory_index", "预载第一步：只返回 soul/profile/explicit 三个常驻平面的全量正文，每条仅含 plane、title、content；不分页、不返回 ID、统计、版本、预览或其他元信息。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→配置期 --root→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        batch_tool("memory_outline", "预载第二步：只返回 rules/long_term/episodic 三个按需层的标题，按平面分组；不给正文、ID、摘要或统计。它只建立可召回内容的初步印象，正文用 memory_search 或 memory_recall 取。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→配置期 --root→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
+        batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
         batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("id")]),
         batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))])), ("status", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该状态的记录：active 或 deleted"))])), ("kind", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该 KIND 的记录，如 DECISION"))])), ("include_deleted", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把软删记录一并列出，可当回收站用"))])), ("full", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时返回完整记录；默认只给 id/title/plane/revision/preview 等定位字段，省约 85% 体积"))]))], vec![]),
@@ -330,8 +327,7 @@ fn memory_tools() -> Vec<Value> {
 fn direct_memory_call(name: &str, args: &Value) -> Value {
     let result = (|| -> Result<Value, String> {
         let allowed = match name {
-            "memory_index" => &["root", "plane", "limit", "offset"][..],
-            "memory_outline" => &["root"][..],
+            "memory_index" | "memory_outline" => &["root"][..],
             "memory_export" => &["root", "plane"][..],
             "memory_init" | "memory_paths" | "memory_context" => &["root"][..],
             "memory_write" => &["root", "plane", "title", "read_when", "content", "body"][..],
@@ -363,12 +359,7 @@ fn direct_memory_call(name: &str, args: &Value) -> Value {
             .or_else(|| attached_root().map(str::to_string))
             .unwrap_or_default();
         match name {
-            "memory_index" => {
-                let plane = scalar_text(args, "plane");
-                let limit = scalar_text(args, "limit").and_then(|s| s.parse().ok()).unwrap_or(100);
-                let offset = scalar_text(args, "offset").and_then(|s| s.parse().ok()).unwrap_or(0);
-                crate::memory_plane::index(&root, plane.as_deref(), limit, offset).map_err(|e| e.msg().to_string())
-            }
+            "memory_index" => crate::memory_plane::index(&root).map_err(|e| e.msg().to_string()),
             "memory_outline" => crate::memory_plane::outline(&root).map_err(|e| e.msg().to_string()),
             "memory_export" => {
                 let plane = scalar_text(args, "plane");

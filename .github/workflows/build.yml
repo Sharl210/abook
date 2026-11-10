@@ -191,19 +191,17 @@ jobs:
           print(value["id"])
           PY
           ./target/release/abook memory context --root "$ROOT" --json
-          INDEX="$(./target/release/abook memory index --root "$ROOT" --plane all --json)"
-          python3 - "$INDEX" <<'PY'
+          INDEX="$(./target/release/abook memory index --root "$ROOT" --json)"
+          OUTLINE="$(./target/release/abook memory outline --root "$ROOT" --json)"
+          python3 - "$INDEX" "$OUTLINE" <<'PY'
           import json, sys
           value = json.loads(sys.argv[1])
-          assert value["format"] == "abook.memory.index.v1"
-          assert value["total"] == 1
-          assert len(value["planes"]) == 6
-          assert value["items"][0]["id"]
-          # explicit 属常驻层：`index` 直接给正文，不给 preview。
-          # 常驻层的意义是"每轮都该知道"，给预览等于没读到。
-          assert value["items"][0]["tier"] == "resident"
-          assert value["items"][0]["content"] == "第一行\n第二行 😀"
-          assert "preview" not in value["items"][0]
+          outline = json.loads(sys.argv[2])
+          assert isinstance(value, list) and len(value) == 1
+          assert set(value[0]) == {"plane", "title", "content"}
+          assert value[0]["plane"] == "explicit"
+          assert value[0]["content"] == "第一行\n第二行 😀"
+          assert outline == {}
           PY
           test -f "$ROOT/abook.memory.layout.v1"
           LEGACY="$(mktemp -d)"

@@ -165,9 +165,9 @@ pub const SPECS: &[(&str, &str)] = &[
 
 `CURATION_GOAL`=让库在长期增长下仍然**好用且便宜**:①同一条事实只留一处权威版本;②每条记录的 `title` 能在不看正文的情况下决定要不要读它;③每条记录待在职责正确的平面;④常驻层(见 `CURATION_TIER_MAP`)的形状保持稳定,不随总条数上涨.整理不是"删到最短",是把信息重新摆到正确位置.判断成效看四件事:矛盾是否为 0、常驻层是否没变胖、按需层标题是否可用于召回、重复是否合并而非并列为两条.
 
-`CURATION_TIER_MAP`=六平面分两层,整理时按层用不同尺子.`RESIDENT_TIER`=`soul`(身份与风格)/`explicit`(用户明确要求记住的事实与约定)/`profile`(用户画像、环境事实、工具可用性):这三层每轮 `index` 全量加载**正文**,所以它们的体积是**每轮固定成本**;整理时首要目标是让它们**变准而不是变多**,单条能短则短,同类能合并则合并.`RECALL_TIER`=`rules`(硬规矩)/`long_term`(长期知识:条款位置、单子结论、问题归并边界)/`episodic`(事件:哪次改动弄坏了什么、哪个判据为什么失效):这三层 `index` 只出标题与触发条件,正文靠话题召回,所以整理时首要目标是**标题精确、read_when 准确**,正文可以详细.
+`CURATION_TIER_MAP`=六平面分两层,整理时按层用不同尺子.`RESIDENT_TIER`=`soul`(身份与风格)/`explicit`(用户明确要求记住的事实与约定)/`profile`(用户画像、环境事实、工具可用性):这三层每轮用 `memory_index` 全量加载**正文**,所以它们的体积是**每轮固定成本**;整理时首要目标是让它们**变准而不是变多**,单条能短则短,同类能合并则合并.`RECALL_TIER`=`rules`(硬规矩)/`long_term`(长期知识:条款位置、单子结论、问题归并边界)/`episodic`(事件:哪次改动弄坏了什么、哪个判据为什么失效):这三层每轮用 `memory_outline` 只出标题,正文靠话题召回,所以整理时首要目标是**标题精确、read_when 准确**,正文可以详细.
 
-`CURATION_PRECONDITION`=开工前先读全:用不带 `plane` 的 `abook_index` 一次拿全六平面(分层输出:常驻层带正文,按需层带标题);再对本次要动的平面用 `memory_list` 取活动记录清单.禁凭印象整理——"我记得库里有条关于 X 的"不构成依据.禁跳过 `counts` 核对:整理前后各平面 active 数必须能解释每个增减(合并了几条、删了几条、移了几条).
+`CURATION_PRECONDITION`=开工前先读全:先用 `memory_index` 一次拿全`soul`/`profile`/`explicit`正文,再用 `memory_outline` 一次拿`rules`/`long_term`/`episodic`标题;再对本次要动的平面用 `memory_list` 取活动记录清单.禁凭印象整理——"我记得库里有条关于 X 的"不构成依据.整理前后各平面 active 数必须能解释每个增减(合并了几条、删了几条、移了几条).
 
 `CURATION_CONFLICT_RULE`=**矛盾必须解决,不能并存**.发现两条记录对同一件事给出不同说法时:①先判是否真矛盾——条件不同而结论不同(如不同版本、不同设备)不算矛盾,是两条都对的限定版本,补明条件后保留;②真矛盾则判断哪条有证据:有原样报错、命令输出、版本号、复现步骤的胜;③都没有证据时按时间近的胜,但必须在保留条里写明"旧说法是 X,因 Y 于 Z 时间改判",禁静默删掉旧说法——被推翻的结论本身有价值,后来人遇到同样岔路能少走一次;④被取代的记录用 `memory_update` 把 `status` 改为 `deleted`,并在取代它的那条里写 `supersedes=<旧ID>`,禁物理删除.
 
@@ -177,15 +177,15 @@ pub const SPECS: &[(&str, &str)] = &[
 
 `CURATION_PLACEMENT_RULE`=放错平面的用 `memory_move_plane` 搬回去,判据按职责不按主题:①身份、行为风格、工作原则→`soul`;②用户说"记住这个"且是事实或约定→`explicit`;③用户画像、偏好、称呼、环境事实、某工具能不能用、某配置哪个文件生效→`profile`;④硬性约束、必须/禁止类规矩→`rules`;⑤可跨会话复用的知识、条款位置、结论、边界→`long_term`;⑥发生过的事、某次改动的后果、某判据为何失效→`episodic`.易错项:`explicit` 不是"重要的事"收纳箱——它是"用户点名要求记住"的层,自己判断重要的应进 `long_term`;`episodic` 不是"最近的记录"——它是事件层,带时间线的往里放,不带时间线的是 `long_term`.
 
-`CURATION_RESIDENT_DISCIPLINE`=常驻层是每轮固定成本,整理时对它们比对按需层严格:①单条超过约 2000 字节要问"这条是不是混进了本该属于 long_term/episodic 的过程细节",是就拆;②同一主题的 3 条以上短记录合并成一条带小节的记录,比 3 条各自为政更省;③`profile` 里只放**会反复用到**的稳定事实(哪个配置文件生效、哪个工具可用),一次性信息不进;④`explicit` 里禁放整段过程叙述与验收证据——那是 `episodic` 的活;⑤整理完必须重跑 `abook_index` 看常驻层字节数,变大就要能解释清楚为什么.
+`CURATION_RESIDENT_DISCIPLINE`=常驻层是每轮固定成本,整理时对它们比对按需层严格:①单条超过约 2000 字节要问"这条是不是混进了本该属于 long_term/episodic 的过程细节",是就拆;②同一主题的 3 条以上短记录合并成一条带小节的记录,比 3 条各自为政更省;③`profile` 里只放**会反复用到**的稳定事实(哪个配置文件生效、哪个工具可用),一次性信息不进;④`explicit` 里禁放整段过程叙述与验收证据——那是 `episodic` 的活;⑤整理完必须重跑 `memory_index` 看常驻层正文总量,变大就要能解释清楚为什么.
 
 `CURATION_ORPHAN_RULE`=清理三类无效记录:①`status=deleted` 且软删超过 90 天、无人引用的→可物理清理;②正文为空或只有占位符的→删;③`read_when` 为空且标题无法自解释的→补 `read_when`,补不出说明这条本就不该存在,删.禁删的是:被推翻的旧结论(留作反面经验)、带原始报错的记录(证据价值)、用户明确要求记住的(`explicit` 层优先级高于整洁).判不准时保留——留着只占磁盘,删错要重新踩坑.
 
-`CURATION_VERIFY_GATE`=整理结束前逐项核对,任一不过即未完成:①`abook_reconcile` 通过(六平面数字一致);②`abook_index` 输出的常驻层字节数不高于整理前,或增长有明确原因;③每条被改动记录都能说出改了什么、为什么;④矛盾条数为 0(随机抽 5 组同主题记录交叉读,口径一致);⑤按需层抽 10 条标题,能只凭标题判断该不该读;⑥没有记录同时出现在两个平面;⑦`supersedes`/`merged_into` 指向的 ID 都还在.禁以"看起来整齐了"代替上述核对.
+`CURATION_VERIFY_GATE`=整理结束前逐项核对,任一不过即未完成:①`abook_reconcile` 通过;②`memory_index` 常驻正文完整且体积不高于整理前,或增长有明确原因;③`memory_outline` 只含按需层标题,标题可用于召回;④每条被改动记录都能说出改了什么、为什么;⑤矛盾条数为 0(随机抽 5 组同主题记录交叉读,口径一致);⑥没有记录同时出现在两个平面;⑦`supersedes`/`merged_into` 指向的 ID 都还在.禁以"看起来整齐了"代替上述核对.
 
-`CURATION_CADENCE`=整理时机:①用户明确要求时;②某平面 active 数比上次整理增长超过 50%;③`index` 常驻层字节数比上次整理增长超过 30%;④发现同一主题在库里已有矛盾却一直没解决时.不设自动定时——库不常变时整理没有收益,频繁整理反而制造无谓写入.每次整理在 `episodic` 留一条摘要(整理了哪些平面、合并/删除/移动各几条、解决了哪几处矛盾、常驻层字节数前后对比),下次整理先读它.
+`CURATION_CADENCE`=整理时机:①用户明确要求时;②某平面 active 数比上次整理增长超过 50%;③`memory_index` 常驻正文总量比上次整理增长超过 30%;④发现同一主题在库里已有矛盾却一直没解决时.不设自动定时——库不常变时整理没有收益,频繁整理反而制造无谓写入.每次整理在 `episodic` 留一条摘要(整理了哪些平面、合并/删除/移动各几条、解决了哪几处矛盾、常驻正文总量前后对比),下次整理先读它.
 
-`CURATION_METHOD`=①读 `abook_index` 全平面,记下各平面 active 数与常驻层字节;②按平面逐个取活动清单,先只看标题与 `read_when`,标出三类目标:重复、矛盾、放错层;③处理矛盾(按 `CURATION_CONFLICT_RULE`),再合并重复(按 `CURATION_DEDUP_RULE`),再搬平面(按 `CURATION_PLACEMENT_RULE`);④重写不合格标题(按 `CURATION_TITLE_RULE`);⑤常驻层按 `CURATION_RESIDENT_DISCIPLINE` 拆合;⑥清孤儿(按 `CURATION_ORPHAN_RULE`);⑦跑 `CURATION_VERIFY_GATE`;⑧写整理摘要进 `episodic`.全程用 MCP 工具(`memory_*`),不要敲 CLI;取整篇用 `memory_read`,批量改前用 `memory_batch_preview` 看影响面再 `apply`.
+`CURATION_METHOD`=①读 `memory_index` 全量常驻正文,再读 `memory_outline` 的按需层标题;②按平面逐个取活动清单,先只看标题与 `read_when`,标出三类目标:重复、矛盾、放错层;③处理矛盾(按 `CURATION_CONFLICT_RULE`),再合并重复(按 `CURATION_DEDUP_RULE`),再搬平面(按 `CURATION_PLACEMENT_RULE`);④重写不合格标题(按 `CURATION_TITLE_RULE`);⑤常驻层按 `CURATION_RESIDENT_DISCIPLINE` 拆合;⑥清孤儿(按 `CURATION_ORPHAN_RULE`);⑦跑 `CURATION_VERIFY_GATE`;⑧写整理摘要进 `episodic`.全程用 MCP 工具(`memory_*`),不要敲 CLI;取整篇用 `memory_read`,批量改前用 `memory_batch_preview` 看影响面再 `apply`.
 "#),
 ];
 

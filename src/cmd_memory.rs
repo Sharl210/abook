@@ -58,7 +58,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
             memory_plane::initialize_layout(&root)?;
             emit(mcp_json::Value::obj([("layout", mcp_json::Value::s(memory_plane::LAYOUT_MARKER))].into_iter().map(|(k,v)| (k.to_string(),v)).collect()))
         }
-        "index" => { let (limit, offset) = page_args(a); emit(memory_plane::index(&root, a.get("plane"), limit, offset)?) },
+        "index" => emit(memory_plane::index(&root)?),
         "outline" => emit(memory_plane::outline(&root)?),
         "context" => emit(memory_plane::context(&root)?),
         "paths" => emit(memory_plane::paths(&root)?),
@@ -149,7 +149,7 @@ pub fn cmd_memory(a: &Args) -> R<i32> {
         "delete" | "rm" => emit(memory_plane::delete(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "restore" => emit(memory_plane::restore(&root, required(a, "id")?, required(a, "expect-revision")?)?),
         "move-plane" | "move" => emit(memory_plane::move_plane(&root, required(a, "id")?, required(a, "to-plane")?, required(a, "expect-revision")?)?),
-        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/context/paths/export/write/read/list/search/grep/trash/history/merge/update/delete/restore/move-plane")),
+        _ => usage(format!("未知 memory 子命令 `{sub}`；可用 init/index/outline/context/paths/export/write/read/list/search/grep/trash/history/merge/update/delete/restore/move-plane")),
     }
 }
 
