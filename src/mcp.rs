@@ -154,7 +154,7 @@ pub fn run_stdio(argv: &[String]) -> i32 {
         // 其余方法（initialize/discover/tools/list…）都是纯内存构造，快到一个
         // 线程的调度开销比执行本身还贵，留在主循环里同步做。
         let response = handle(&parsed, method, legacy);
-        emit(&stdout, id, legacy_result(response, legacy));
+        emit(&stdout, id, response, legacy);
     }
     {
         let mut guard = match stdout.lock() {
@@ -180,6 +180,8 @@ fn emit_legacy_initialize(stdout: &SharedStdout, id: Value) {
     let _ = guard.flush();
 }
 
+/// 写一条成功响应。`legacy` 决定是否剥掉现代协议字段——它必须在这里生效，
+/// 因为调用方传进来的是原始 result，剥壳是写出前最后一步。
 fn emit(stdout: &SharedStdout, id: Value, result: Value, legacy: bool) {
     let payload = legacy_result(result, legacy);
     let mut guard = match stdout.lock() {
