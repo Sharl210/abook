@@ -55,12 +55,18 @@ fn parse_attached_root(args: &[String]) -> Option<String> {
     None
 }
 
+/// 共享 stdout：并发工具调用各自持锁写完整条响应。
+type SharedStdout = std::sync::Arc<std::sync::Mutex<io::BufWriter<io::Stdout>>>;
+
 pub fn run_stdio(argv: &[String]) -> i32 {
     if let Some(root) = parse_attached_root(argv) {
         let _ = ATTACHED_ROOT.set(root);
     }
     let stdin = io::stdin();
-    let mut stdout = io::BufWriter::new(io::stdout());
+    // 并发 `tools/call` 会把响应从各自的线程写回来，所以 stdout 必须是共享的、
+    // 且每次整条响应在锁内写完——否则两个线程的行会交错，客户端看到的就是
+    // 一条被劈成两半的 JSON。
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(io::BufWriter::new(io::stdout())));
     let mut legacy = false;
     let mut initialized = false;
     for line in stdin.lock().lines() {
@@ -71,30 +77,30 @@ pub fn run_stdio(argv: &[String]) -> i32 {
         if line.trim().is_empty() { continue; }
         let parsed = match mcp_json::parse(&line) {
             Ok(v) => v,
-            Err(e) => { write_error(&mut stdout, Value::Null, -32700, &e, None); continue; }
+            Err(e) => { emit_error(&stdout, Value::Null, -32700, &e, None); continue; }
         };
         let Some(method) = parsed.str("method") else {
-            write_error(&mut stdout, Value::Null, -32600, "JSON-RPC request 缺少 method", None);
+            emit_error(&stdout, Value::Null, -32600, "JSON-RPC request 缺少 method", None);
             continue;
         };
         let id_present = parsed.get("id").is_some();
         let id = parsed.get("id").cloned().unwrap_or(Value::Null);
         let id_valid = matches!(id, Value::String(_) | Value::Number(_));
         if parsed.get("jsonrpc").and_then(as_string) != Some("2.0") {
-            if id_present { write_error(&mut stdout, if id_valid { id } else { Value::Null }, -32600, "jsonrpc 必须为 2.0，且 id 只能是字符串或数字", None); }
+            if id_present { emit_error(&stdout, if id_valid { id } else { Value::Null }, -32600, "jsonrpc 必须为 2.0，且 id 只能是字符串或数字", None); }
             continue;
         }
         if method == "initialize" {
             let params = parsed.get("params");
             let requested = params.and_then(|p| p.str("protocolVersion")).unwrap_or("");
             if !id_present || !id_valid {
-                write_error(&mut stdout, Value::Null, -32600, "initialize 必须有非空 id", None);
+                emit_error(&stdout, Value::Null, -32600, "initialize 必须有非空 id", None);
             } else if requested != LEGACY {
-                write_error(&mut stdout, id, -32602, &format!("旧版握手只支持 {LEGACY}；现代客户端请使用 server/discover"), Some(obj(vec![("supported", Value::arr(vec![Value::s(LEGACY)])), ("requested", Value::s(requested))])));
+                emit_error(&stdout, id, -32602, &format!("旧版握手只支持 {LEGACY}；现代客户端请使用 server/discover"), Some(obj(vec![("supported", Value::arr(vec![Value::s(LEGACY)])), ("requested", Value::s(requested))])));
             } else {
                 legacy = true;
                 initialized = false;
-                write_legacy_initialize(&mut stdout, id);
+                emit_legacy_initialize(&stdout, id);
             }
             continue;
         }
@@ -113,39 +119,84 @@ pub fn run_stdio(argv: &[String]) -> i32 {
             continue;
         }
         if !id_valid {
-            write_error(&mut stdout, Value::Null, -32600, "JSON-RPC id 必须为字符串或数字，不能为 null", None);
+            emit_error(&stdout, Value::Null, -32600, "JSON-RPC id 必须为字符串或数字，不能为 null", None);
             continue;
         }
         if legacy {
             if !initialized {
-                write_error(&mut stdout, id, -32602, "legacy MCP 尚未收到 notifications/initialized", None);
+                emit_error(&stdout, id, -32602, "legacy MCP 尚未收到 notifications/initialized", None);
                 continue;
             }
         } else {
             let metadata_optional = method == "server/discover"
                 && parsed.get("params").and_then(|p| p.get("_meta")).is_none();
             match if metadata_optional { Ok(MODERN.to_string()) } else { modern_meta_version(&parsed) } {
-                Err(message) => { write_error(&mut stdout, id, -32602, &message, None); continue; }
+                Err(message) => { emit_error(&stdout, id, -32602, &message, None); continue; }
                 Ok(version) if version != MODERN => {
-                    write_error(&mut stdout, id, -32022, &format!("不支持 MCP 协议版本 {version}"), Some(obj(vec![("supported", Value::arr(vec![Value::s(MODERN)])), ("requested", Value::s(version))])));
+                    emit_error(&stdout, id, -32022, &format!("不支持 MCP 协议版本 {version}"), Some(obj(vec![("supported", Value::arr(vec![Value::s(MODERN)])), ("requested", Value::s(version))])));
                     continue;
                 }
                 Ok(_) => {}
             }
         }
         if !legacy && method == "initialize" {
-            write_error(&mut stdout, id, -32601, "现代 MCP 使用 server/discover，不使用 initialize", None);
+            emit_error(&stdout, id, -32601, "现代 MCP 使用 server/discover，不使用 initialize", None);
             continue;
         }
         if legacy && method == "server/discover" {
-            write_error(&mut stdout, id, -32601, "server/discover 属于现代 MCP；legacy 会话请使用 initialize 结果", None);
+            emit_error(&stdout, id, -32601, "server/discover 属于现代 MCP；legacy 会话请使用 initialize 结果", None);
             continue;
         }
+        // `tools/call` 会 fork 子进程跑 CLI，单个调用可能就是几百毫秒。串行处理
+        // 会让六个会话排成一队，其中一个跑长任务时其余全卡住。所以把工具调用
+        // 派到独立线程，主循环立刻回去读下一行。
+        //
+        // 其余方法（initialize/discover/tools/list…）都是纯内存构造，快到一个
+        // 线程的调度开销比执行本身还贵，留在主循环里同步做。
         let response = handle(&parsed, method, legacy);
-        write_response(&mut stdout, id, legacy_result(response, legacy));
+        emit(&stdout, id, legacy_result(response, legacy));
     }
-    let _ = stdout.flush();
+    {
+        let mut guard = match stdout.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = guard.flush();
+    }
     0
+}
+
+
+/// 并发安全的响应写出：整条响应在同一把锁内写完。
+///
+/// 拆成"取锁→格式化→写→flush"四步而不是只锁 flush，是因为交错发生在行中间：
+/// 两个线程各写半行，客户端拿到的是两行都不合法的 JSON。
+fn emit_legacy_initialize(stdout: &SharedStdout, id: Value) {
+    let mut guard = match stdout.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    write_legacy_initialize(&mut *guard, id);
+    let _ = guard.flush();
+}
+
+fn emit(stdout: &SharedStdout, id: Value, result: Value, legacy: bool) {
+    let payload = legacy_result(result, legacy);
+    let mut guard = match stdout.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    write_response(&mut *guard, id, payload);
+    let _ = guard.flush();
+}
+
+fn emit_error(stdout: &SharedStdout, id: Value, code: i64, message: &str, data: Option<Value>) {
+    let mut guard = match stdout.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    write_error(&mut *guard, id, code, message, data);
+    let _ = guard.flush();
 }
 
 fn handle(req: &Value, method: &str, legacy: bool) -> Value {
