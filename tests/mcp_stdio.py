@@ -98,12 +98,20 @@ def test_modern():
         assert "abook_migrate_verify" in names
         assert "abook_commands" in names and "abook_describe" in names and "abook_help" in names
         assert "abook_version" in names and "abook_detect" in names and "abook_upgrade" in names
-        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
+        # 只列真正属于旧 candidate/canonical 记录模型的工具。
+        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_branch", "abook_init"]:
             assert legacy_name not in names, legacy_name
+        # 库维护与只读导航必须公开：它们与旧记录模型无关，藏起来只会把调用方逼回 CLI。
+        for maintenance in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_path", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_identity", "abook_related", "abook_check", "abook_diff", "abook_get"]:
+            assert maintenance in names, maintenance
         hidden_call = send(p, request("legacy-hidden", "tools/call", {"name": "abook_write", "arguments": {"title": "legacy", "body": "must reject"}}))
         assert hidden_call["error"]["code"] == -32602, hidden_call
-        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"]:
+        # 只列真正属于旧 candidate/canonical 记录模型的工具。
+        for legacy_name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_branch", "abook_init"]:
             assert legacy_name not in names, legacy_name
+        # 库维护与只读导航必须公开：它们与旧记录模型无关，藏起来只会把调用方逼回 CLI。
+        for maintenance in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_path", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_identity", "abook_related", "abook_check", "abook_diff", "abook_get"]:
+            assert maintenance in names, maintenance
         hidden_call = send(p, request("legacy-hidden", "tools/call", {"name": "abook_write", "arguments": {"title": "legacy", "body": "must reject"}}))
         assert hidden_call["error"]["code"] == -32602, hidden_call
         helper = {x["name"]: x["inputSchema"] for x in tools["tools"] if x["name"] in {"memory_help", "spec_list", "spec_get", "skill_list", "skill_read", "system_update"}}

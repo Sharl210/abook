@@ -295,15 +295,23 @@ fn compatibility_exposure(command: &str) -> Exposure {
     // callers use `memory_*`; explicit attachment/vault/skill subcommands remain
     // independently registered below. The generic group roots would otherwise
     // re-open the legacy command parser as a public catch-all.
+    // 这份名单原本一刀切：凡是走过旧 candidate/canonical 记录模型的命令名都不公开。
+    // 但名单里混进了两类与旧模型无关的东西，导致 MCP 侧根本调不到库维护与导航：
+    //   · 库维护：state/stats/lint/audit/doctor/reconcile/sync/refresh/normalize/repair/refs/leftover/recount
+    //   · 只读导航：tree/map/atlas/path/budget/log/recent/paths/identity/check/diff/get/related
+    // 后果很直接：提示词要求"能用 MCP 就必须用"，而这些能力在工具面上不存在，
+    // 模型只能退回 CLI——正好把那条规则架空。所以把它们从名单里摘出来。
+    //
+    // 留在名单里的是真正属于旧记录模型的：写入与生命周期（write/add/update/delete/
+    // promote/demote/review/staging/commit/branch/num 等），它们已经有 memory_* 替代；
+    // 以及 search/list/show/export 这些同样已有 memory_* 对应入口的。
     const LEGACY_MEMORY_ROUTES: &[&str] = &[
-        "state", "stats", "recall", "index-search", "show", "cat", "atlas", "map",
-        "index", "identity", "recent", "paths", "lint", "doctor", "reconcile",
-        "staging", "review", "search", "find", "grep", "list", "ls", "history", "log",
-        "get", "diff", "tree", "path", "budget", "export", "write", "add", "promote",
+        "recall", "index-search", "show", "cat",
+        "index", "search", "find", "grep", "list", "ls", "history",
+        "export", "write", "add", "promote",
         "update", "edit", "delete", "rm", "restore", "set", "unset", "append", "prepend",
         "patch", "rename", "move", "mv", "copy", "cp", "demote", "merge", "split",
-        "audit", "check", "refs", "related", "num", "repair", "fix", "init", "refresh",
-        "sync", "normalize", "commit", "branch", "recount", "leftover",
+        "num", "fix", "init",
     ];
     let legacy_model = LEGACY_MEMORY_ROUTES.contains(&first)
         || first == "branch"
@@ -753,8 +761,15 @@ mod tests {
     #[test]
     fn legacy_record_model_is_hidden_but_modern_surfaces_remain_public() {
         let public = public_tools();
-        for name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_state", "abook_paths", "abook_branch", "abook_init", "abook_refresh", "abook_repair"] {
+        // 这里只列真正属于旧 candidate/canonical 记录模型的工具：它们已有 memory_*
+        // 替代入口，继续隐藏是故意的。
+        for name in ["abook_write", "abook_add", "abook_update", "abook_delete", "abook_show", "abook_list", "abook_search", "abook_export", "abook_branch", "abook_init"] {
             assert!(!public.iter().any(|tool| tool.name == name), "legacy tool {name} must not be public");
+        }
+        // 库维护与只读导航必须公开：它们与旧记录模型无关，而提示词要求"能用 MCP
+        // 就必须用"——工具面上没有，模型就只能退回 CLI。
+        for name in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_path", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_identity", "abook_related", "abook_check", "abook_diff", "abook_get"] {
+            assert!(public.iter().any(|tool| tool.name == name), "maintenance/navigation tool {name} must be public");
         }
         for name in ["abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan", "abook_commands", "abook_describe", "abook_help", "abook_version", "abook_detect", "abook_upgrade"] {
             assert!(public.iter().any(|tool| tool.name == name), "modern tool {name} must remain public");
