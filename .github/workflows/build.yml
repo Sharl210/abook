@@ -130,12 +130,13 @@ jobs:
             # 失败原因必须能看见：日志下载接口对无 admin 权的 token 是 403，
             # 所以把判定性与非判定性两段都回显成 annotation。
             echo "::error::cargo test rc=$rc"
-            grep -n "FAILED\|panicked\|assertion\|left:\|right:\|^failures:\|^test result" /tmp/ut.log | tail -60 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            echo "::group::完整测试输出"
-            cat /tmp/ut.log
-            echo "::endgroup::"
+            # 错误行里有换行/缩进，逐行 echo 会丢关键片段。压成一段再输出。
+            python3 - <<'PYERR'
+          import re
+          log = open('/tmp/ut.log', encoding='utf-8', errors='replace').read()
+          keep = [l for l in log.splitlines() if re.search(r'\berror(\[E\d+\])?:|-->|panicked|FAILED|assertion', l)]
+          print("::error::" + " || ".join(keep[-25:]).replace('\n', ' ')[:3000])
+          PYERR
             # 同时留一份 artifact 供事后查看。
             cp /tmp/ut.log ut-failure.log 2>/dev/null || true
           fi
