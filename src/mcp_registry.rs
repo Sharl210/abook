@@ -308,9 +308,14 @@ fn compatibility_exposure(command: &str) -> Exposure {
     const LEGACY_MEMORY_ROUTES: &[&str] = &[
         "recall", "index-search", "show", "cat",
         "index", "search", "find", "grep", "list", "ls", "history",
-        // identity 读的是旧两库 Global.md 的凭据身份索引；六平面库没有这个文件，
-        // 放出来只会稳定返回 NOT_FOUND。凭据查保险箱（vault_*）。
-        "identity",
+        // 下面几条虽然名字看着像"导航"，实际都依赖旧两库的文件结构，六平面库
+        // 上没有对应物，放出来只会稳定报"地图不存在"或"找不到记录"：
+        //   identity — 读 Global.md 的凭据身份索引（凭据请用 vault_*）
+        //   path     — 反查记录所属的 Atlas 分支链（六平面没有 Atlas）
+        //   related  — 从旧记录走显式引用/共享键
+        //   diff / check — 面向单条旧记录的字段级比较与格式校验
+        // 保持隐藏，避免工具面上出现一批"点了必然失败"的入口。
+        "identity", "path", "related", "diff", "check",
         "export", "write", "add", "promote",
         "update", "edit", "delete", "rm", "restore", "set", "unset", "append", "prepend",
         "patch", "rename", "move", "mv", "copy", "cp", "demote", "merge", "split",
@@ -771,7 +776,7 @@ mod tests {
         }
         // 库维护与只读导航必须公开：它们与旧记录模型无关，而提示词要求"能用 MCP
         // 就必须用"——工具面上没有，模型就只能退回 CLI。
-        for name in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_path", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_related", "abook_check", "abook_diff", "abook_get"] {
+        for name in ["abook_state", "abook_stats", "abook_lint", "abook_audit", "abook_doctor", "abook_reconcile", "abook_sync", "abook_refresh", "abook_normalize", "abook_repair", "abook_refs", "abook_leftover", "abook_recount", "abook_tree", "abook_map", "abook_atlas", "abook_paths", "abook_budget", "abook_log", "abook_recent", "abook_get"] {
             assert!(public.iter().any(|tool| tool.name == name), "maintenance/navigation tool {name} must be public");
         }
         for name in ["abook_attach_add", "abook_vault_put", "abook_skill_show", "abook_txn_preview", "abook_migrate_scan", "abook_commands", "abook_describe", "abook_help", "abook_version", "abook_detect", "abook_upgrade"] {
