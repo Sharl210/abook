@@ -397,6 +397,7 @@ pub fn search_filtered(
     limit: usize,
     fields: SearchFields,
     regex: bool,
+    full: bool,
 ) -> R<Value> {
     if query.trim().is_empty() { return Err(err("memory_search 需要非空 query")); }
     let root = root_path(root)?;
@@ -425,12 +426,15 @@ pub fn search_filtered(
     let total = hits.len();
     let size = limit.clamp(1, 500);
     hits.truncate(size);
+    // 与列表同理：默认精简，`full` 才回整条。搜索一次常命中 20 条，
+    // 每条都给全文等于把整页正文倒进上下文。
+    let hits: Vec<Value> = if full { hits } else { hits.iter().map(slim_record).collect() };
     Ok(object(vec![("items", Value::Array(hits)), ("total", Value::n(total.to_string())), ("limit", Value::n(size.to_string()))]))
 }
 
 /// 兼容入口：不带字段/正则参数的检索。
 pub fn search(root: &str, query: &str, plane: Option<&str>, limit: usize) -> R<Value> {
-    search_filtered(root, query, plane, limit, SearchFields::All, false)
+    search_filtered(root, query, plane, limit, SearchFields::All, false, false)
 }
 
 /// 列表过滤条件。
