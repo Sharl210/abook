@@ -67,6 +67,9 @@ pub fn run_stdio(argv: &[String]) -> i32 {
     // 且每次整条响应在锁内写完——否则两个线程的行会交错，客户端看到的就是
     // 一条被劈成两半的 JSON。
     let stdout = std::sync::Arc::new(std::sync::Mutex::new(io::BufWriter::new(io::stdout())));
+    // 在途子任务计数：stdin 关了之后，还在跑的工具调用可能仍要写响应。
+    // 不等它们写完就返回，客户端会看到"进程退了但没收到结果"。
+    let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut legacy = false;
     let mut initialized = false;
     for line in stdin.lock().lines() {
@@ -153,8 +156,32 @@ pub fn run_stdio(argv: &[String]) -> i32 {
         //
         // 其余方法（initialize/discover/tools/list…）都是纯内存构造，快到一个
         // 线程的调度开销比执行本身还贵，留在主循环里同步做。
+        // `tools/call` 会 fork 子进程跑 CLI，单个调用可能几百毫秒起步。
+        // 串行处理时六个会话会排成一队：一个跑长任务，其余全卡住。
+        // 派到独立线程后主循环立刻回去读下一行，响应由各自的线程持锁写回。
+        //
+        // 其余方法（initialize/discover/tools/list…）都是纯内存构造，快到
+        // 一个线程的调度开销比执行本身还贵，留在主循环里同步做。
+        if method == "tools/call" {
+            let stdout = std::sync::Arc::clone(&stdout);
+            let inflight = std::sync::Arc::clone(&inflight);
+            let req = parsed.clone();
+            inflight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let response = handle(&req, "tools/call", legacy);
+                emit(&stdout, id, response, legacy);
+                inflight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            continue;
+        }
         let response = handle(&parsed, method, legacy);
         emit(&stdout, id, response, legacy);
+    }
+    // stdin 关了，但在途的工具调用可能还在写响应。等它们写完再退出。
+    let mut waited = 0u32;
+    while inflight.load(std::sync::atomic::Ordering::SeqCst) > 0 && waited < 60_000 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        waited += 10;
     }
     {
         let mut guard = match stdout.lock() {
