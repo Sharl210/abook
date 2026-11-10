@@ -130,11 +130,11 @@ jobs:
             # 失败原因必须能看见：日志下载接口对无 admin 权的 token 是 403，
             # 所以把判定性与非判定性两段都回显成 annotation。
             echo "::error::cargo test rc=$rc"
-            # 错误行里有换行/缩进，逐行 echo 会丢关键片段。取日志末尾压成一行。
-            # 不按 "error:" 过滤——中文 locale、颜色转义或 rustc 措辞变化都会让
-            # 正则落空，而那时候恰恰最需要看到原文。
-            TAIL=$(tail -25 /tmp/ut.log | tr '\n' ' ' | tr -s ' ')
-            echo "::error::${TAIL:0:2000}"
+            # 只把 error 那一段（含 rustc 的 --> 位置和原因）剥掉颜色后压成一行。
+            # 不看最后几行——末尾往往是 "could not compile ... due to 1 error"，
+            # 真正的 E0658/E0308 正文在更前面。
+            CLEAN=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/ut.log | grep -A4 -E '^error(\[E[0-9]+\])?:' | head -40 | tr '\n' ' ' | tr -s ' ')
+            echo "::error::${CLEAN:0:2500}"
           fi
           exit $rc
       - name: 上传失败日志
