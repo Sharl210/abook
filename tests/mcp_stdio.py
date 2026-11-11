@@ -161,7 +161,7 @@ def test_modern():
         assert "三阶段" in curation_text and "标题只概括记忆在讲什么" in curation_text
         maintenance_prompt = send(p, request("pgm", "prompts/get", {"name": "memory-maintenance"}))
         maintenance_text = maintenance_prompt["result"]["messages"][0]["content"]["text"]
-        assert "只有人类明确调用" in maintenance_text and "不因条目过多" in maintenance_text
+        assert "只有人类明确调用" in maintenance_text and "外部计划任务明确发出整理指令" in maintenance_text
 
 
         bad_meta = send(p, request("bm", "tools/list", add_meta=False))
