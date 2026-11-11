@@ -72,6 +72,10 @@ def test_modern():
         assert "mcp stdio --root" in dr["instructions"]
         # 配法只给判断原则，不写死某个宿主的分步手册——写死就会误导别的环境。
         assert "不必套用别的宿主的写法" in dr["instructions"]
+        assert "明确说“记住/记下来/你记住”的短小关键点" in dr["instructions"]
+        assert "泛称“沉淀记忆”" in dr["instructions"]
+        assert "整理记忆是被动 Skill" in dr["instructions"]
+        assert "标题只概括记忆在讲什么" in dr["instructions"]
         discover_meta = send(p, request("d-meta", "server/discover"))
         assert discover_meta["result"]["resultType"] == "complete"
         assert discover_meta["result"]["supportedVersions"] == [MODERN]
