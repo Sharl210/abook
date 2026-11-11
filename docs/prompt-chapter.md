@@ -218,6 +218,10 @@ memory_export
 
 普通记忆平面为 `soul`、`rules`、`profile`、`explicit`、`long_term`、`episodic`；凭据独立存放在 vault，不进入普通记忆导出。`expected_revision` 用于更新、软删除和恢复的冲突保护。
 
+写入落位：`soul` 只放 AI 自身稳定身份、风格和行为原则；`profile` 只放用户画像、偏好、称呼和稳定环境事实；`explicit` 只放用户明确说“记住/记下来/你记住”的短小关键点、决策或约定。泛称“沉淀记忆”时，完整经过、证据和可复用经验写入 `long_term`/`episodic`，不默认写入 `explicit`；同一轮既有明确短点又有完整经过时分别写入两个平面。只有用户明确要求记住整个经过或整份对象时，`explicit` 才保存完整内容。
+
+记忆整理是被动 Skill，只能由人类明确调用或外部计划任务明确发出整理指令触发，模型不得因记录变多或常驻层变大而自行整理。触发后分三阶段：拆分常驻层异常大或放错层的记录；梳理下三层的矛盾、重复和废话；从稳定结论提炼并反哺 `soul`/`profile`。整理下三层时同步改标题，标题只概括记忆在讲什么，准确、白话、精简但不让人猜，不替 AI 写用途、适用场景或召回判断。
+
 预载分两条命令：`memory_index` 只完整返回 `soul`、`profile`、`explicit` 正文，每条仅有 `plane`、`title`、`content`；`memory_outline` 只返回 `rules`、`long_term`、`episodic` 的标题，供后续按话题召回。两者分开，避免常驻正文被标题清单撑大后截断。
 
 旧 `promote`、`demote`、`candidate`、`canonical` 命令仅保留给旧库迁移和兼容脚本；新 MCP 不使用候选/正式晋升生命周期。

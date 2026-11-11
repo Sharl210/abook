@@ -271,8 +271,10 @@ fn instructions() -> &'static str {
     "这是当前 Agent 的结构化记忆服务。普通记忆平面为 soul、rules、profile、explicit、long_term、episodic；credentials 由独立 vault 存储。功能面包括分层记忆读写检索、批量预览与应用、Skill、spec、附件、审计迁移和一键更新。\n\
      优先用这里提供的工具：凡本服务已把某项能力暴露为工具，任务与执行就走工具调用，不要退回命令行 `abook`。命令行只用于工具未覆盖的场合、以及历史库兼容与迁移。同一件事有工具也有命令时，工具是默认路径。\n\
      如果当前环境还没有接入本服务的 MCP，那么拿到可执行文件之后紧接着要做的第一件事就是为本环境配置它，配好再开始干活，不要用命令行代跑完事。配置时把记忆库根一并写进启动参数——`args` 里给出 `mcp stdio --root <库根>`——这样库定位在配置期就固定下来，之后每次工具调用都不必再传 root，也不会因为运行目录或环境变量变化而指到别的库。库根用 `detect` 或 `memory_paths` 查一次即可。怎么配取决于你所在的环境：宿主文档、现有配置文件和你的探查都能告诉你答案，按当前环境的实际机制配，不必套用别的宿主的写法。\n\
+      写入分平面按语义落位：soul 只放 AI 自身稳定身份、风格与行为原则；profile 只放用户画像、偏好、称呼和稳定环境事实；用户明确说“记住/记下来/你记住”的短小关键点、决策或约定才进 explicit。用户泛称“沉淀记忆”或“把这次记下来”时，完整经验、经过、证据与可复用知识进 long_term/episodic，不要默认把整件事塞进 explicit；若同一轮既有明确要记住的关键点又有完整经过，短点进 explicit，完整内容同时进 long_term/episodic；只有用户明确要求记住整个经过/整份对象时，explicit 才保留完整内容。\n\
+      整理记忆是被动 Skill：只有人类明确调用，或外部自动任务明确发出整理指令时才执行；模型不得因为条目太多、常驻层变大、发现重复或标题不理想而自行整理。整理固定三阶段：先拆分常驻层的超大/放错层迁移记录，再梳理下三层的矛盾、重复和废话，最后从稳定结论反哺 soul/profile。下三层整理时同步改标题，但标题只概括记忆在讲什么，不替 AI 写适用场景、用途或召回判断。\n\
       预载固定分两步，但不是两轮随意读取：第一步调用一次不带 plane 的 memory_index，只返回 soul/profile/explicit 三个常驻平面的全量正文，每条只有 plane/title/content；第二步调用一次 memory_outline，只返回 rules/long_term/episodic 的标题清单，让模型知道有哪些历史可召回。不要逐平面重复 index，也不要把 outline 的标题当正文；需要历史内容时再用 memory_search 或 memory_recall，然后 memory_read 取命中正文。\n\
-     遇到可能依赖历史事实时先调用 memory_index 与 memory_outline；用户明确要求记住时在本轮调用 memory_write；多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。用户说整理记忆时先取回 abook spec curation，按它执行。新 MCP 直接维护平面记录，不使用 candidate/canonical 晋升生命周期。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
+      遇到可能依赖历史事实时先调用 memory_index 与 memory_outline；用户明确说“记住/记下来”时将短小关键点写入 explicit；“沉淀记忆”是完整经验的归档，写入 long_term/episodic，不默认写 explicit。同轮需要同时保存短点和完整经过时，分别写入对应平面。多条维护使用 memory_batch；多行正文使用结构化 body，不拼 shell 命令。用户说整理记忆时先取回 abook spec curation，按三阶段执行。新 MCP 直接维护平面记录，不使用 candidate/canonical 晋升生命周期。详细参数使用 tools/list、memory_help、help 或对应 spec/skill 资源。"
 }
 
 fn tools_list(_legacy: bool) -> Value {
@@ -307,7 +309,7 @@ fn memory_tools() -> Vec<Value> {
         batch_tool("memory_index", "预载第一步：只返回 soul/profile/explicit 三个常驻平面的全量正文，每条仅含 plane、title、content；不分页、不返回 ID、统计、版本、预览或其他元信息。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→配置期 --root→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
         batch_tool("memory_outline", "预载第二步：只返回 rules/long_term/episodic 三个按需层的标题，按平面分组；不给正文、ID、摘要或统计。它只建立可召回内容的初步印象，正文用 memory_search 或 memory_recall 取。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→配置期 --root→ABOOK_ROOT→~/AgentsBook 自动推导"))]))], vec![]),
         batch_tool("memory_export", "全量导出普通记忆平面结构化记录；credentials 仅返回 vault 边界，不导出明文。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))]))], vec![]),
-        batch_tool("memory_write", "直接写入一个结构化普通记忆平面；credentials 走 vault。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
+        batch_tool("memory_write", "写入单条记忆。soul=AI自身稳定身份/风格/行为原则；profile=用户画像/偏好/称呼/稳定环境事实；explicit=用户明确说‘记住/记下来/你记住’的短小关键点、决策或约定。泛称‘沉淀记忆/把这次记下来’时，完整经过与可复用经验写入 long_term/episodic，不默认把整件事放入 explicit；若同轮既有明确要求记住的短点又有完整经过，应分别写入两个平面。只有用户明确要求记住整个经过/整份对象时，才把完整内容写进 explicit。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p)).collect()))])), ("title", obj(vec![("type", Value::s("string"))])), ("read_when", obj(vec![("type", Value::s("string"))])), ("content", obj(vec![("type", Value::s("string"))])), ("body", obj(vec![("type", Value::s("string")), ("description", Value::s("兼容别名，优先使用 content"))]))], vec![Value::s("plane"), Value::s("title"), Value::s("content")]),
         batch_tool("memory_read", "按结构化 ID 读取一条普通记忆。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("id", obj(vec![("type", Value::s("string"))]))], vec![Value::s("id")]),
         batch_tool("memory_list", "分页列出普通记忆平面的活动记录；省略 plane 或传 all 时列出全部六个平面。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("plane", obj(vec![("type", Value::s("string")), ("enum", Value::arr(std::iter::once(Value::s("all")).chain(crate::memory_plane::PLANES.iter().map(|p| Value::s(*p))).collect()))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1")), ("maximum", Value::n("500"))])), ("offset", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("0"))])), ("status", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该状态的记录：active 或 deleted"))])), ("kind", obj(vec![("type", Value::s("string")), ("description", Value::s("只看该 KIND 的记录，如 DECISION"))])), ("include_deleted", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把软删记录一并列出，可当回收站用"))])), ("full", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时返回完整记录；默认只给 id/title/plane/revision/preview 等定位字段，省约 85% 体积"))]))], vec![]),
         batch_tool("memory_search", "在指定普通记忆平面搜索标题、正文和 read_when。", vec![("root", obj(vec![("type", Value::s("string")), ("description", Value::s("可选：记忆库根。省略时按二进制所在目录→ABOOK_ROOT→~/AgentsBook 自动推导"))])), ("query", obj(vec![("type", Value::s("string"))])), ("plane", obj(vec![("type", Value::s("string"))])), ("limit", obj(vec![("type", Value::s("integer")), ("minimum", Value::n("1"))])), ("field", obj(vec![("type", Value::s("string")), ("description", Value::s("限定检索字段：all/title/content/read-when"))])), ("regex", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时把 query 当正则"))])), ("full", obj(vec![("type", Value::s("boolean")), ("description", Value::s("true 时返回完整记录；默认只给 id/title/plane/revision/preview，省约 85% 体积"))]))], vec![Value::s("query")]),
@@ -746,9 +748,10 @@ fn valid_resource_segment(s: &str) -> bool {
 
 fn prompts_list(_legacy: bool) -> Value {
     let names = [
+        ("memory-curation", "人工或外部计划任务显式触发的三阶段记忆整理"),
         ("memory-first", "在回答依赖历史信息时先读取记忆"),
-        ("memory-write", "把明确的记忆请求写入指定平面"),
         ("memory-maintenance", "批量预览、应用和核对记忆维护"),
+        ("memory-write", "把明确的记忆请求写入指定平面"),
         ("skill-authoring", "读取 Skill 规范并进行 Skill 工作"),
         ("spec-lookup", "按主题读取内置规范"),
         ("system-update", "通过一次工具调用完成系统更新"),
@@ -763,9 +766,10 @@ fn prompts_list(_legacy: bool) -> Value {
 fn prompts_get(req: &Value, _legacy: bool) -> Value {
     let name = req.get("params").and_then(|p| p.str("name")).unwrap_or("");
     let text = match name {
-        "memory-first" => "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_context 或 memory_recall，再回答。",
-        "memory-write" => "用户明确要求记住、保存、以后记得、加入画像或作为规则时，在本轮调用 memory_write。",
-        "memory-maintenance" => "一次维护多条记录使用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令。",
+        "memory-curation" => "整理记忆只能由人类明确调用或外部计划任务明确触发，不能因条目变多而自发运行；按三阶段执行：拆分 soul/profile/explicit 中异常大或放错层的内容，梳理 rules/long_term/episodic 的矛盾重复和废话，再从稳定结论反哺 soul/profile。整理下三层时改标题，但标题只概括记忆在讲什么，不替 AI 判断用途。",
+        "memory-first" => "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。",
+        "memory-write" => "soul=AI自身稳定身份/风格/行为原则；profile=用户画像/稳定环境事实；explicit 只用于用户明确说‘记住/记下来/你记住’的短小关键点或决策。泛称‘沉淀记忆’时把完整经历写入 long_term/episodic，不默认写 explicit；同轮有明确短点和完整经过时分别写入两个平面。只有用户明确要求记住整个经过/整份对象时才把完整内容放进 explicit。",
+        "memory-maintenance" => "批量维护用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令；只有人类明确调用或外部计划任务明确发出整理指令时才执行记忆整理。",
         "skill-authoring" => "先调用 skill_list/skill_read，再读取 skill 规范并执行 Skill 工作。",
         "spec-lookup" => "需要规则全文时调用 spec_list/spec_get，不在提示词中猜规范。",
         "system-update" => "调用 system_update 完成检查、下载、校验、替换、自检和接管。",

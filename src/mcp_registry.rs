@@ -150,9 +150,10 @@ pub const RESOURCE_TEMPLATES: &[ResourceTemplateDefinition] = &[
 
 /// Fixed prompt definitions currently served by `mcp.rs::prompts/list` and get.
 pub const PROMPTS: &[PromptDefinition] = &[
-    PromptDefinition { name: "memory-first", description: "在回答依赖历史信息时先读取记忆", text: "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_context 或 memory_recall，再回答。" },
-    PromptDefinition { name: "memory-maintenance", description: "批量预览、应用和核对记忆维护", text: "一次维护多条记录使用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令。" },
-    PromptDefinition { name: "memory-write", description: "把明确的记忆请求写入指定平面", text: "用户明确要求记住、保存、以后记得、加入画像或作为规则时，在本轮调用 memory_write。" },
+    PromptDefinition { name: "memory-curation", description: "人工或外部任务显式触发的三阶段记忆整理", text: "只有人类明确调用或外部自动任务明确发出整理指令时才整理；先拆分 soul/profile/explicit 中异常大或放错层的内容，再梳理 rules/long_term/episodic 的矛盾、重复和废话，最后从稳定结论反哺 soul/profile。整理下三层时同步改标题，但标题只概括记忆在讲什么，不替 AI 写适用场景或召回判断。" },
+    PromptDefinition { name: "memory-first", description: "在回答依赖历史信息时先读取记忆", text: "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。" },
+    PromptDefinition { name: "memory-maintenance", description: "批量维护工具用法；记忆整理须由人类或外部计划任务显式触发", text: "批量维护多条记录时使用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令。记忆整理只有人类明确调用或外部计划任务明确发出整理指令时才启动，不因条目过多或发现问题而自发运行。" },
+    PromptDefinition { name: "memory-write", description: "把明确记忆请求写入正确平面", text: "soul 只放 AI 自身稳定身份/风格/行为原则；profile 放用户画像/偏好/稳定环境事实；explicit 仅放用户明确说‘记住/记下来/你记住’的短小关键点或决策。泛称‘沉淀记忆’时，完整经验写入 long_term/episodic，不默认放 explicit；若同轮明确要记一个短点并保存完整经过，则分别落两个平面。仅用户明确要求记住整个经过/对象时，explicit 才收完整内容。" },
     PromptDefinition { name: "skill-authoring", description: "读取 Skill 规范并进行 Skill 工作", text: "先调用 skill_list/skill_read，再读取 skill 规范并执行 Skill 工作。" },
     PromptDefinition { name: "spec-lookup", description: "按主题读取内置规范", text: "需要规则全文时调用 spec_list/spec_get，不在提示词中猜规范。" },
     PromptDefinition { name: "system-update", description: "通过一次工具调用完成系统更新", text: "调用 system_update 完成检查、下载、校验、替换、自检和接管。" },
@@ -804,9 +805,10 @@ mod tests {
     fn fixed_resource_prompt_registry_matches_transport_catalog() {
         assert_eq!(RESOURCES.len(), 3);
         assert_eq!(RESOURCE_TEMPLATES.len(), 2);
-        assert_eq!(PROMPTS.len(), 6);
+        assert_eq!(PROMPTS.len(), 7);
         assert!(RESOURCES.iter().any(|resource| resource.uri == "abook://state"));
         assert!(RESOURCE_TEMPLATES.iter().any(|resource| resource.uri_template == "abook://spec/{name}"));
+        assert!(PROMPTS.iter().any(|prompt| prompt.name == "memory-curation"));
         assert!(PROMPTS.iter().any(|prompt| prompt.name == "system-update"));
         assert!(PROMPTS.windows(2).all(|pair| pair[0].name < pair[1].name));
     }

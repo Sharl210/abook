@@ -149,10 +149,14 @@ def test_modern():
         assert templates["resultType"] == "complete"
         prompts = send(p, request("p", "prompts/list"))["result"]
         assert prompts["resultType"] == "complete"
+        prompt_names = {item["name"] for item in prompts["prompts"]}
+        assert "memory-curation" in prompt_names
         prompts_get = send(p, request("pg", "prompts/get", {"name": "memory-first"}))
         assert prompts_get["result"]["messages"][0]["content"]["text"]
-        write_prompt = send(p, request("pgw", "prompts/get", {"name": "memory-write"}))
-        assert "memory_write" in write_prompt["result"]["messages"][0]["content"]["text"]
+        curation_prompt = send(p, request("pgc", "prompts/get", {"name": "memory-curation"}))
+        curation_text = curation_prompt["result"]["messages"][0]["content"]["text"]
+        assert "不能因条目变多" in curation_text and "三阶段" in curation_text
+        assert "标题只概括记忆在讲什么" in curation_text
 
 
         bad_meta = send(p, request("bm", "tools/list", add_meta=False))
