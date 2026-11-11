@@ -87,7 +87,14 @@ def test_modern():
         names = [x["name"] for x in tools["tools"]]
         assert names == sorted(names)
         assert len(names) == len(set(names))
-        assert "memory_index" in names
+        write_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_write")
+        write_description = write_tool["description"]
+        assert "明确说‘记住/记下来/你记住’的短小关键点" in write_description
+        assert "long_term/episodic" in write_description and "不默认把整件事塞进 explicit" in write_description
+        index_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_index")
+        outline_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_outline")
+        assert "全量正文" in index_tool["description"] and "plane、title、content" in index_tool["description"]
+        assert "只返回" in outline_tool["description"] and "标题" in outline_tool["description"]
         assert "abook_route_--help" not in names
         assert "abook_route_-h" not in names
         assert "abook_txn_preview" in names
