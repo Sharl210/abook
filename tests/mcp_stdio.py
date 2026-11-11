@@ -153,10 +153,15 @@ def test_modern():
         assert "memory-curation" in prompt_names
         prompts_get = send(p, request("pg", "prompts/get", {"name": "memory-first"}))
         assert prompts_get["result"]["messages"][0]["content"]["text"]
+        write_prompt = send(p, request("pgw", "prompts/get", {"name": "memory-write"}))
+        write_text = write_prompt["result"]["messages"][0]["content"]["text"]
+        assert "explicit" in write_text and "long_term/episodic" in write_text
         curation_prompt = send(p, request("pgc", "prompts/get", {"name": "memory-curation"}))
         curation_text = curation_prompt["result"]["messages"][0]["content"]["text"]
-        assert "不能因条目变多" in curation_text and "三阶段" in curation_text
-        assert "标题只概括记忆在讲什么" in curation_text
+        assert "三阶段" in curation_text and "标题只概括记忆在讲什么" in curation_text
+        maintenance_prompt = send(p, request("pgm", "prompts/get", {"name": "memory-maintenance"}))
+        maintenance_text = maintenance_prompt["result"]["messages"][0]["content"]["text"]
+        assert "只有人类明确调用" in maintenance_text and "不因条目过多" in maintenance_text
 
 
         bad_meta = send(p, request("bm", "tools/list", add_meta=False))
