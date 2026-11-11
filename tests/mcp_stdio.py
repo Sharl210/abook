@@ -72,6 +72,9 @@ def test_modern():
         assert "mcp stdio --root" in dr["instructions"]
         # 配法只给判断原则，不写死某个宿主的分步手册——写死就会误导别的环境。
         assert "不必套用别的宿主的写法" in dr["instructions"]
+        assert "Aurorix 是这套记忆机制的名称" in dr["instructions"]
+        assert "实际命令行工具叫 `abook`" in dr["instructions"]
+        assert "不要把服务直接命名为“Aurorix memory”" in dr["instructions"]
         assert "明确说“记住/记下来/你记住”的短小关键点" in dr["instructions"]
         assert "泛称“沉淀记忆”" in dr["instructions"]
         assert "整理记忆是被动 Skill" in dr["instructions"]
@@ -163,7 +166,10 @@ def test_modern():
         prompt_names = {item["name"] for item in prompts["prompts"]}
         assert "memory-curation" in prompt_names
         prompts_get = send(p, request("pg", "prompts/get", {"name": "memory-first"}))
-        assert prompts_get["result"]["messages"][0]["content"]["text"]
+        first_text = prompts_get["result"]["messages"][0]["content"]["text"]
+        assert "Aurorix 是记忆机制名" in first_text
+        assert "命令行工具名是 abook" in first_text
+        assert "不要把服务命名为 Aurorix memory" in first_text
         write_prompt = send(p, request("pgw", "prompts/get", {"name": "memory-write"}))
         write_text = write_prompt["result"]["messages"][0]["content"]["text"]
         assert "explicit" in write_text and "long_term/episodic" in write_text

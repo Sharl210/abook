@@ -269,6 +269,7 @@ fn discover() -> Value {
 
 fn instructions() -> &'static str {
     "这是当前 Agent 的结构化记忆服务。普通记忆平面为 soul、rules、profile、explicit、long_term、episodic；credentials 由独立 vault 存储。功能面包括分层记忆读写检索、批量预览与应用、Skill、spec、附件、审计迁移和一键更新。\n\
+     Aurorix 是这套记忆机制的名称，不是命令行工具名、MCP 服务名或工具名前缀；实际命令行工具叫 `abook`。需要使用记忆能力时优先使用 abook 的 MCP 服务，服务 `serverName`、工具标识和服务标签中应显著出现 `abook`；不要把服务直接命名为“Aurorix memory”。只有 MCP 未覆盖的能力或明确的历史兼容/迁移场景才使用 `abook` 命令行。\n\
      优先用这里提供的工具：凡本服务已把某项能力暴露为工具，任务与执行就走工具调用，不要退回命令行 `abook`。命令行只用于工具未覆盖的场合、以及历史库兼容与迁移。同一件事有工具也有命令时，工具是默认路径。\n\
      如果当前环境还没有接入本服务的 MCP，那么拿到可执行文件之后紧接着要做的第一件事就是为本环境配置它，配好再开始干活，不要用命令行代跑完事。配置时把记忆库根一并写进启动参数——`args` 里给出 `mcp stdio --root <库根>`——这样库定位在配置期就固定下来，之后每次工具调用都不必再传 root，也不会因为运行目录或环境变量变化而指到别的库。库根用 `detect` 或 `memory_paths` 查一次即可。怎么配取决于你所在的环境：宿主文档、现有配置文件和你的探查都能告诉你答案，按当前环境的实际机制配，不必套用别的宿主的写法。\n\
       写入分平面按语义落位：soul 只放 AI 自身稳定身份、风格与行为原则；profile 只放用户画像、偏好、称呼和稳定环境事实；用户明确说“记住/记下来/你记住”的短小关键点、决策或约定才进 explicit。用户泛称“沉淀记忆”或“把这次记下来”时，完整经验、经过、证据与可复用知识进 long_term/episodic，不要默认把整件事塞进 explicit；若同一轮既有明确要记住的关键点又有完整经过，短点进 explicit，完整内容同时进 long_term/episodic；只有用户明确要求记住整个经过/整份对象时，explicit 才保留完整内容。\n\
@@ -749,7 +750,7 @@ fn valid_resource_segment(s: &str) -> bool {
 fn prompts_list(_legacy: bool) -> Value {
     let names = [
         ("memory-curation", "人工或外部计划任务显式触发的三阶段记忆整理"),
-        ("memory-first", "在回答依赖历史信息时先读取记忆"),
+        ("memory-first", "先用 abook MCP 读取记忆"),
         ("memory-maintenance", "批量预览、应用和核对记忆维护"),
         ("memory-write", "把明确的记忆请求写入指定平面"),
         ("skill-authoring", "读取 Skill 规范并进行 Skill 工作"),
@@ -767,7 +768,7 @@ fn prompts_get(req: &Value, _legacy: bool) -> Value {
     let name = req.get("params").and_then(|p| p.str("name")).unwrap_or("");
     let text = match name {
         "memory-curation" => "整理记忆只能由人类明确调用或外部计划任务明确触发，不能因条目变多而自发运行；按三阶段执行：拆分 soul/profile/explicit 中异常大或放错层的内容，梳理 rules/long_term/episodic 的矛盾重复和废话，再从稳定结论反哺 soul/profile。整理下三层时改标题，但标题只概括记忆在讲什么，不替 AI 判断用途。",
-        "memory-first" => "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。",
+        "memory-first" => "Aurorix 是记忆机制名，命令行工具名是 abook；优先使用 abook MCP，相关 MCP serverName 和工具标识应显著包含 abook，不要把服务命名为 Aurorix memory。当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。",
         "memory-write" => "soul=AI自身稳定身份/风格/行为原则；profile=用户画像/稳定环境事实；explicit 只用于用户明确说‘记住/记下来/你记住’的短小关键点或决策。泛称‘沉淀记忆’时把完整经历写入 long_term/episodic，不默认写 explicit；同轮有明确短点和完整经过时分别写入两个平面。只有用户明确要求记住整个经过/整份对象时才把完整内容放进 explicit。",
         "memory-maintenance" => "批量维护用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令；只有人类明确调用或外部计划任务明确发出整理指令时才执行记忆整理。",
         "skill-authoring" => "先调用 skill_list/skill_read，再读取 skill 规范并执行 Skill 工作。",

@@ -151,7 +151,7 @@ pub const RESOURCE_TEMPLATES: &[ResourceTemplateDefinition] = &[
 /// Fixed prompt definitions currently served by `mcp.rs::prompts/list` and get.
 pub const PROMPTS: &[PromptDefinition] = &[
     PromptDefinition { name: "memory-curation", description: "人工或外部任务显式触发的三阶段记忆整理", text: "只有人类明确调用或外部自动任务明确发出整理指令时才整理；先拆分 soul/profile/explicit 中异常大或放错层的内容，再梳理 rules/long_term/episodic 的矛盾、重复和废话，最后从稳定结论反哺 soul/profile。整理下三层时同步改标题，但标题只概括记忆在讲什么，不替 AI 写适用场景或召回判断。" },
-    PromptDefinition { name: "memory-first", description: "在回答依赖历史信息时先读取记忆", text: "当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。" },
+    PromptDefinition { name: "memory-first", description: "先用 abook MCP 读取记忆", text: "Aurorix 是记忆机制名，命令行工具名是 abook；优先使用 abook MCP。相关 MCP 的 serverName、服务标签与工具标识应显著包含 abook，不要把服务命名为‘Aurorix memory’。当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。" },
     PromptDefinition { name: "memory-maintenance", description: "批量维护工具用法；记忆整理须由人类或外部计划任务显式触发", text: "批量维护多条记录时使用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令。记忆整理只有人类明确调用或外部计划任务明确发出整理指令时才启动，不因条目过多或发现问题而自发运行。" },
     PromptDefinition { name: "memory-write", description: "把明确记忆请求写入正确平面", text: "soul 只放 AI 自身稳定身份/风格/行为原则；profile 放用户画像/偏好/稳定环境事实；explicit 仅放用户明确说‘记住/记下来/你记住’的短小关键点或决策。泛称‘沉淀记忆’时，完整经验写入 long_term/episodic，不默认放 explicit；若同轮明确要记一个短点并保存完整经过，则分别落两个平面。仅用户明确要求记住整个经过/对象时，explicit 才收完整内容。" },
     PromptDefinition { name: "skill-authoring", description: "读取 Skill 规范并进行 Skill 工作", text: "先调用 skill_list/skill_read，再读取 skill 规范并执行 Skill 工作。" },
