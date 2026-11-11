@@ -90,7 +90,7 @@ def test_modern():
         write_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_write")
         write_description = write_tool["description"]
         assert "明确说‘记住/记下来/你记住’的短小关键点" in write_description
-        assert "long_term/episodic" in write_description and "不默认把整件事塞进 explicit" in write_description
+        assert "long_term/episodic" in write_description and "不要默认把整件事塞进 explicit" in write_description
         index_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_index")
         outline_tool = next(tool for tool in tools["tools"] if tool["name"] == "memory_outline")
         assert "全量正文" in index_tool["description"] and "plane、title、content" in index_tool["description"]
