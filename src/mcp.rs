@@ -769,7 +769,7 @@ fn prompts_get(req: &Value, _legacy: bool) -> Value {
     let name = req.get("params").and_then(|p| p.str("name")).unwrap_or("");
     let text = match name {
         "memory-curation" => "整理记忆只能由人类明确调用或外部计划任务明确触发，不能因条目变多而自发运行；按三阶段执行：拆分 soul/profile/explicit 中异常大或放错层的内容，梳理 rules/long_term/episodic 的矛盾重复和废话，再从稳定结论反哺 soul/profile。整理下三层时改标题，但标题只概括记忆在讲什么，不替 AI 判断用途。",
-        "memory-first" => "Aurorix 是记忆机制名，命令行工具名是 abook；优先使用 abook MCP，相关 MCP serverName 和工具标识应显著包含 abook，不要把服务命名为 Aurorix memory。abook 的权威发行源是 https://github.com/Sharl210/abook，Android ARM64 资产名为 abook-aarch64-linux-android；不要安装 npm 或 agentbook 上的同名无关包。当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。,
+        "memory-first" => "Aurorix 是记忆机制名，命令行工具名是 abook；优先使用 abook MCP，相关 MCP serverName 和工具标识应显著包含 abook，不要把服务命名为 Aurorix memory。abook 的权威发行源是 https://github.com/Sharl210/abook，Android ARM64 资产名为 abook-aarch64-linux-android；不要安装 npm 或 agentbook 上的同名无关包。当回答可能依赖历史事实、偏好、项目状态或既有经验时，先调用 memory_index 与 memory_outline，再按话题召回正文。",
         "memory-write" => "soul=AI自身稳定身份/风格/行为原则；profile=用户画像/稳定环境事实；explicit 只用于用户明确说‘记住/记下来/你记住’的短小关键点或决策。泛称‘沉淀记忆’时把完整经历写入 long_term/episodic，不默认写 explicit；同轮有明确短点和完整经过时分别写入两个平面。只有用户明确要求记住整个经过/整份对象时才把完整内容放进 explicit。",
         "memory-maintenance" => "批量维护用 memory_batch_preview 和 memory_batch_apply，不逐条拼接 shell 命令；只有人类明确调用或外部计划任务明确发出整理指令时才执行记忆整理。",
         "skill-authoring" => "先调用 skill_list/skill_read，再读取 skill 规范并执行 Skill 工作。",
@@ -988,19 +988,44 @@ fn write_body_temp(text: &str) -> std::io::Result<std::path::PathBuf> {
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "临时文件名冲突重试达到上限"))
 }
 fn as_string(v: &Value) -> Option<&str> { match v { Value::String(s) => Some(s), _ => None } }
-/// 工具成功返回：**只给一份数据**。
-///
-/// 以前每个结果同时给 `content.text` 与 `structuredContent`，两者是同一份输出的
-/// 两个完整副本——一次 memory_search 三万字，其中一半纯属重复；列表类更糟，每条
-/// 记录的完整正文都出现两次。MCP 客户端读哪个都行，给一份就够。
+/// 结构化结果同时提供文本镜像，兼容只读取 `content` 的 MCP 客户端。
+/// 仅保留 structuredContent 会让成功结果和 CLI 错误在这类客户端中都变成空返回。
+/// 原生文本错误分支不经过这里，保持原有 content，不重复包装。
 fn tool_ok(data: Value) -> Value { tool_result(data, false) }
 
 fn tool_result(payload: Value, is_error: bool) -> Value {
+    let text = if is_error {
+        tool_error_text(&payload)
+    } else {
+        mcp_json::stringify(&payload)
+    };
     obj(vec![
-        ("content", Value::arr(vec![])),
+        ("content", Value::arr(vec![obj(vec![
+            ("type", Value::s("text")),
+            ("text", Value::s(text)),
+        ])])),
         ("structuredContent", payload),
         ("isError", Value::b(is_error)),
     ])
+}
+
+fn tool_error_text(payload: &Value) -> String {
+    if let Some(error) = payload.get("error") {
+        if let Value::Object(fields) = error {
+            let tag = fields.get("tag").and_then(as_string).unwrap_or("");
+            let message = fields.get("message").and_then(as_string).unwrap_or("");
+            if !tag.is_empty() && !message.is_empty() {
+                return format!("[{tag}] {message}");
+            }
+            if !message.is_empty() {
+                return message.to_string();
+            }
+        }
+    }
+    if let Some(message) = payload.get("message").and_then(as_string) {
+        return message.to_string();
+    }
+    mcp_json::stringify(payload)
 }
 
 fn complete(v: Value) -> Value {
@@ -1034,6 +1059,13 @@ fn legacy_result(v: Value, legacy: bool) -> Value {
             m.remove("resultType");
             m.remove("ttlMs");
             m.remove("cacheScope");
+            // The 2025-11-25 transport models structuredContent as an object;
+            // the 2026-07-28 version allows any JSON value. Keep backward
+            // compatible text for arrays/scalars, but don't emit an invalid
+            // structuredContent shape to clients that negotiated the old version.
+            if !matches!(m.get("structuredContent"), Some(Value::Object(_))) {
+                m.remove("structuredContent");
+            }
             Value::Object(m)
         }
         other => other,
@@ -1046,6 +1078,68 @@ fn write_legacy_initialize(w: &mut impl Write, id: Value) { let r = obj(vec![("p
 
 #[cfg(test)]
 mod consistency_tests {
+    use super::*;
+
+    #[test]
+    fn structured_results_have_a_lossless_text_mirror() {
+        for payload in [
+            Value::Null, Value::b(false), Value::n("0"), Value::s("第一行\n第二行 😀"),
+            Value::arr(vec![]), obj(vec![]),
+            Value::arr(vec![obj(vec![("content", Value::s("正文"))])]),
+        ] {
+            let result = tool_result(payload.clone(), false);
+            let blocks = result.array("content").unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].str("type"), Some("text"));
+            let text = blocks[0].str("text").unwrap();
+            assert!(!text.is_empty());
+            assert_eq!(mcp_json::parse(text).unwrap(), payload);
+            assert_eq!(result.get("structuredContent"), Some(&payload));
+            assert_eq!(result.bool("isError"), Some(false));
+        }
+    }
+
+    #[test]
+    fn cli_errors_keep_tag_and_message_visible() {
+        let payload = obj(vec![("ok", Value::b(false)), ("error", obj(vec![
+            ("tag", Value::s("NOT_FOUND")), ("message", Value::s("没有找到记忆记录: none")),
+            ("exit", Value::n("3")),
+        ]))]);
+        let result = complete(tool_result(payload.clone(), true));
+        assert_eq!(result.bool("isError"), Some(true));
+        assert_eq!(result.get("structuredContent"), Some(&payload));
+        assert_eq!(result.array("content").unwrap().len(), 1);
+        assert_eq!(result.array("content").unwrap()[0].str("text"), Some("[NOT_FOUND] 没有找到记忆记录: none"));
+        for payload in [obj(vec![]), obj(vec![("stderr", Value::s("执行失败")), ("exit", Value::n("6"))])] {
+            let result = tool_result(payload.clone(), true);
+            let text = result.array("content").unwrap()[0].str("text").unwrap();
+            assert_eq!(mcp_json::parse(text).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn legacy_protocol_omits_non_object_structured_content() {
+        let array = tool_ok(Value::arr(vec![Value::s("one")]));
+        let modern = legacy_result(array.clone(), false);
+        assert!(matches!(modern.get("structuredContent"), Some(Value::Array(values)) if values == &[Value::s("one")]));
+        let legacy = legacy_result(array, true);
+        assert!(legacy.get("structuredContent").is_none());
+        assert_eq!(legacy.array("content").unwrap()[0].str("text"), Some("[\"one\"]"));
+
+        let object = tool_ok(obj(vec![("value", Value::s("one"))]));
+        let legacy_object = legacy_result(object, true);
+        assert_eq!(legacy_object.get("structuredContent").and_then(|v| v.str("value")), Some("one"));
+    }
+
+    #[test]
+    fn native_text_error_is_not_duplicated() {
+        let result = direct_memory_call("memory_read", &obj(vec![]));
+        assert_eq!(result.bool("isError"), Some(true));
+        assert_eq!(result.array("content").unwrap().len(), 1);
+        assert!(!result.array("content").unwrap()[0].str("text").unwrap().is_empty());
+        assert!(result.get("structuredContent").is_none());
+    }
+
     #[test]
     fn memory_tools_all_reachable() {
         let problems = super::assert_memory_tools_consistent();

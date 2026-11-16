@@ -486,7 +486,12 @@ fn build_schema(
         let ty = if variadic { "array" } else { "string" };
         let mut schema = vec![("type", Value::s(ty))];
         if variadic { schema.push(("items", object(vec![("type", Value::s("string"))]))); }
-        schema.push(("description", Value::s(format!("CLI 位置参数 {}", index + 1))));
+        let description = if command == "describe" && index == 0 {
+            "要查询参数契约的命令名；CLI 用法为 `abook describe <命令>`。MCP 参数字段名是 arg_1，不是 _arg_1；例如 {\"arg_1\":\"state\"}。".to_string()
+        } else {
+            format!("CLI 位置参数 {}", index + 1)
+        };
+        schema.push(("description", Value::s(description)));
         properties.insert(property.clone(), object(schema));
         if is_required { required.push(Value::s(property.clone())); }
         bindings.push(ArgumentBinding { property, target: BindingTarget::Positional(index) });

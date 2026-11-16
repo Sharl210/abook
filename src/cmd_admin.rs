@@ -338,6 +338,20 @@ OPERATION={}\nKIND={}\nLIBRARY={}\nTIME={}\nTARGET={}\nSCOPE={}\nSUMMARY={}\n[/C
 
 /// Ensure a library skeleton exists.
 pub fn init_book(root: &Path) -> R<Vec<String>> {
+    // `memory init` 建立的六平面库与旧版 init 的 canonical/candidate 布局互斥。
+    // 旧实现没有先识别 marker/planes，直接把旧骨架写入新库；之后
+    // memory_plane::verify_layout 会把 canonical 等目录判为完整性错误。
+    // 在任何写入前拒绝这条混用路径，保护已有记录；调用方应使用 `memory` 路由。
+    for name in [crate::memory_plane::LAYOUT_MARKER, "planes"] {
+        match std::fs::symlink_metadata(root.join(name)) {
+            Ok(_) => return Err(EE::Blocked(format!(
+                "目标目录含六平面记忆库标记或 planes，拒绝旧版 init：{}；请使用 `abook memory init --root <库根>`，不要混用两种布局",
+                root.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
     let mut made = Vec::new();
     for d in [
         "canonical/records",

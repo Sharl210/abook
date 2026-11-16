@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Wire-level tests for the single-binary abook MCP stdio transport."""
+import hashlib
 import json
 import os
 import shutil
@@ -40,7 +41,28 @@ def send(proc, payload, response=True):
     assert line, "MCP server closed stdout before replying"
     obj = json.loads(line)
     assert obj.get("jsonrpc") == "2.0", obj
+    if payload.get("method") == "tools/call" and "result" in obj:
+        assert_tool_content(obj["result"])
     return obj
+
+
+def assert_tool_content(result):
+    """模拟只读 content 的客户端，同时核对结构化结果未丢失。"""
+    blocks = result.get("content")
+    assert isinstance(blocks, list) and blocks, result
+    text_blocks = [block["text"] for block in blocks if block.get("type") == "text"]
+    assert text_blocks and all(isinstance(text, str) and text for text in text_blocks), result
+    if "structuredContent" in result:
+        if not result.get("isError"):
+            assert len(text_blocks) == 1, result
+            assert json.loads(text_blocks[0]) == result["structuredContent"], result
+        else:
+            structured = result["structuredContent"]
+            error = structured.get("error", {}) if isinstance(structured, dict) else {}
+            if isinstance(error, dict):
+                for key in ("tag", "message"):
+                    if error.get(key):
+                        assert error[key] in "\n".join(text_blocks), result
 
 
 def request(i, method, params=None, version=MODERN, add_meta=True):
@@ -140,6 +162,19 @@ def test_modern():
         registry = next(tool for tool in tools["tools"] if tool["name"] == "abook_attach_add")
         assert "command" not in registry["inputSchema"]["properties"]
         assert registry["inputSchema"]["additionalProperties"] is False
+        describe = next(tool for tool in tools["tools"] if tool["name"] == "abook_describe")
+        describe_properties = describe["inputSchema"]["properties"]
+        assert "arg_1" in describe_properties, describe
+        assert "_arg_1" not in describe_properties, describe
+        assert "abook describe <命令>" in describe_properties["arg_1"]["description"], describe
+        assert "MCP 参数字段名是 arg_1" in describe_properties["arg_1"]["description"], describe
+        describe_result = send(p, request("describe-state", "tools/call", {"name": "abook_describe", "arguments": {"arg_1": "state"}}))
+        assert describe_result["result"]["isError"] is False, describe_result
+        describe_structured = describe_result["result"]["structuredContent"]
+        assert describe_structured["command"] == "state", describe_structured
+        assert json.loads(describe_result["result"]["content"][0]["text"]) == describe_structured, describe_result
+        describe_bad_arg = send(p, request("describe-bad-arg", "tools/call", {"name": "abook_describe", "arguments": {"_arg_1": "state"}}))
+        assert describe_bad_arg["error"]["code"] == -32602, describe_bad_arg
 
         resources = send(p, request("r", "resources/list"))["result"]
         assert resources["resultType"] == "complete"
@@ -349,6 +384,8 @@ def test_memory_tools():
         empty_index = send(p, request("m0-index", "tools/call", {"name": "memory_index", "arguments": {"root": empty_root}}))
         assert empty_index["result"]["isError"] is False, empty_index
         assert empty_index["result"]["structuredContent"] == []
+        assert len(empty_index["result"]["content"]) == 1, empty_index
+        assert json.loads(empty_index["result"]["content"][0]["text"]) == []
         empty_outline = send(p, request("m0-outline", "tools/call", {"name": "memory_outline", "arguments": {"root": empty_root}}))
         assert empty_outline["result"]["isError"] is False, empty_outline
         assert empty_outline["result"]["structuredContent"] == {}
@@ -397,6 +434,8 @@ def test_memory_tools():
         assert listed_all["result"]["structuredContent"]["total"] == 5
         bad_index_args = send(p, request("m1-index-bad", "tools/call", {"name": "memory_index", "arguments": {"root": root, "plane": "bogus"}}))
         assert bad_index_args["result"]["isError"] is True, bad_index_args
+        assert bad_index_args["result"]["content"], bad_index_args
+        assert "plane" in bad_index_args["result"]["content"][0]["text"], bad_index_args
         bad_outline_args = send(p, request("m1-outline-bad", "tools/call", {"name": "memory_outline", "arguments": {"root": root, "unexpected": True}}))
         assert bad_outline_args["result"]["isError"] is True, bad_outline_args
         read = send(p, request("m2", "tools/call", {"name": "memory_read", "arguments": {"root": root, "id": record["id"]}}))
@@ -856,6 +895,132 @@ def test_batch_preview_by_record_ids():
         shutil.rmtree(root)
 
 
+def test_content_only_clients():
+    """现代/旧协议的成功、空数据、结构化错误和原生错误都必须有可读文本。"""
+    read_only = [
+        ("memory_index", {}), ("memory_outline", {}), ("memory_context", {}),
+        ("memory_paths", {}), ("memory_list", {}),
+        ("memory_search", {"query": "正文"}), ("memory_recall", {"query": "正文"}),
+        ("memory_grep", {"pattern": "正文"}), ("memory_trash", {}), ("memory_export", {}),
+        ("memory_help", {}), ("spec_list", {}), ("skill_list", {}),
+        ("abook_state", {}), ("abook_stats", {}), ("abook_paths", {}),
+        ("abook_detect", {}), ("abook_version", {}), ("abook_help", {}),
+        ("abook_commands", {}), ("abook_describe", {"arg_1": "state"}),
+        ("abook_index", {}), ("abook_atlas", {}), ("abook_map", {}),
+        ("abook_tree", {}), ("abook_recent", {}), ("abook_log", {}),
+        ("abook_budget", {}), ("abook_audit", {}), ("abook_lint", {}),
+        ("abook_doctor", {}), ("abook_refs", {}), ("abook_vault_list", {}),
+        ("abook_vault_ledger", {}), ("abook_vault_names", {}),
+        ("abook_skill_list", {}), ("abook_skill_guide", {}), ("abook_attach_guide", {}),
+    ]
+    for legacy in (False, True):
+        with tempfile.TemporaryDirectory(prefix="abook-content-only-") as root:
+            p = start(["mcp", "stdio", "--root", root])
+            try:
+                if legacy:
+                    send(p, {"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": {
+                        "protocolVersion": LEGACY, "capabilities": {}, "clientInfo": CLIENT,
+                    }})
+                    send(p, {"jsonrpc": "2.0", "method": "notifications/initialized"}, response=False)
+                else:
+                    send(p, request("discover", "server/discover", add_meta=False))
+
+                def call(name, arguments=None):
+                    response = send(p, request(name, "tools/call", {
+                        "name": name, "arguments": arguments or {},
+                    }, add_meta=not legacy))
+                    assert "error" not in response, response
+                    result = response["result"]
+                    assert_tool_content(result)
+                    if legacy:
+                        assert "resultType" not in result, result
+                    return result
+
+                initialized = call("memory_init")
+                assert not initialized["isError"], initialized
+                vault = call("abook_vault_put", {
+                    "ident": "content-only-fixture", "purpose": "MCP text compatibility test",
+                    "body": "temporary test value",
+                })
+                assert not vault["isError"], vault
+                for name, arguments in read_only:
+                    # 本次检查兼容性传输；旧布局专用读入口可能对六平面返回工具错误，
+                    # 但也必须给出错误文本而不是空 content。
+                    if name in ("skill_list", "abook_skill_list"):
+                        arguments = {**arguments, "root": root}
+                    call(name, arguments)
+                empty = call("memory_index")
+                assert json.loads(empty["content"][0]["text"]) == [], empty
+                if legacy:
+                    assert "structuredContent" not in empty, empty
+                else:
+                    assert empty["structuredContent"] == [], empty
+                written = call("memory_write", {"plane": "profile", "title": "返回测试", "content": "多行正文\n第二行 😀"})
+                assert not written["isError"], written
+                record = written["structuredContent"]
+                read = call("memory_read", {"id": record["id"]})
+                assert json.loads(read["content"][0]["text"])["content"] == record["content"], read
+                # 这个工具走 CLI 子进程的结构化错误，不是 direct_memory_call 的纯文本分支。
+                error = call("abook_get", {"record": "none"})
+                assert error["isError"] is True, error
+                assert error["structuredContent"]["error"]["tag"] == "NOT_FOUND", error
+                assert "NOT_FOUND" in error["content"][0]["text"], error
+                native_error = call("memory_read", {"id": "bad/id"})
+                assert native_error["isError"] is True, native_error
+                assert len(native_error["content"]) == 1, native_error
+                assert "非法" in native_error["content"][0]["text"], native_error
+            finally:
+                p.stdin.close()
+                p.wait(timeout=10)
+            assert p.returncode == 0, p.stderr.read()
+
+
+def test_legacy_init_refuses_six_plane_library():
+    """旧版 init 必须在写入前识别并保护六平面库。"""
+    root = tempfile.mkdtemp(prefix="abook-init-layout-guard-")
+    try:
+        init = subprocess.run([BIN, "memory", "init", "--root", root], text=True, encoding="utf-8", capture_output=True)
+        assert init.returncode == 0, init.stderr
+        write = subprocess.run([
+            BIN, "memory", "write", "--root", root, "--plane", "profile",
+            "--title", "保留记录", "--content", "六平面正文",
+        ], text=True, encoding="utf-8", capture_output=True)
+        assert write.returncode == 0, write.stderr
+        before = subprocess.run([BIN, "memory", "index", "--root", root], text=True, encoding="utf-8", capture_output=True)
+        assert before.returncode == 0, before.stderr
+        before_value = json.loads(before.stdout)
+        assert any(item["title"] == "保留记录" and item["content"] == "六平面正文" for item in before_value), before_value
+
+        def snapshot_tree():
+            snapshot = {}
+            for current, dirs, files in os.walk(root):
+                rel_dir = os.path.relpath(current, root)
+                for name in dirs:
+                    rel_path = os.path.normpath(os.path.join(rel_dir, name))
+                    snapshot["dir:" + rel_path] = None
+                for name in files:
+                    path = os.path.join(current, name)
+                    rel_path = os.path.normpath(os.path.join(rel_dir, name))
+                    with open(path, "rb") as handle:
+                        snapshot["file:" + rel_path] = hashlib.sha256(handle.read()).hexdigest()
+            return snapshot
+
+        before_tree = snapshot_tree()
+        legacy_init = subprocess.run([BIN, "init", "--root", root], text=True, encoding="utf-8", capture_output=True)
+        assert legacy_init.returncode == 4, (legacy_init.returncode, legacy_init.stdout, legacy_init.stderr)
+        assert legacy_init.stderr.startswith("BLOCKED: "), legacy_init.stderr
+        assert "六平面记忆库" in legacy_init.stderr, legacy_init.stderr
+        assert snapshot_tree() == before_tree, "旧 init 不得新增、改写或删除六平面库内任何文件或目录"
+        assert not os.path.exists(os.path.join(root, "canonical")), "旧 init 不应写入 canonical"
+        assert not os.path.exists(os.path.join(root, "Global.md")), "旧 init 不应写入 Global.md"
+        after = subprocess.run([BIN, "memory", "index", "--root", root], text=True, encoding="utf-8", capture_output=True)
+        assert after.returncode == 0, after.stderr
+        after_value = json.loads(after.stdout)
+        assert any(item["title"] == "保留记录" and item["content"] == "六平面正文" for item in after_value), after_value
+    finally:
+        shutil.rmtree(root)
+
+
 def test_detect_ready_when_binary_outside_root():
     """库已初始化就该 ready，不管二进制放在哪。
 
@@ -913,6 +1078,8 @@ if __name__ == "__main__":
     test_batch_tools()
     test_memory_tools()
     test_migrate_tools()
+    test_content_only_clients()
+    test_legacy_init_refuses_six_plane_library()
     test_detect_sees_plane_layout()
     test_plane_layout_diagnostics()
     test_detect_ready_when_binary_outside_root()
@@ -921,4 +1088,4 @@ if __name__ == "__main__":
     test_attach_root_at_config_time()
     test_default_stdio_and_cli_prefix()
     test_eof_and_stdout_purity()
-    print("MCP stdio tests: 14 suites passed")
+    print("MCP stdio tests: 15 suites passed")
