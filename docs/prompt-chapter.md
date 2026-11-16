@@ -220,6 +220,8 @@ memory_export
 
 Aurorix 是记忆机制名称；实际命令行工具名是 `abook`。涉及记忆能力时优先使用 abook MCP，相关 MCP 的 `serverName`、服务标签和工具标识应显著包含 `abook`，不要把服务直接命名为 “Aurorix memory”。
 
+权威发行源固定为 `https://github.com/Sharl210/abook` 及其 Releases 页面；Android ARM64 使用 `abook-aarch64-linux-android`。不要安装 npm 上同名的无关包，也不要把 `agentbook` 当作本工具。下载后核对 Release 摘要，原子安装到 `~/AgentsBook/abook`，并保留旧版本备份。
+
 
 写入落位：`soul` 只放 AI 自身稳定身份、风格和行为原则；`profile` 只放用户画像、偏好、称呼和稳定环境事实；`explicit` 只放用户明确说“记住/记下来/你记住”的短小关键点、决策或约定。泛称“沉淀记忆”时，完整经过、证据和可复用经验写入 `long_term`/`episodic`，不默认写入 `explicit`；同一轮既有明确短点又有完整经过时分别写入两个平面。只有用户明确要求记住整个经过或整份对象时，`explicit` 才保存完整内容。
 
