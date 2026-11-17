@@ -4367,6 +4367,16 @@ fn vet_commit_for_test(name: &str, block: &str) -> Result<(), String> {
 }
 
 pub fn cmd_selftest(a: &crate::util::Args) -> crate::util::R<i32> {
+    // selftest 会启动许多 abook 子进程，并通过 Command::output() 收集它们的
+    // stdout。父进程若运行在 `selftest | tail -3` 中，截断防护沿着 /proc 管道
+    // 链会把这些“给父进程收集的内部管道”误认成外部截断器，于是子进程把结果
+    // 改到 stderr，调用方拿不到预期 stdout，最终把健康用例报成 FAIL。
+    // 当前 selftest 的 stdout 仍由 main 最前面的 guard 保持原有外部防护；这里只
+    // 给内部子进程设置逃生门。真正的 guard 分类/改道探针显式 env_remove，仍按
+    // 真实管道运行，避免把修复写成“跳过测试”。
+    let inherited_guard = std::env::var_os("ABOOK_NO_GUARD");
+    std::env::set_var("ABOOK_NO_GUARD", "1");
+
     // `--only N` 只跑第 N 条用例。
     //
     // 这个参数以前只在帮助示例里出现过，参数表里没有，于是 `selftest --only 1`
@@ -4374,6 +4384,10 @@ pub fn cmd_selftest(a: &crate::util::Args) -> crate::util::R<i32> {
     // 文档就是错的。示例文字也是契约的一部分。
     let only = a.num("only").map(|n| n as usize);
     let (pass, fail, skip, msgs) = run(a.has("verbose") || a.has("all"), only);
+    match inherited_guard {
+        Some(value) => std::env::set_var("ABOOK_NO_GUARD", value),
+        None => std::env::remove_var("ABOOK_NO_GUARD"),
+    }
     // `--json` reports the tally, not the transcript. The per-case lines stay on
     // stderr because they are the human view; a caller that asked for JSON is
     // deciding pass/fail on the counts, and wrapping 145 prose lines into an

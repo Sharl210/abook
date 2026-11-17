@@ -148,6 +148,8 @@ jobs:
         run: cargo build --release
       - name: MCP stdio smoke
         run: python3 tests/mcp_stdio.py target/release/abook
+      - name: selftest 输出管道一致性回归
+        run: python3 tests/selftest_output.py target/release/abook
       - name: 事务回滚原子性回归
         run: python3 tests/txn_rollback_atomicity.py target/release/abook
       - name: MCP 并发响应完整性
