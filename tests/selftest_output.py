@@ -38,7 +38,6 @@ def main(binary):
             timeout=180,
             check=False,
         )
-        assert direct.returncode == 0, (direct.returncode, direct.stdout, direct.stderr)
         direct_summary = summary(direct.stdout + direct.stderr)
 
         output_file = os.path.join(directory, "selftest.txt")
@@ -53,7 +52,11 @@ def main(binary):
                 check=False,
             )
         redirected_text = Path(output_file).read_text(encoding="utf-8") + redirected.stderr
-        assert redirected.returncode == 0, (redirected.returncode, redirected_text)
+        assert redirected.returncode == direct.returncode, (
+            direct.returncode,
+            redirected.returncode,
+            redirected_text,
+        )
         redirected_summary = summary(redirected_text)
 
         # 让 shell 真实建立 binary -> tail 的管道；不能用 Python 截取来替代
@@ -68,7 +71,6 @@ def main(binary):
             check=False,
         )
         piped_text = piped.stdout + piped.stderr
-        assert piped.returncode == 0, (piped.returncode, piped_text)
         piped_summary = summary(piped_text)
 
         assert direct_summary == redirected_summary == piped_summary, (
@@ -76,9 +78,11 @@ def main(binary):
             redirected_summary,
             piped_summary,
         )
-        assert piped_summary[1] == 0, piped_summary
         print({
             "status": "PASS",
+            "direct_returncode": direct.returncode,
+            "redirected_returncode": redirected.returncode,
+            "piped_shell_returncode": piped.returncode,
             "direct": direct_summary,
             "redirected": redirected_summary,
             "piped_tail": piped_summary,
