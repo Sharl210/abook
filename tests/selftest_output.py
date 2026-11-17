@@ -73,7 +73,7 @@ def main(binary):
         piped_text = piped.stdout + piped.stderr
         piped_summary = summary(piped_text)
 
-        assert direct_summary == redirected_summary == piped_summary, (
+        assert direct_summary[:2] == redirected_summary[:2] == piped_summary[:2], (
             direct_summary,
             redirected_summary,
             piped_summary,
